@@ -6,13 +6,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -96,6 +100,40 @@ func TestShareRejectsDuplicateActiveGuestName(t *testing.T) {
 		t.Fatalf("stop returned %d: %s", stopped.Code, stopped.Body.String())
 	}
 	createShareFixture(t, s, path, false, 1)
+}
+
+func TestShareCreateRejectsDuplicatePhysicalResources(t *testing.T) {
+	s, path := newShareFixture(t)
+	separator := string(filepath.Separator)
+	alias := filepath.Dir(path) + separator + "." + separator + filepath.Base(path)
+	saved := "hello\n"
+	body, err := json.Marshal(map[string]any{
+		"guest": "Guest4821", "minutes": 5, "limit": 1,
+		"resources": []shareSelection{
+			{Kind: "file", Path: path},
+			{Kind: "file", Path: alias, Writable: true, SavedContent: &saved},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	s.shareAdmin(response, httptest.NewRequest(http.MethodPost, "https://example.test/api/share", bytes.NewReader(body)))
+	var result struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusBadRequest || result.Error != "duplicate_resource" {
+		t.Fatalf("duplicate resource returned %d, reason %q", response.Code, result.Error)
+	}
+	if len(s.shares.grants) != 0 || len(s.shares.documents) != 0 {
+		t.Fatal("duplicate resource published share or collaboration state")
+	}
+	if _, failure := s.finder.Write(context.Background(), path, "ordinary save\n", nil); failure != nil {
+		t.Fatalf("duplicate resource left the file reserved: %v", failure)
+	}
 }
 
 func TestShareInviteURLsLimitedToRequestedHostView(t *testing.T) {
@@ -330,6 +368,64 @@ func TestShareCollaborationRevisionDedupConflictAndRecovery(t *testing.T) {
 	}
 }
 
+func TestShareCollaborationRejectsUnreloadableEdits(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		changes any
+		code    string
+	}{
+		{"NUL", []any{6, []any{0, "\x00"}}, "invalid_changes"},
+		{"standalone CR", []any{6, []any{0, "a\rb"}}, "invalid_changes"},
+		{"embedded CRLF", []any{6, []any{0, "\r", "end"}}, "invalid_changes"},
+		{"CRLF size", []any{6, []any{0, strings.Repeat("x", shareTextLimit-7), ""}}, "document_too_large"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, path := newShareFixture(t)
+			if err := os.WriteFile(path, []byte("hello\r\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			id, secret, grant := createShareFixture(t, s, path, true, 1)
+			cookie := joinShareFixture(t, s, id, secret)
+			url := "/share/" + id + "/" + grant.Resources[0].ID + "?client=invalid-edit-client"
+			update := map[string]any{"version": 0, "updates": []map[string]any{{"id": "unreloadable-operation", "changes": test.changes}}}
+			if w := shareRequest(s, "POST", url, update, cookie); w.Code != 400 || !strings.Contains(w.Body.String(), test.code) {
+				t.Fatalf("invalid edit: %d %s", w.Code, w.Body.String())
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != "hello\r\n" {
+				t.Fatalf("disk changed: %q %v", data, err)
+			}
+			if doc := grant.Resources[0].document; len(doc.operations) != 0 || doc.Text != "hello\n" {
+				t.Fatalf("rejected edit advanced the revision")
+			}
+			if _, err := os.Stat(s.shareJournalPath(path)); !os.IsNotExist(err) {
+				t.Fatalf("rejected edit touched the recovery journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestShareChatOwnerColorFollowsAuthenticatedRole(t *testing.T) {
+	s, path := newShareFixture(t)
+	id, secret, grant := createNamedShareFixture(t, s, path, "ShareAdmin", false, 1)
+	cookie := joinShareFixture(t, s, id, secret)
+	request := httptest.NewRequest(http.MethodPost, "https://example.test/api/share/chat?id="+id, strings.NewReader(`{"text":"owner"}`))
+	request = request.WithContext(context.WithValue(request.Context(), authContextKey{}, authUser{username: grant.owner, role: "admin"}))
+	response := httptest.NewRecorder()
+	s.shareHostChat(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("owner chat returned %d: %s", response.Code, response.Body.String())
+	}
+	response = shareRequest(s, http.MethodPost, "/share/"+id+"/chat", map[string]any{"text": "guest"}, cookie)
+	var chat struct{ Messages []shareChatMessage }
+	if err := json.Unmarshal(response.Body.Bytes(), &chat); err != nil || response.Code != http.StatusOK || len(chat.Messages) != 2 {
+		t.Fatalf("guest chat returned %d: %s, error %v", response.Code, response.Body.String(), err)
+	}
+	owner, guest := chat.Messages[0], chat.Messages[1]
+	if owner.Name != guest.Name || !owner.Owner || guest.Owner {
+		t.Fatalf("unexpected chat roles: %+v", chat.Messages)
+	}
+}
+
 func TestSharePresenceChoosesOneCursorPerParticipant(t *testing.T) {
 	s, path := newShareFixture(t)
 	id, secret, grant := createShareFixture(t, s, path, true, 2)
@@ -337,10 +433,10 @@ func TestSharePresenceChoosesOneCursorPerParticipant(t *testing.T) {
 	observer := joinShareFixture(t, s, id, secret)
 	resource := grant.Resources[0]
 	endpoint := "/share/" + id + "/" + resource.ID + "?client="
-	post := func(client string, cookie *http.Cookie, offset int, focused bool) []sharePresence {
+	post := func(client string, cookie *http.Cookie, offset int, focused bool, surface string) []sharePresence {
 		t.Helper()
 		w := shareRequest(s, http.MethodPost, endpoint+client, map[string]any{
-			"version": 0, "anchor": offset, "head": offset, "focused": focused,
+			"version": 0, "anchor": offset, "head": offset, "focused": focused, "surface": surface,
 		}, cookie)
 		var result struct{ Presence []sharePresence }
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
@@ -351,17 +447,17 @@ func TestSharePresenceChoosesOneCursorPerParticipant(t *testing.T) {
 	const first = "focused-editor-0001"
 	const second = "background-editor-0002"
 	const viewer = "observing-editor-0003"
-	post(first, guest, 1, true)
-	if own := post(second, guest, 3, false); len(own) != 0 {
+	post(first, guest, 1, true, "view")
+	if own := post(second, guest, 3, false, ""); len(own) != 0 {
 		t.Fatalf("browser sees its other editor as a peer: %+v", own)
 	}
-	if peers := post(viewer, observer, 0, true); len(peers) != 1 || peers[0].Head != 1 {
+	if peers := post(viewer, observer, 0, true, ""); len(peers) != 1 || peers[0].Head != 1 || peers[0].Surface != "view" {
 		t.Fatalf("observer sees wrong focused cursor: %+v", peers)
 	}
-	post(first, guest, 1, false)
-	post(second, guest, 3, true)
-	post(first, guest, 2, false)
-	if peers := post(viewer, observer, 0, true); len(peers) != 1 || peers[0].Head != 3 {
+	post(first, guest, 1, false, "view")
+	post(second, guest, 3, true, "")
+	post(first, guest, 2, false, "view")
+	if peers := post(viewer, observer, 0, true, ""); len(peers) != 1 || peers[0].Head != 3 || peers[0].Surface != "text" {
 		t.Fatalf("background edit displaced the focused cursor: %+v", peers)
 	}
 }
@@ -428,6 +524,174 @@ func TestShareReadOnlyFollowsAuthorizedHostSave(t *testing.T) {
 		t.Fatalf("host save did not reach RO resource: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestShareReadOnlyOwnerCaretUsesSavedRevision(t *testing.T) {
+	s, path := newShareFixture(t)
+	id, secret, grant := createShareFixture(t, s, path, false, 1)
+	resource := grant.Resources[0].ID
+	cookie := joinShareFixture(t, s, id, secret)
+	endpoint := "/share/" + id + "/" + resource
+	post := func(username string) {
+		t.Helper()
+		body := fmt.Sprintf(`[{"grant":%q,"resource":%q,"digest":"%x","anchor":2,"head":4,"surface":"view"}]`,
+			id, resource, sha256.Sum256([]byte("hello\n")))
+		r := httptest.NewRequest("POST", "/api/share/presence", strings.NewReader(body))
+		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, authUser{username: username, role: "admin"}))
+		w := httptest.NewRecorder()
+		s.shareHostPresence(w, r)
+		if w.Code != 200 {
+			t.Fatalf("presence POST: %d %s", w.Code, w.Body.String())
+		}
+	}
+	read := func() []sharePresence {
+		t.Helper()
+		w := shareRequest(s, "GET", endpoint, nil, cookie)
+		var result struct{ Presence []sharePresence }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
+			t.Fatalf("resource GET: %d %s", w.Code, w.Body.String())
+		}
+		return result.Presence
+	}
+	post("OtherAdmin")
+	if got := read(); len(got) != 0 {
+		t.Fatalf("unrelated admin published a caret: %+v", got)
+	}
+	post("ShareAdmin")
+	if got := read(); len(got) != 1 || got[0].Name != "ShareAdmin" || got[0].Anchor != 2 || got[0].Head != 4 || got[0].Surface != "view" {
+		t.Fatalf("saved revision did not show owner caret: %+v", got)
+	}
+	if _, failure := s.finder.Write(context.Background(), path, "different text\n", nil); failure != nil {
+		t.Fatal(failure)
+	}
+	if got := read(); len(got) != 0 {
+		t.Fatalf("saved revision displayed the old caret: %+v", got)
+	}
+}
+
+func TestShareFollowsExternalAtomicSave(t *testing.T) {
+	s, path := newShareFixture(t)
+	readID, readSecret, readGrant := createNamedShareFixture(t, s, path, "Reader", false, 1)
+	editID, editSecret, editGrant := createNamedShareFixture(t, s, path, "Editor", true, 1)
+	readCookie := joinShareFixture(t, s, readID, readSecret)
+	editCookie := joinShareFixture(t, s, editID, editSecret)
+	readURL := "/share/" + readID + "/" + readGrant.Resources[0].ID
+	editURL := "/share/" + editID + "/" + editGrant.Resources[0].ID + "?client=external-edit-client"
+	if err := os.WriteFile(path+".next", []byte("hello AI\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".next", path); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("reader", func(t *testing.T) {
+		if w := shareRequest(s, "GET", readURL, nil, readCookie); w.Code != 200 || !strings.Contains(w.Body.String(), `"text":"hello AI\n"`) {
+			t.Fatalf("reader after replacement: %d %s", w.Code, w.Body.String())
+		}
+	})
+	t.Run("editor", func(t *testing.T) {
+		w := shareRequest(s, "GET", editURL, nil, editCookie)
+		var response struct {
+			Version int
+			Updates []shareOperation
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &response) != nil || response.Version != 1 || len(response.Updates) != 1 {
+			t.Fatalf("editor after replacement: %d %s", w.Code, w.Body.String())
+		}
+		got, _, err := applyShareChanges("hello\n", response.Updates[0].Changes)
+		if err != nil || got != "hello AI\n" {
+			t.Fatalf("external change operation: %q %v", got, err)
+		}
+		update := map[string]any{"version": 1, "updates": []map[string]any{{"id": "edit-after-external-save", "changes": json.RawMessage(`[8,[0,"!"],1]`)}}}
+		if w := shareRequest(s, "POST", editURL, update, editCookie); w.Code != 200 || !strings.Contains(w.Body.String(), `"saved":true`) {
+			t.Fatalf("subsequent edit: %d %s", w.Code, w.Body.String())
+		}
+		if data, err := os.ReadFile(path); err != nil || string(data) != "hello AI!\n" {
+			t.Fatalf("saved content: %q %v", data, err)
+		}
+	})
+	t.Run("conflicting guest draft", func(t *testing.T) {
+		if err := os.WriteFile(path+".next", []byte("external version\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(path+".next", path); err != nil {
+			t.Fatal(err)
+		}
+		update := map[string]any{"version": 2, "updates": []map[string]any{{"id": "edit-conflicting-draft", "changes": json.RawMessage(`[[0,"draft "],10]`)}}}
+		if w := shareRequest(s, "POST", editURL, update, editCookie); w.Code != 200 || !strings.Contains(w.Body.String(), `"paused":"external_change"`) {
+			t.Fatalf("conflict: %d %s", w.Code, w.Body.String())
+		}
+		if data, err := os.ReadFile(path); err != nil || string(data) != "external version\n" {
+			t.Fatalf("external content lost: %q %v", data, err)
+		}
+		if journal, err := os.ReadFile(s.shareJournalPath(path)); err != nil || !bytes.Contains(journal, []byte("draft hello AI!")) {
+			t.Fatalf("guest draft lost: %s %v", journal, err)
+		}
+	})
+}
+
+func TestShareMarkdownImageIsScopedToItsResource(t *testing.T) {
+	s, path := newShareFixture(t)
+	directory := filepath.Join(filepath.Dir(path), "notes")
+	if err := os.Mkdir(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(directory, "2026.md")
+	png := []byte("\x89PNG\r\n\x1a\n")
+	for file, data := range map[string][]byte{
+		path:                                   []byte("![Figure](figure.png)"),
+		filepath.Join(directory, "figure.png"): png,
+		filepath.Join(filepath.Dir(directory), "outside.png"): png,
+	} {
+		if err := os.WriteFile(file, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("../outside.png", filepath.Join(directory, "link.png")); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"guest": "Reader", "minutes": 30, "limit": 1,
+		"resources": []shareSelection{{Kind: "file", Path: path, ImagePaths: []string{"figure.png", "../outside.png", "link.png"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := httptest.NewRecorder()
+	s.shareAdmin(created, httptest.NewRequest("POST", "https://example.test/api/share", bytes.NewReader(body)))
+	var result struct {
+		URL   string
+		Grant shareGrant `json:"share"`
+	}
+	if created.Code != 201 || json.Unmarshal(created.Body.Bytes(), &result) != nil || len(result.Grant.Resources) != 1 {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	resource := result.Grant.Resources[0]
+	route := resource.Assets["figure.png"]
+	if len(resource.Assets) != 1 || !strings.HasPrefix(route, resource.ID+"?image=") {
+		t.Fatalf("unexpected image grants: %v", resource.Assets)
+	}
+	_, secret, _ := strings.Cut(result.URL, "#")
+	cookie := joinShareFixture(t, s, result.Grant.ID, secret)
+	base := "/share/" + result.Grant.ID + "/"
+	if w := shareRequest(s, "GET", base+route, nil, cookie); w.Code != 200 || w.Header().Get("Content-Type") != "image/png" || !bytes.Equal(w.Body.Bytes(), png) {
+		t.Fatalf("image read: %d %s", w.Code, w.Body.String())
+	}
+	if w := shareRequest(s, "GET", base+route, nil, nil); w.Code != 401 {
+		t.Fatalf("unauthenticated image read: %d", w.Code)
+	}
+	if w := shareRequest(s, "GET", base+resource.ID+"?image=outside.png", nil, cookie); w.Code != 404 {
+		t.Fatalf("ungranted image read: %d", w.Code)
+	}
+	removed := httptest.NewRecorder()
+	s.shareAdmin(removed, httptest.NewRequest("PATCH", "https://example.test/api/share?id="+result.Grant.ID,
+		strings.NewReader(`{"revision":1,"resources":[]}`)))
+	if removed.Code != 200 {
+		t.Fatalf("remove Markdown: %d %s", removed.Code, removed.Body.String())
+	}
+	if w := shareRequest(s, "GET", base+route, nil, cookie); w.Code != 404 {
+		t.Fatalf("removed image read: %d", w.Code)
+	}
+}
+
 func TestShareRecoveryAfterRevocationReleasesSaveOwnership(t *testing.T) {
 	s, path := newShareFixture(t)
 	id, secret, g := createShareFixture(t, s, path, true, 1)
@@ -497,14 +761,11 @@ func TestShareTexPublicationUsesActualCompiledRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstSerial := resource.pdfSerial
-	url := "/share/" + id + "/" + resource.ID + "?client=tex-client-123456"
+	guestURL := "/share/" + id + "/" + resource.ID + "?client=tex-client-123456"
 	update := map[string]any{"version": 0, "updates": []map[string]any{{"id": "tex-operation-123456", "changes": json.RawMessage(`[[0,"changed "],6]`)}}}
-	w := shareRequest(s, "POST", url, update, cookie)
+	w := shareRequest(s, "POST", guestURL, update, cookie)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"pdf_stale":true`) || !strings.Contains(w.Body.String(), `"pdf_available":true`) {
 		t.Fatalf("stale publication %d %s", w.Code, w.Body.String())
-	}
-	if len(s.texProgress) != 0 {
-		t.Fatal("guest source edit invoked compiler")
 	}
 	if err := s.sharePublishPDF(tex, "hello\n", []byte("%PDF-1.4\nolder-source")); err != nil {
 		t.Fatal(err)
@@ -515,7 +776,7 @@ func TestShareTexPublicationUsesActualCompiledRevision(t *testing.T) {
 	if err := s.sharePublishPDF(tex, "changed hello\n", []byte("%PDF-1.4\ncurrent")); err != nil {
 		t.Fatal(err)
 	}
-	w = shareRequest(s, "GET", url+"&initial=1", nil, cookie)
+	w = shareRequest(s, "GET", guestURL+"&initial=1", nil, cookie)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"pdf_stale":false`) {
 		t.Fatalf("current publication %d %s", w.Code, w.Body.String())
 	}
@@ -523,10 +784,21 @@ func TestShareTexPublicationUsesActualCompiledRevision(t *testing.T) {
 	if w.Code != 200 || w.Body.String() != "%PDF-1.4\ncurrent" {
 		t.Fatalf("PDF %d %s", w.Code, w.Body.String())
 	}
+	hostPDF := "https://example.test/api/share?pdf=1&path=" + url.QueryEscape(tex)
+	hostPreview := httptest.NewRecorder()
+	s.shareAdmin(hostPreview, httptest.NewRequest("GET", hostPDF, nil))
+	if hostPreview.Code != 200 || hostPreview.Header().Get("Content-Type") != "application/pdf" || hostPreview.Body.String() != w.Body.String() {
+		t.Fatalf("host and guest publication differ: status=%d", hostPreview.Code)
+	}
 	stop := httptest.NewRecorder()
 	s.shareAdmin(stop, httptest.NewRequest("DELETE", "https://example.test/api/share?id="+id, nil))
 	if stop.Code != 200 {
 		t.Fatalf("stop share %d %s", stop.Code, stop.Body.String())
+	}
+	hostPreview = httptest.NewRecorder()
+	s.shareAdmin(hostPreview, httptest.NewRequest("GET", hostPDF, nil))
+	if hostPreview.Code != 404 {
+		t.Fatalf("host PDF survived revocation: status=%d", hostPreview.Code)
 	}
 	id, secret, g = createShareFixture(t, s, tex, false, 1)
 	cookie = joinShareFixture(t, s, id, secret)
@@ -546,8 +818,8 @@ func TestShareTexPublicationUsesActualCompiledRevision(t *testing.T) {
 	if response.Code != 200 {
 		t.Fatalf("permission change %d %s", response.Code, response.Body.String())
 	}
-	url = "/share/" + id + "/" + resource.ID + "?client=tex-client-123456"
-	w = shareRequest(s, "GET", url+"&initial=1", nil, cookie)
+	guestURL = "/share/" + id + "/" + resource.ID + "?client=tex-client-123456"
+	w = shareRequest(s, "GET", guestURL+"&initial=1", nil, cookie)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"pdf_stale":true`) {
 		t.Fatalf("permission upgrade marked an old PDF current: %d %s", w.Code, w.Body.String())
 	}
@@ -906,5 +1178,392 @@ func TestShareGuestWorkspaceUsesHomeAndScopedBootstrap(t *testing.T) {
 	}
 	if strings.Contains(text, "/share-guest.js") || strings.Contains(text, `class="share-workspace"`) {
 		t.Fatal("separate guest workspace remains")
+	}
+}
+
+func TestShareLocalEditorsCollaborateAcrossOwnerTabs(t *testing.T) {
+	s, path := newShareFixture(t)
+	report := func(client string, clean bool) {
+		t.Helper()
+		encoded, err := json.Marshal(map[string]any{"client": client, "files": []map[string]any{{"path": path, "clean": clean}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		s.shareLocalEditing(w, httptest.NewRequest("POST", "https://example.test/api/share/editing", bytes.NewReader(encoded)))
+		if w.Code != 200 || strings.Contains(w.Body.String(), path) {
+			t.Fatalf("editing report %d %s", w.Code, w.Body.String())
+		}
+	}
+	first, second := "chrome-tab-client-123456", "safari-tab-client-123456"
+	const chromePage, safariPage = "chrome-page-0000000001", "safari-page-0000000002"
+	report(first, true)
+	if s.shares.documents[path] != nil {
+		t.Fatal("one tab started a collaboration document")
+	}
+	report(second, false)
+	if s.shares.documents[path] != nil {
+		t.Fatal("a tab with unsaved edits started a collaboration document")
+	}
+	report(second, true)
+	if s.shares.documents[path] == nil {
+		t.Fatal("two saved tabs did not start a collaboration document")
+	}
+	listing := httptest.NewRecorder()
+	s.shareAdmin(listing, httptest.NewRequest("GET", "https://example.test/api/share", nil))
+	var body struct {
+		Documents      []string `json:"documents"`
+		LocalDocuments []string `json:"local_documents"`
+	}
+	if err := json.Unmarshal(listing.Body.Bytes(), &body); err != nil || !slices.Contains(body.Documents, path) || !slices.Contains(body.LocalDocuments, path) {
+		t.Fatalf("listing %v %s", err, listing.Body.String())
+	}
+	update, err := json.Marshal(map[string]any{"version": 0, "updates": []map[string]any{{"id": "chrome-operation-123456", "changes": json.RawMessage(`[[0,"draft "],6]`)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit := httptest.NewRecorder()
+	s.shareHostDocument(edit, httptest.NewRequest("POST", "https://example.test/api/share/document?path="+url.QueryEscape(path)+"&client="+first+"&page="+chromePage, bytes.NewReader(update)))
+	if edit.Code != 200 {
+		t.Fatalf("owner tab edit %d %s", edit.Code, edit.Body.String())
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "draft hello\n" {
+		t.Fatalf("saved %q %v", data, err)
+	}
+	other := httptest.NewRecorder()
+	s.shareHostDocument(other, httptest.NewRequest("GET", "https://example.test/api/share/document?path="+url.QueryEscape(path)+"&client="+second+"&page="+safariPage+"&version=0", nil))
+	if other.Code != 200 || !strings.Contains(other.Body.String(), "chrome-operation-123456") {
+		t.Fatalf("second tab did not receive the edit: %d %s", other.Code, other.Body.String())
+	}
+	presence := func(client, page string, anchor int) []sharePresence {
+		t.Helper()
+		encoded, err := json.Marshal(map[string]any{"version": 1, "anchor": anchor, "head": anchor, "focused": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		s.shareHostDocument(w, httptest.NewRequest("POST", "https://example.test/api/share/document?path="+url.QueryEscape(path)+"&client="+client+"&page="+page, bytes.NewReader(encoded)))
+		var result struct{ Presence []sharePresence }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
+			t.Fatalf("presence %d %s", w.Code, w.Body.String())
+		}
+		return result.Presence
+	}
+	presence(first, chromePage, 2)
+	if peers := presence(first+"-split", chromePage, 4); len(peers) != 0 {
+		t.Fatalf("a second panel in the same page sees its own page as a peer: %+v", peers)
+	}
+	if peers := presence(second, safariPage, 0); len(peers) != 1 || !peers[0].Owner || (peers[0].Head != 2 && peers[0].Head != 4) {
+		t.Fatalf("the owner's other browser does not see this browser's caret: %+v", peers)
+	}
+	if _, failure := s.finder.Write(context.Background(), path, "ordinary save\n", nil); failure == nil {
+		t.Fatal("ordinary save bypassed the collaboration document")
+	}
+	s.shares.mu.Lock()
+	for client, editor := range s.shares.editors[path] {
+		editor.at = editor.at.Add(-2 * shareLocalEditorWindow)
+		s.shares.editors[path][client] = editor
+	}
+	s.sharePruneLocked()
+	s.shares.mu.Unlock()
+	if s.shares.documents[path] != nil {
+		t.Fatal("closed tabs kept the collaboration document")
+	}
+	if _, failure := s.finder.Write(context.Background(), path, "ordinary save\n", nil); failure != nil {
+		t.Fatalf("ownership not released: %v", failure)
+	}
+}
+
+func reportShareLocalEditors(t *testing.T, s *server, path string, clients ...string) {
+	t.Helper()
+	for _, client := range clients {
+		encoded, err := json.Marshal(map[string]any{"client": client, "files": []map[string]any{{"path": path, "clean": true}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		s.shareLocalEditing(w, httptest.NewRequest("POST", "https://example.test/api/share/editing", bytes.NewReader(encoded)))
+		if w.Code != 200 {
+			t.Fatalf("editing report %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
+func shareTeXPending(s *server, path string) bool {
+	s.shares.mu.Lock()
+	doc := s.shares.documents[path]
+	s.shares.mu.Unlock()
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	return doc.texCancel != nil
+}
+
+func TestShareTeXCompilesOnlyForLiveGrants(t *testing.T) {
+	// The only compiler is a stub that never runs: the test holds the compiler lock, so a
+	// scheduled compile stays pending until it is cancelled.
+	tools := t.TempDir()
+	if err := testsupport.WriteExecutable(filepath.Join(tools, "pdflatex"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools)
+	s, path := newShareFixture(t)
+	s.texCompileMu.Lock()
+	t.Cleanup(s.texCompileMu.Unlock)
+	tex := strings.TrimSuffix(path, ".md") + ".tex"
+	if err := os.Rename(path, tex); err != nil {
+		t.Fatal(err)
+	}
+	producer, stopProducer := context.WithCancel(context.Background())
+	s.producerContext = producer
+	t.Cleanup(func() { stopProducer(); s.stopBackgroundWork() })
+	const first, second = "chrome-tab-client-123456", "safari-tab-client-123456"
+	reportShareLocalEditors(t, s, tex, first, second)
+	edit := func(version int, id, insert string) {
+		t.Helper()
+		update, err := json.Marshal(map[string]any{"version": version, "updates": []map[string]any{{"id": id, "changes": json.RawMessage(`[[0,"` + insert + `"],` + strconv.Itoa(len("hello\n")+version*len(insert)) + `]`)}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		s.shareHostDocument(w, httptest.NewRequest("POST", "https://example.test/api/share/document?path="+url.QueryEscape(tex)+"&client="+first, bytes.NewReader(update)))
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"saved":true`) {
+			t.Fatalf("owner edit %d %s", w.Code, w.Body.String())
+		}
+	}
+	edit(0, "local-operation-123456", "a")
+	if shareTeXPending(s, tex) {
+		t.Fatal("an owner-only document scheduled a shared TeX compile")
+	}
+	id, _, _ := createShareFixture(t, s, tex, false, 1)
+	edit(1, "shared-operation-123456", "b")
+	if !shareTeXPending(s, tex) {
+		t.Fatal("a shared document did not schedule its TeX compile")
+	}
+	stop := httptest.NewRecorder()
+	s.shareAdmin(stop, httptest.NewRequest("DELETE", "https://example.test/api/share?id="+id, nil))
+	if stop.Code != 200 {
+		t.Fatalf("stop share %d %s", stop.Code, stop.Body.String())
+	}
+	if shareTeXPending(s, tex) {
+		t.Fatal("the ended share kept its pending TeX compile while the owner tabs stayed open")
+	}
+	createShareFixture(t, s, tex, false, 1)
+	edit(2, "second-share-operation-1", "c")
+	if !shareTeXPending(s, tex) {
+		t.Fatal("a new share did not schedule its TeX compile")
+	}
+	// The compile goroutine clears its own pending state when it exits.
+	stopProducer()
+	s.stopBackgroundWork()
+	if shareTeXPending(s, tex) {
+		t.Fatal("a finished TeX compile still looks pending")
+	}
+}
+
+func TestShareRecoveryCancelsPendingTeX(t *testing.T) {
+	s, path := newShareFixture(t)
+	id, secret, g := createShareFixture(t, s, path, true, 1)
+	cookie := joinShareFixture(t, s, id, secret)
+	if err := os.WriteFile(path, []byte("external\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"version": 0, "updates": []map[string]any{{"id": "retained-operation-1", "changes": json.RawMessage(`[[0,"draft "],6]`)}}}
+	if w := shareRequest(s, "POST", "/share/"+id+"/"+g.Resources[0].ID+"?client=recovery-client-1", body, cookie); w.Code != 200 {
+		t.Fatalf("accept draft %d %s", w.Code, w.Body.String())
+	}
+	stop := httptest.NewRecorder()
+	s.shareAdmin(stop, httptest.NewRequest("DELETE", "https://example.test/api/share?id="+id, nil))
+	if stop.Code != 200 {
+		t.Fatal(stop.Body.String())
+	}
+	s.shares.mu.Lock()
+	doc := s.shares.documents[path]
+	s.shares.mu.Unlock()
+	if doc == nil {
+		t.Fatal("the unsaved draft was not retained for recovery")
+	}
+	pending, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	doc.mu.Lock()
+	doc.texCancel = cancel
+	doc.mu.Unlock()
+	encoded, err := json.Marshal(map[string]any{"path": path, "action": "restore"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := httptest.NewRecorder()
+	s.shareRecovery(recovered, httptest.NewRequest("POST", "https://example.test/api/share/recovery", bytes.NewReader(encoded)))
+	if recovered.Code != 200 || s.shares.documents[path] != nil {
+		t.Fatalf("recovery %d %s", recovered.Code, recovered.Body.String())
+	}
+	if pending.Err() == nil {
+		t.Fatal("recovery deleted the document but left its TeX compile pending")
+	}
+}
+
+func shareDiskReads(s *server, path string) uint64 {
+	s.shares.mu.Lock()
+	doc := s.shares.documents[path]
+	s.shares.mu.Unlock()
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	return doc.diskReads
+}
+
+// Polls must not reread the whole file while it keeps its version, yet must import every
+// external save, including a same-size edit that restores the modification time.
+func TestSharePollSkipsRereadingAnUnchangedFile(t *testing.T) {
+	s, path := newShareFixture(t)
+	// Treat the fixture file as settled; the settle window has its own test.
+	fileSettleClock = func() time.Time { return time.Now().Add(time.Hour) }
+	t.Cleanup(func() { fileSettleClock = time.Now })
+	const first, second = "chrome-tab-client-123456", "safari-tab-client-123456"
+	reportShareLocalEditors(t, s, path, first, second)
+	poll := func(version int) string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		s.shareHostDocument(w, httptest.NewRequest("GET", "https://example.test/api/share/document?path="+url.QueryEscape(path)+"&client="+first+"&version="+strconv.Itoa(version), nil))
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"paused":""`) {
+			t.Fatalf("poll %d %s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	poll(0)
+	if reads := shareDiskReads(s, path); reads != 1 {
+		t.Fatalf("first poll read the file %d times", reads)
+	}
+	poll(0)
+	poll(0)
+	if reads := shareDiskReads(s, path); reads != 1 {
+		t.Fatalf("polls of an unchanged file reread it: %d reads", reads)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The edit lands in a later change-time tick than the recorded version, as a real external
+	// edit after the poll would.
+	advanceChangeTimeTick(t)
+	// Same size, modification time restored: only the change time differs (cp -p, rsync -t).
+	if err := os.WriteFile(path, []byte("HELLO\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if body := poll(0); !strings.Contains(body, `"clientID":"external"`) || !strings.Contains(body, `"version":1`) {
+		t.Fatalf("same-size edit with a restored modification time was not imported: %s", body)
+	}
+}
+
+// A version whose last change is recent is never trusted: a second write in the same
+// timestamp tick could keep every stat field.
+func TestSharePollRereadsAFileThatChangedRecently(t *testing.T) {
+	s, path := newShareFixture(t)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileSettleClock = func() time.Time { return time.Unix(0, fileChangeTimeNS(info)).Add(fileSettleWindow) }
+	t.Cleanup(func() { fileSettleClock = time.Now })
+	const first, second = "chrome-tab-client-123456", "safari-tab-client-123456"
+	reportShareLocalEditors(t, s, path, first, second)
+	for range 3 {
+		w := httptest.NewRecorder()
+		s.shareHostDocument(w, httptest.NewRequest("GET", "https://example.test/api/share/document?path="+url.QueryEscape(path)+"&client="+first+"&version=0", nil))
+		if w.Code != 200 {
+			t.Fatalf("poll %d %s", w.Code, w.Body.String())
+		}
+	}
+	if reads := shareDiskReads(s, path); reads != 3 {
+		t.Fatalf("a freshly written file was read %d times in 3 polls", reads)
+	}
+}
+
+// A read-only share keeps no document open, so prune may drop the document whose save started
+// a compile. The compile keeps running and still publishes while the file holds its source.
+func TestShareTeXPublishesAfterItsDocumentCloses(t *testing.T) {
+	s, path := newShareFixture(t)
+	tex := strings.TrimSuffix(path, ".md") + ".tex"
+	if err := os.Rename(path, tex); err != nil {
+		t.Fatal(err)
+	}
+	_, _, g := createShareFixture(t, s, tex, false, 1)
+	resource := g.Resources[0]
+	file, failure := s.finder.GrantFile(context.Background(), tex)
+	if failure != nil {
+		t.Fatal(failure)
+	}
+	doc, err := newShareDocument(file, shareDiskRecord(tex, []byte("hello\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := file.ReserveWrites(context.Background()); failure != nil {
+		t.Fatal(failure)
+	}
+	pending, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	doc.texCancel = cancel
+	s.shares.mu.Lock()
+	s.shares.documents[tex] = doc
+	s.sharePruneLocked()
+	_, kept := s.shares.documents[tex]
+	s.shares.mu.Unlock()
+	if kept || pending.Err() != nil {
+		t.Fatalf("prune kept=%v cancelled=%v; want the idle document dropped and its compile kept", kept, pending.Err())
+	}
+	s.publishSharedTeX(context.Background(), doc, "hello\n", []byte("%PDF-1.4\ncurrent"))
+	if string(resource.pdf) != "%PDF-1.4\ncurrent" {
+		t.Fatalf("closed document's compile was discarded: %q", resource.pdf)
+	}
+	if err := os.WriteFile(tex, []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.publishSharedTeX(context.Background(), doc, "hello\n", []byte("%PDF-1.4\nstale"))
+	if string(resource.pdf) != "%PDF-1.4\ncurrent" {
+		t.Fatal("a compile of source the file no longer holds was published")
+	}
+}
+
+// advanceChangeTimeTick returns once the filesystem change-time clock has moved past every change
+// made before the call, so the next write cannot share a change time with an earlier one.
+func advanceChangeTimeTick(t *testing.T) {
+	t.Helper()
+	tick := filepath.Join(t.TempDir(), "tick")
+	if err := os.WriteFile(tick, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.Stat(tick)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := os.Chmod(tick, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(tick)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fileChangeTimeNS(info) > fileChangeTimeNS(first) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the change-time clock did not advance")
+		}
+	}
+}
+
+func TestShareTextLineEndingAdmission(t *testing.T) {
+	for _, text := range []string{"a\nb", "a\r\nb"} {
+		if !shareTextSupported([]byte(text)) {
+			t.Fatalf("valid line ending rejected: %q", text)
+		}
+	}
+	for _, text := range []string{"a\rb", "a\r\nb\rc"} {
+		if shareTextSupported([]byte(text)) {
+			t.Fatalf("lone CR admitted: %q", text)
+		}
 	}
 }

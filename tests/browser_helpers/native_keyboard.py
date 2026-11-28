@@ -4,10 +4,13 @@
 
 _MODIFIERS = {'alt': 1, 'ctrl': 2, 'meta': 4, 'shift': 8}
 _SPECIAL_KEYS = {
+    'Backspace': ('Backspace', 8),
+    'Delete': ('Delete', 46),
     'Enter': ('Enter', 13),
     'Home': ('Home', 36),
     'End': ('End', 35),
     'ArrowUp': ('ArrowUp', 38),
+    'ArrowLeft': ('ArrowLeft', 37),
     'ArrowRight': ('ArrowRight', 39),
     '\\': ('Backslash', 220),
     '[': ('BracketLeft', 219),
@@ -56,10 +59,9 @@ def native_logical_text(browser, text):
 
 def native_document_start(browser):
     """Use the OS document-start chord, preserving the editor's native key handling."""
-    if native_editor_modifier(browser) == 'meta':
-        native_logical_key(browser, 'ArrowUp', ['meta'], commands=['moveToBeginningOfDocument'])
-    else:
-        native_logical_key(browser, 'Home', ['ctrl'])
+    modifier = native_editor_modifier(browser)
+    key = 'ArrowUp' if modifier == 'meta' else 'Home'
+    native_logical_key(browser, key, [modifier], commands=['moveToBeginningOfDocument'])
 
 
 def native_document_end(browser):

@@ -2529,7 +2529,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
   await testAsync('Quick Open keeps streamed files matching a trailing-slash path prefix', async () => {
     const api = loadYomux();
     const root = '/home/test/yolomux.dev';
-    const path = `${root}/meetings/yo7110/2026-interview.md`;
+    const path = `${root}/meetings/yo7110/2026-meeting.md`;
     api.setFileExplorerIndexedDirsForTest([root]);
     api.installCommandPaletteFixtureForTest();
     api.setCommandPaletteStateForTest('files', 'meetings/');
@@ -2548,7 +2548,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     stream.push(sseFrame('start', {root, query: 'meetings/'}));
     await flushAsyncWork();
     stream.push(sseFrame('chunk', {files: [
-      {path, name: '2026-interview.md', relative_path: 'meetings/yo7110/2026-interview.md'},
+      {path, name: '2026-meeting.md', relative_path: 'meetings/yo7110/2026-meeting.md'},
       {path: `${root}/meetings.md`, name: 'meetings.md', relative_path: 'meetings.md'},
     ]}));
     await flushAsyncWork();
@@ -2561,7 +2561,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
   await testAsync('Quick Open renders reversed two-segment path matches from the indexed stream', async () => {
     const api = loadYomux();
     const root = '/home/test/yolomux.dev';
-    const path = `${root}/meetings/yo7110/2026-interview.md`;
+    const path = `${root}/meetings/yo7110/2026-meeting.md`;
     const query = '2026/meetings';
     api.setFileExplorerIndexedDirsForTest([root]);
     api.installCommandPaletteFixtureForTest();
@@ -2576,7 +2576,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await flushAsyncWork();
     stream.push(sseFrame('start', {root, query}));
     await flushAsyncWork();
-    stream.push(sseFrame('chunk', {files: [{path, name: '2026-interview.md', relative_path: 'meetings/yo7110/2026-interview.md'}]}));
+    stream.push(sseFrame('chunk', {files: [{path, name: '2026-meeting.md', relative_path: 'meetings/yo7110/2026-meeting.md'}]}));
     await flushAsyncWork();
     assert.ok(api.commandPaletteStateForTest().items.some(item => item.path === path), 'a reverse-ordered path query still displays the backend match');
     stream.close();
@@ -2617,22 +2617,22 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await search;
   });
 
-  await testAsync('Quick Open emits DIS basename matches in the first indexed stream chunk', async () => {
+  await testAsync('Quick Open emits ABC basename matches in the first indexed stream chunk', async () => {
     const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/home/test/yolomux.dev']);
     api.installCommandPaletteFixtureForTest();
-    api.setCommandPaletteStateForTest('files', 'dis');
-    api.setCommandPaletteQueryForTest('dis');
+    api.setCommandPaletteStateForTest('files', 'abc');
+    api.setCommandPaletteQueryForTest('abc');
     const stream = controllableSseResponse();
     api.setFetchForTest(url => {
-      assert.equal(String(url), '/api/fs/search-stream?root=%2Fhome%2Ftest%2Fyolomux.dev&query=dis&limit=500&recursive=true');
+      assert.equal(String(url), '/api/fs/search-stream?root=%2Fhome%2Ftest%2Fyolomux.dev&query=abc&limit=500&recursive=true');
       return Promise.resolve(stream.response);
     });
-    const search = api.refreshFileQuickOpenCandidatesForTest('dis');
+    const search = api.refreshFileQuickOpenCandidatesForTest('abc');
     await flushAsyncWork();
     stream.push(sseFrame('chunk', {files: [
       {path: '/home/test/yolomux.dev/notes/ABC-123.md', name: 'ABC-123.md', relative_path: 'notes/ABC-123.md'},
-      {path: '/home/test/yolomux.dev/archive/d/i/s/notes.md', name: 'notes.md', relative_path: 'archive/d/i/s/notes.md'},
+      {path: '/home/test/yolomux.dev/archive/a/b/c/notes.md', name: 'notes.md', relative_path: 'archive/a/b/c/notes.md'},
     ]}));
     await flushAsyncWork();
     assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/home/test/yolomux.dev/notes/ABC-123.md'], 'a basename match is admitted while a weaker path-fragment row is not');
@@ -2676,22 +2676,22 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
 
   test('Quick Open priority is open tab, remembered file, active AI path, then index', () => {
     const api = loadYomux('', ['1']);
-    const openPath = '/repo/open/DIS-open.md';
-    const rememberedPath = '/repo/history/DIS-history.md';
-    const workingPath = '/repo/current/DIS-current.md';
-    const indexedPath = '/repo/other/DIS-indexed.md';
+    const openPath = '/repo/open/ABC-open.md';
+    const rememberedPath = '/repo/history/ABC-history.md';
+    const workingPath = '/repo/current/ABC-current.md';
+    const indexedPath = '/repo/other/ABC-indexed.md';
     api.setOpenFileStateForTest(openPath, {kind: 'text', content: 'open', original: 'open', editorTabItems: new Set(['file:' + openPath])});
     api.rememberQuickOpenFileForTest(rememberedPath);
     api.setTranscriptInfoForTest('1', {panes: [{active: true, window_active: true, current_path: '/repo/current', process_label: 'codex', command: 'codex'}], selected_pane: {active: true, current_path: '/repo/current'}});
     api.setFileQuickOpenCandidatesForTest('/repo', [
-      {path: openPath, name: 'DIS-open.md', relative_path: 'open/DIS-open.md'},
-      {path: rememberedPath, name: 'DIS-history.md', relative_path: 'history/DIS-history.md'},
-      {path: workingPath, name: 'DIS-current.md', relative_path: 'current/DIS-current.md'},
-      {path: indexedPath, name: 'DIS-indexed.md', relative_path: 'other/DIS-indexed.md'},
+      {path: openPath, name: 'ABC-open.md', relative_path: 'open/ABC-open.md'},
+      {path: rememberedPath, name: 'ABC-history.md', relative_path: 'history/ABC-history.md'},
+      {path: workingPath, name: 'ABC-current.md', relative_path: 'current/ABC-current.md'},
+      {path: indexedPath, name: 'ABC-indexed.md', relative_path: 'other/ABC-indexed.md'},
     ]);
-    api.setCommandPaletteStateForTest('files', 'DIS-');
-    api.setCommandPaletteQueryForTest('DIS-');
-    const rows = api.commandPaletteRankItems(api.commandPaletteItems(), 'DIS-', {surface: 'files'})
+    api.setCommandPaletteStateForTest('files', 'ABC-');
+    api.setCommandPaletteQueryForTest('ABC-');
+    const rows = api.commandPaletteRankItems(api.commandPaletteItems(), 'ABC-', {surface: 'files'})
       .filter(item => item.path)
       .map(item => item.path);
     assert.deepStrictEqual(canonical(rows.slice(0, 4)), [openPath, rememberedPath, workingPath, indexedPath], 'Quick Open uses the requested four priority tiers');
@@ -2839,17 +2839,15 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.match(sharedCss, /\.git-diff-commit-changes\s*,[\s\S]*\{[\s\S]*white-space:\s*nowrap/,
       'Dirty and commit changes fields use the shared single-line ellipsis treatment from first paint');
     assert.match(css, /\.git-diff-dirty-entry\s*\{[\s\S]*overflow-wrap:\s*anywhere/);
-    assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+/i);
     assert.match(css, /\.git-diff-commit-added\s*\{[\s\S]*color:\s*var\(--git-diff-added\)/);
     assert.match(css, /\.git-diff-commit-removed\s*\{[\s\S]*color:\s*var\(--git-diff-removed\)/);
     assert.match(css, /\.git-diff-branch\s*\{[\s\S]*font-weight:\s*800/);
     assert.match(css, /\.git-diff-commit-sha\s*\{[\s\S]*color:\s*var\(--git-diff-sha\)[\s\S]*font-weight:\s*700/);
-    assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+[\s\S]*--git-diff-branch:\s*#[0-9a-f]+;[\s\S]*--git-diff-added:\s*#[0-9a-f]+;[\s\S]*--git-diff-removed:\s*#[0-9a-f]+;/i);
+    assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[^}]*--git-diff-secondary-text:\s*#[0-9a-f]+[^}]*--git-diff-branch:\s*#[0-9a-f]+;[^}]*--git-diff-added:\s*#[0-9a-f]+;[^}]*--git-diff-removed:\s*#[0-9a-f]+;/i);
     assert.match(css, /--git-diff-branch:\s*#005cc5/);
     assert.match(css, /--git-diff-sha:\s*var\(--git-diff-branch\)/);
     assert.match(css, /--git-diff-added:\s*#008000/);
     assert.match(css, /--git-diff-removed:\s*#c5221f/);
-    assert.match(css, /\.git-diff-commit\s*(?:,\s*\.git-diff-worktree-summary)?\s*\{[\s\S]*box-shadow:\s*inset 0 -1px var\(--git-diff-row-separator\)/);
     assert.match(css, /\.git-diff-commit-detail\s*\{[\s\S]*margin-inline-start:/, 'commit detail indentation follows inline direction in RTL locales');
     assert.doesNotMatch(css, /\.git-diff-worktree-entries\s*\{[^}]*max-height:/, 'dirty file details use the parent panel scroll instead of a nested cap');
     assert.doesNotMatch(css, /\.git-diff-worktree-entries\s*\{[^}]*overflow:\s*auto/, 'dirty file details are not independently scrollable');
@@ -17774,6 +17772,20 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: true, palettePlacement: null, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key while the palette stays open');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'close'), true, 'the dedicated X action closes the palette');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'closing the palette leaves the terminal untouched');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'shift'), true);
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'backspace'), true);
+      assert.equal(frames.at(-1).data, '\x1b[127;2u', 'the palette sends a distinct Shift+Backspace to tmux');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').shift, false, 'Backspace consumes the one-shot Shift latch');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'backspace'), true);
+      assert.equal(frames.at(-1).data, '\x7f', 'ordinary Backspace resumes after the latch is consumed');
+      for (const [action, suffix] of [['arrow-left', 'D'], ['arrow-right', 'C'], ['arrow-up', 'A'], ['arrow-down', 'B'], ['home', 'H'], ['end', 'F']]) {
+        assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'shift'), true);
+        assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', action), true);
+        assert.equal(frames.at(-1).data, `\x1b[1;2${suffix}`, `the palette sends Shift+${action} to tmux`);
+        assert.equal(api.terminalMobileAccessoryStateForTest('1').shift, false);
+        assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', action), true);
+        assert.equal(frames.at(-1).data, `\x1b[${suffix}`, 'the next key is unmodified');
+      }
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'alt'), true, 'mobile Alt latch turns on independently');
       assert.equal(api.handleTerminalDataForTest('1', 'x'), true, 'Alt-modified phone input follows the existing terminal data path');
       assert.equal(frames.at(-1).data, '\x1bx', 'Alt prefixes the next key with Escape');
@@ -17968,10 +17980,12 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       api.setFetchForTest((url, options = {}) => {
         fetchCalls.push({url: String(url), method: options.method || 'GET'});
         if (String(url).startsWith('/api/update-status')) return Promise.resolve(jsonResponse({available: true, target: '0.4.18', target_sha: 'pinned-sha', build_state: 'ready'}));
+        if (String(url).startsWith('/api/self-update/status')) return Promise.resolve(jsonResponse({job: {id: 'upgrade-job', state: 'complete', target_version: '0.4.18'}}));
         if (String(url).startsWith('/api/self-update')) {
           return Promise.resolve(jsonResponse({
             ok: true,
             restarting: true,
+            job: {id: 'upgrade-job'},
             error: 'updated; restarting now',
             user_message: {key: 'update.result.restarting', params: {}, fallback: 'updated; restarting now'},
             target: '0.4.18',
@@ -17999,6 +18013,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         deferredToastShown: false,
         pending: true,
         serverVersionReloadHandled: '0.4.18',
+        jobId: 'upgrade-job',
         oldInstanceId: 'old-instance',
         target: '0.4.18',
       }, 'successful self-update owns the target version and starts reload polling');
@@ -18019,7 +18034,8 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         api.applyUpdateAvailableForTest({available: true, target: '0.11.0', build_state: state, build_error: 'Bazel unavailable'});
         const notice = notices.at(-1);
         assert.equal(notice.title, 'YOmux update available');
-        assert.equal(notice.actions.length, 0, 'unverified candidate has no upgrade action');
+        assert.equal(notice.actions.length, state === 'failed' ? 1 : 0, 'failed preparation offers retry only');
+        if (state === 'failed') assert.equal(notice.actions[0].textContent, 'Retry preparation');
         assert.ok(notice.lines.some(line => String(line).includes(state === 'failed' ? 'Bazel unavailable' : 'Checking whether')));
       }
       let confirmations = 0;
@@ -18052,7 +18068,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
           pending.shift()(jsonResponse({available: true, target: '99.0.0', build_state: oldState}));
           await first;
           assert.equal(notices.length, 1, 'a pushed state cannot be replaced by an older response');
-          assert.equal(notices[0].actions.length, newerState === 'ready' ? 1 : 0);
+          assert.equal(notices[0].actions.length, 1);
           assert.equal(confirmations, 0, 'superseded readiness cannot prompt for installation');
 
           notices.length = 0;
@@ -18063,7 +18079,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
           pending[0](jsonResponse({available: true, target: '99.0.0', build_state: oldState}));
           await olderRead;
           assert.equal(notices.length, 1, 'the latest started read owns reversed completion');
-          assert.equal(notices[0].actions.length, newerState === 'ready' ? 1 : 0);
+          assert.equal(notices[0].actions.length, 1);
           assert.equal(confirmations, 0, 'an older ready read cannot authorize installation');
         }
       }
@@ -18084,17 +18100,17 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
           if (order === 'read-push-response') assert.equal(push(), true);
           if (order === 'push-paint-response') {
             api.flushQueuedClientPushEventsForTest();
-            assert.deepStrictEqual(notices, [0], 'known failure remains visible while the newer read is pending');
+            assert.deepStrictEqual(notices, [1], 'known failure remains visible while the newer read is pending');
           }
           release();
           await pending;
           api.flushQueuedClientPushEventsForTest();
           if (order === 'read-push-response') {
             assert.equal(confirmations, 0, 'accepted newer failure retires stale readiness before queued paint');
-            assert.deepStrictEqual(notices, [0]);
+            assert.deepStrictEqual(notices, [1]);
           } else {
             assert.equal(confirmations, reader === 'triggerSelfUpdateForTest' ? 1 : 0, 'queued paint does not retire the newer readiness read');
-            assert.deepStrictEqual(notices, order === 'push-paint-response' ? [0, 1] : [1], 'older queued state cannot overwrite a published HTTP response');
+            assert.deepStrictEqual(notices, order === 'push-paint-response' ? [1, 1] : [1], 'older queued state cannot overwrite a published HTTP response');
           }
         }
       }
@@ -18126,9 +18142,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         dirtyToasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
         return null;
       });
-      dirtyApi.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true, version: '0.4.19', instance_id: 'replacement'})));
+      dirtyApi.setFetchForTest(url => Promise.resolve(jsonResponse(String(url).startsWith('/api/self-update/status') ? {job: {id: 'upgrade-job', state: 'complete', target_version: '0.4.19'}} : {ok: true, version: '0.4.19', instance_id: 'replacement'})));
       dirtyApi.setOpenFileStateForTest('/repo/app.py', {kind: 'text', content: 'dirty', original: 'clean', dirty: true});
-      dirtyApi.startSelfUpdateReloadPollingForTest('0.4.19');
+      dirtyApi.startSelfUpdateReloadPollingForTest('0.4.19', 'old-instance', 'upgrade-job');
       await dirtyApi.pollSelfUpdateReloadForTest();
       assert.equal(dirtyApi.reloadCountForTest(), 0, 'dirty editors block self-update auto reload');
       assert.equal(dirtyApi.selfUpdateReloadStateForTest().deferredToastShown, true, 'dirty reload deferral is tracked');
@@ -18142,19 +18158,24 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         typingToasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
         return null;
       });
-      typingApi.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true, version: '0.4.20', instance_id: 'replacement'})));
+      typingApi.setFetchForTest(url => Promise.resolve(jsonResponse(String(url).startsWith('/api/self-update/status') ? {job: {id: 'upgrade-job', state: 'complete', target_version: '0.4.20'}} : {ok: true, version: '0.4.20', instance_id: 'replacement'})));
       const input = typingApi.testElementForId('typing-input');
       input.localName = 'input';
       input.tagName = 'INPUT';
       typingApi.setDocumentActiveElementForTest(input);
-      typingApi.startSelfUpdateReloadPollingForTest('0.4.20');
+      typingApi.startSelfUpdateReloadPollingForTest('0.4.20', 'old-instance', 'upgrade-job');
       await typingApi.pollSelfUpdateReloadForTest();
       assert.equal(typingApi.reloadCountForTest(), 0, 'active typing blocks self-update auto reload');
       assert.ok(typingToasts.some(item => item.title === 'Software Update' && String(item.lines[0]).includes('active typing')), 'typing deferral shows a self-update-specific toast');
     });
 
     await testAsync('self-update: a failed install job replaces the pending message with its error', async () => {
-      const api = loadYomux('', ['1']);
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          version: '0.10.9',
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
+        },
+      });
       const toasts = [];
       api.setShowToastForTest((title, lines) => {
         toasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
@@ -18163,17 +18184,19 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       api.setFetchForTest(url => {
         if (String(url).startsWith('/api/self-update/status')) {
           return Promise.resolve(jsonResponse({job: {
-            state: 'failed',
+            id: 'upgrade-job', state: 'failed',
             error: "Auto-update can't use this checkout because it has local work. Save that work, then run this instance from a clean 0.10.10 checkout.",
           }}));
         }
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       });
 
-      api.startSelfUpdateReloadPollingForTest('0.10.10');
+      api.startSelfUpdateReloadPollingForTest('0.10.10', 'old-instance', 'upgrade-job');
       await api.pollSelfUpdateReloadForTest();
       assert.equal(api.selfUpdateReloadStateForTest().pending, false, 'a failed install stops restart polling');
       assert.ok(toasts.some(item => item.title === 'Update failed' && String(item.lines[0]).includes('clean 0.10.10 checkout')), `the offered release and action are shown to the user: ${JSON.stringify(toasts)}`);
+      api.maybeHandleServerVersionChangeForTest('0.10.10');
+      assert.ok(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), 'a later successful manual restart can prompt a reload');
     });
 
     await testAsync('self-update: restart polling record replaces timers and terminates one attempt', async () => {
@@ -18204,6 +18227,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         oldInstanceId: 'old-instance',
         pending: true,
         serverVersionReloadHandled: '0.4.21',
+        jobId: '',
         target: '0.4.21',
       }, 'a new attempt resets the complete record and owns the latest target');
       assert.deepStrictEqual(cleared, [priorTimer.id], 'restarting polling clears the prior attempt timer');
@@ -18213,7 +18237,44 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       for (let attempt = 0; attempt < 120; attempt += 1) await api.pollSelfUpdateReloadForTest();
       assert.equal(api.selfUpdateReloadStateForTest().pending, false, 'the complete attempt stops at the retry bound');
       assert.equal(api.selfUpdateReloadStateForTest().attempts, 120, 'the retry count belongs to the stopped attempt');
-      assert.ok(toasts.some(item => item.lines[0] === 'Update installed, but YOmux did not answer after restart. Reload when it is reachable.'), 'terminal failure reports the bounded timeout');
+      assert.ok(toasts.some(item => item.lines[0] === 'Could not confirm the restart. Check again when YOmux is reachable.'), 'terminal failure reports the bounded timeout');
+    });
+
+    await testAsync('self-update: unrelated and superseded jobs cannot authorize reload', async () => {
+      const api = loadYomux('', ['1']);
+      let state = 'complete', id = 'unrelated', release;
+      api.setFetchForTest(url => Promise.resolve(jsonResponse(String(url).startsWith('/api/self-update/status')
+        ? {job: {id, state, target_version: '0.11.1'}}
+        : {version: '0.11.1', instance_id: 'new-instance'})));
+      api.startSelfUpdateReloadPollingForTest('0.11.1', 'old-instance', 'wanted');
+      await api.pollSelfUpdateReloadForTest();
+      assert.equal(api.reloadCountForTest(), 0, 'unrelated completed job cannot authorize reload');
+      id = 'wanted'; state = 'restarting';
+      await api.pollSelfUpdateReloadForTest();
+      assert.equal(api.reloadCountForTest(), 0, 'a new instance alone cannot authorize reload before managed completion');
+      api.setFetchForTest(() => new Promise(resolve => { release = resolve; }));
+      const pending = api.pollSelfUpdateReloadForTest();
+      api.startSelfUpdateReloadPollingForTest('0.11.2', 'new-instance', 'next');
+      release(jsonResponse({job: {id: 'wanted', state: 'failed', error: 'obsolete failure'}}));
+      await pending;
+      assert.equal(api.selfUpdateReloadStateForTest().pending, true, 'obsolete failure cannot stop the current transaction');
+      assert.equal(api.selfUpdateReloadStateForTest().target, '0.11.2');
+    });
+
+    await testAsync('self-update: timeout releases version ownership and retains manual restart identity', async () => {
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {version: '0.11.0', settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}})},
+      });
+      api.setFetchForTest(url => Promise.resolve(jsonResponse(String(url).startsWith('/api/self-update/status')
+        ? {job: {id: 'other', state: 'complete', target_version: '0.11.1'}}
+        : {version: '0.11.1', instance_id: 'replacement'})));
+      api.startSelfUpdateReloadPollingForTest('0.11.1', 'old-instance', 'wanted');
+      for (let attempt = 0; attempt < 120; attempt += 1) await api.pollSelfUpdateReloadForTest();
+      assert.equal(api.selfUpdateReloadStateForTest().pending, false);
+      api.maybeHandleServerVersionChangeForTest('0.11.1');
+      assert.equal(api.selfUpdateReloadStateForTest().jobId, 'wanted', 'Check restart retains the timed-out job');
+      assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), true, 'late version notification shows the banner');
+      assert.equal(api.reloadCountForTest(), 0);
     });
 
     test('self-update: retired parallel reload scalars stay absent', () => {

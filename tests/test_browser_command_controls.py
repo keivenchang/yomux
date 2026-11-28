@@ -943,16 +943,17 @@ def test_upgrade_status_transitions_restore_errors_without_repeating_dismissed_n
         applyUpdateAvailable({available: true, notify: true, target: '99.0.0', build_state: state,
           build_error: state === 'failed' ? 'Same compiler failure' : ''});
         trace.push({state, text: [...document.querySelectorAll('.toast-update')].map(node => node.textContent).join(' '),
-          actions: document.querySelectorAll('.toast-update .toast-action').length});
+          actions: [...document.querySelectorAll('.toast-update .toast-action')].map(button => button.textContent.trim())});
       }
       document.querySelector('.toast-update [data-toast-close]').click();
       applyUpdateAvailable({available: true, notify: true, target: '99.0.0', build_state: 'failed', build_error: 'Same compiler failure'});
       return {trace, dismissedCount: document.querySelectorAll('.toast-update').length};
     ''')
     assert 'Same compiler failure' in metrics['trace'][0]['text'], metrics
-    assert metrics['trace'][1]['actions'] == 1, metrics
+    assert metrics['trace'][0]['actions'] == ['Retry preparation'], metrics
+    assert metrics['trace'][1]['actions'] == ['Update Now'], metrics
     assert 'Same compiler failure' in metrics['trace'][2]['text'], metrics
-    assert metrics['trace'][2]['actions'] == 0, metrics
+    assert metrics['trace'][2]['actions'] == ['Retry preparation'], metrics
     assert metrics['dismissedCount'] == 0, metrics
 
 
@@ -981,11 +982,11 @@ def test_upgrade_readiness_is_checked_when_the_consumer_resumes(browser, tmp_pat
           await triggerSelfUpdate();
           await checkForUpdateOnce();
           return {confirmations, requests, state: document.querySelector('[data-update-badge]').dataset.updateBuildState,
-            actions: document.querySelectorAll('.toast-update .toast-action').length};
+            actions: [...document.querySelectorAll('.toast-update .toast-action')].map(button => button.textContent.trim())};
         } finally { readCurrentUpdateStatus = originalRead; window.fetch = originalFetch; window.confirm = originalConfirm; }
       })().then(done, error => done({error: String(error.stack || error)}));
     ''')
-    assert metrics == {'confirmations': 0, 'requests': 2, 'state': 'failed', 'actions': 0}, metrics
+    assert metrics == {'confirmations': 0, 'requests': 2, 'state': 'failed', 'actions': ['Retry preparation']}, metrics
 
 
 def test_upgrade_queued_push_and_http_reads_keep_their_publication_order(browser, tmp_path):
@@ -1025,7 +1026,7 @@ def test_upgrade_queued_push_and_http_reads_keep_their_publication_order(browser
               flushQueuedClientPushEvents();
               results.push({reader: reader === triggerSelfUpdate ? 'activate' : 'refresh', order, confirmations, pendingFailureVisible,
                 state: document.querySelector('[data-update-badge]').dataset.updateBuildState,
-                actions: document.querySelectorAll('.toast-update .toast-action').length});
+                actions: [...document.querySelectorAll('.toast-update .toast-action')].map(button => button.textContent.trim())});
             }
           }
           return results;
@@ -1037,7 +1038,7 @@ def test_upgrade_queued_push_and_http_reads_keep_their_publication_order(browser
         superseded = result['order'] == 'read-push-response'
         assert result['confirmations'] == (1 if result['reader'] == 'activate' and not superseded else 0), result
         assert result['state'] == ('failed' if superseded else 'ready'), result
-        assert result['actions'] == (0 if superseded else 1), result
+        assert result['actions'] == (['Retry preparation'] if superseded else ['Update Now']), result
         if result['order'] == 'push-paint-response':
             assert result['pendingFailureVisible'] is True, result
 
@@ -1075,14 +1076,14 @@ def test_upgrade_build_readiness_precedes_confirmation_and_preserves_visible_err
     ''')
     notice = lambda: browser.execute_script("return [...document.querySelectorAll('.toast-update')].filter(node => node.getClientRects().length).map(node => node.textContent).join(' ')")
     WebDriverWait(browser, 10).until(lambda driver: 'Checking whether' in notice())
-    assert browser.execute_script("return document.querySelectorAll('.toast-update .toast-action').length") == 0
+    assert browser.execute_script("return [...document.querySelectorAll('.toast-update .toast-action')].map(button => button.textContent.trim())") == []
     browser.execute_script('''
       window.__upgradeStatus.build_state = 'failed';
       window.__upgradeStatus.build_error = 'Fixture compiler unavailable';
       handleClientPushEvent('update_available', window.__upgradeStatus);
     ''')
     WebDriverWait(browser, 10).until(lambda driver: 'Fixture compiler unavailable' in notice())
-    assert browser.execute_script("return document.querySelectorAll('.toast-update .toast-action').length") == 0
+    assert browser.execute_script("return [...document.querySelectorAll('.toast-update .toast-action')].map(button => button.textContent.trim())") == ['Retry preparation']
     browser.find_element(By.CSS_SELECTOR, '[data-update-badge]').click()
     WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("return typeof window.__releaseUpgradeStatus === 'function'"))
     assert browser.execute_script('return window.__updateRequests.length') == 0
@@ -1091,14 +1092,17 @@ def test_upgrade_build_readiness_precedes_confirmation_and_preserves_visible_err
       window.__upgradeStatus.build_error = '';
       handleClientPushEvent('update_available', window.__upgradeStatus);
     ''')
-    action = WebDriverWait(browser, 10).until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.toast-update .toast-action'))
+    WebDriverWait(browser, 10).until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.toast-update .toast-action'))
     assert browser.execute_async_script('''
       const done = arguments[arguments.length - 1];
       window.__releaseUpgradeStatus();
-      window.__upgradePending.then(() => done(document.querySelectorAll('.toast-update .toast-action').length),
-        error => done(String(error.stack || error)));
-    ''') == 1
-    action.click()
+      window.__upgradePending.then(() => done(true), error => done(String(error.stack || error)));
+    ''') is True
+    # The toast re-renders after the status settles, so wait for its new action instead of reading it once.
+    WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+        "return [...document.querySelectorAll('.toast-update .toast-action')].map(button => button.textContent.trim())") == ['Update Now'])
+    # The ready status re-renders the toast, so click its current button rather than the earlier one.
+    browser.find_element(By.CSS_SELECTOR, '.toast-update .toast-action').click()
     WebDriverWait(browser, 5).until(EC.alert_is_present()).accept()
     WebDriverWait(browser, 10).until(lambda driver: 'Fixture activation refused' in driver.find_element(By.TAG_NAME, 'body').text)
     assert browser.execute_script("return !document.querySelector('[data-update-badge]').hidden")

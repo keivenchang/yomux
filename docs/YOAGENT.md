@@ -1,25 +1,18 @@
 # YO!agent
 
-Native YO!agent owns conversations, skills, jobs, session watches, and reviewed sends in Go. Responses use the installed Claude or Codex CLI and its existing login configuration; Python agent SDKs are not runtime prerequisites. The browser enables YO!agent after its native store initializes. [`GO_MIGRATION.md`](../GO_MIGRATION.md) records supported routes and remaining acceptance checks.
+YO!agent is the built-in assistant that can read session activity, watch sessions, and send prompts to them. It runs inside the Go server and answers through the installed Claude or Codex CLI, using that CLI's existing login. It appears in the browser once its store has initialized. Its routes are listed in [Go backend status](../GO_MIGRATION.md#chat-and-agent).
 
 ## Files
 
-- Built-in skills: `yomux_lib/yoagent/builtin_skills/*.yaml`.
-- Built-in context: `yomux_lib/yoagent/builtin_context/*.md`.
-- User skills: `~/.config/yomux/skills.d/*.yaml`.
-- User context: `~/.config/yomux/context.d/*.md`.
+| What | Where |
+| --- | --- |
+| Built-in skills | `yomux_lib/yoagent/builtin_skills/*.yaml` |
+| Built-in context | `yomux_lib/yoagent/builtin_context/*.md` |
+| Your skills | `~/.config/yomux/skills.d/*.yaml` (also `.yml`) |
+| Your context | `~/.config/yomux/context.d/*.md` |
 
-User skill files also accept `.yml`, including uppercase extensions. File APIs preserve the exact filename and extension; a bare name resolves only when exactly one matching file exists. Use an explicit filename when multiple extensions share a name. Context files likewise preserve `.md` extension case.
-
-User skills replace built-ins with the same name. Set `enabled: false` to disable a skill. Skills describe workflows and allowed YO!agent tools; they do not run shell commands.
-
-## Safety and behavior
-
-The server owns session lookup, authorization, risk checks, prompt preview, confirmation, sends, watches, and audit events. Model-generated plans are validated against known sessions and allowed tools. A model-proposed send always waits for user confirmation.
-
-Wait-and-send jobs watch an explicit roster, require a stable quiet period, recheck the destination, and send once. Recurring jobs have bounded intervals, send counts, and lifetimes; they can be cancelled and stop when their target disappears or a send fails. YO!agent does not send a prompt twice to recover from an uncertain delivery.
-
-Settings changes use the settings catalog and validated settings-write API. Skills must not edit `settings.yaml` directly or read credential files. Broad resets, ambiguous changes, and path-sensitive changes require confirmation.
+- A skill of yours replaces the built-in skill with the same name. Set `enabled: false` to turn a skill off.
+- Skill files are managed through the authenticated YO!agent skill-file API. It keeps the exact filename and extension case. A bare name works only when exactly one file matches; use the full filename when several extensions share a name.
 
 ## Skill format
 
@@ -37,4 +30,13 @@ confirmation: none
 default_timeout_minutes: 30
 ```
 
-The server rejects unknown tool names and invalid skill files. File management is available only through the authenticated YO!agent skill-file API.
+A skill describes a workflow and the YO!agent tools it may use; it never runs shell commands. The allowed tools are `read_activity`, `read_settings_catalog`, `read_product_capabilities`, `recommend_next_work`, `watch_session`, `watch_all_sessions`, `notify_user`, `read_skill_files`, `write_skill_file`, `delete_skill_file`, `write_settings_patch`, `preview_send_prompt`, `execute_confirmed_send`, and `summarize_sessions`. The server rejects unknown tools and invalid skill files.
+
+## Safety rules
+
+- The server, not the model, does session lookup, authorization, risk checks, prompt preview, confirmation, sending, watches, and audit events. Model plans are checked against known sessions and allowed tools.
+- A send proposed by the model always waits for your confirmation.
+- Wait-and-send jobs watch an explicit list of sessions, wait for a stable quiet period, recheck the target, and send once.
+- Recurring jobs have limits on interval, number of sends, and lifetime. You can cancel them, and they stop when the target disappears or a send fails.
+- YO!agent never resends a prompt to recover from an uncertain delivery.
+- Settings changes go through the settings catalog and the validated settings API. Skills must not edit `settings.yaml` directly or read credential files. Broad resets, ambiguous changes, and path-sensitive changes need confirmation.

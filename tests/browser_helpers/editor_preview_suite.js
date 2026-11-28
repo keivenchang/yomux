@@ -952,13 +952,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/id="status" class="sub a11y-only" role="status" aria-live="polite"/.test(webSource), 'the legacy generic status text remains assistive feedback instead of visible text beside Exit');
   });
 
-  test('one-column minimize hides the selected tab and the terminal X remains a kill action', () => {
+  test('one-column pane controls minimize the selected tab only when another remains', () => {
     const api = loadYomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
       viewport: {width: 599, height: 1024},
     });
     assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'a selected tab can be minimized while another tab remains in the one-column pane');
-    assert.ok(api.panelControlsHtml('1').includes('data-pane-close="1"'), 'the terminal exposes the session kill action on a one-column layout');
+    assert.equal(api.panelControlsHtml('1').includes('data-pane-close'), false, 'the pane header does not expose a tab close action');
     api.minimizePaneFromLayout('1');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
@@ -982,7 +982,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       left: {active: '1', tabs: ['1']},
     });
     assert.equal(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), false, 'the last remaining tab has no misleading minimize control');
-    assert.ok(api.panelControlsHtml('1').includes(api.t('menu.tmux.kill')), 'the last terminal still exposes the session kill action');
+    assert.equal(api.panelControlsHtml('1').includes('data-pane-close'), false, 'the last tab has no pane-header close action');
   });
 
   test('phone tab hide remains hidden after one-column normalization', () => {
@@ -1015,20 +1015,17 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }, 'a phone reload collapses the URL layout to one pane while preserving its tab order and selected tab instead of reseeding recent sessions');
   });
 
-  test('Finder close hides Finder without closing its whole pane', () => {
+  test('Hiding Finder leaves its sibling tabs and other panes intact', () => {
     const api = loadYomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 28);
     slots.left = api.paneStateWithTabs([api.fileExplorerItemId, '1'], api.fileExplorerItemId);
     slots.slot1 = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(slots);
-    api.closePaneFrameItem(api.fileExplorerItemId);
-    assert.equal(api.itemInLayout(api.fileExplorerItemId), false, 'Finder X removes only Finder from the current layout');
-    assert.equal(api.itemInLayout('1') && api.itemInLayout('2'), true, 'Finder X leaves the current and adjacent terminal panes intact');
-    const shellSource = fs.readFileSync('static_src/js/yomux/78_panel_shell.js', 'utf8');
-    assert.ok(shellSource.includes('closePaneFrameItem(paneClose || fallbackItem)'), 'the shared frame-control binding routes Finder X through the Finder-aware closer');
-    const dockviewSource = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
-    assert.ok(dockviewSource.includes('if (handlePaneFrameActionClick(event, fallbackItem)) return;'), 'Dockview header X uses the same Finder-aware close path');
+    api.removeSessionFromLayout(api.fileExplorerItemId);
+    assert.equal(api.itemInLayout(api.fileExplorerItemId), false, 'Hiding Finder removes it from the current layout');
+    assert.equal(api.itemInLayout('1') && api.itemInLayout('2'), true, 'Current and adjacent terminal panes remain');
+    assert.equal(api.panelControlsHtml(api.fileExplorerItemId).includes('data-pane-close'), false, 'Finder has no duplicate pane close');
   });
 
   test('Tabber uses the terminal tmux selection rather than stale agent-poll current state', () => {
@@ -1061,8 +1058,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\\x7f'/.test(source), 'touch terminal key definitions retain one Backspace definition that sends DEL');
     assert.ok(/terminalMobileAccessoryActionFamilies = Object\.freeze\(\{[\s\S]*primary: Object\.freeze\(\['tmux-prefix', 'upload', 'backspace', 'more'\]\)[\s\S]*side: Object\.freeze\(\['tab', 'shift', 'ctrl'\]\)[\s\S]*dpad: Object\.freeze\([^\n]*'copy', 'command-v'[^\n]*'alt'/.test(facadeSource) && /terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.primary[\s\S]*terminalMobileAccessoryCornerAction = 'escape'[\s\S]*terminalMobileAccessorySideActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.side[\s\S]*terminalMobileAccessoryDpadActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.dpad/.test(source), 'the primary page keeps Upload between tmux prefix and Backspace, stacks Paste directly below Copy, and keeps Ctrl, Alt, then the platform Meta key across the bottom-left row');
     assert.ok(/const terminalMobileAccessoryMoreKeyDefs[\s\S]*action: 'command-p'[\s\S]*action: 'home'[\s\S]*action: 'ctrl-r'/.test(source) && /const terminalMobileAccessoryMoreActions = Object\.freeze\(\['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r'\]\);/.test(source) && !/const terminalMobileAccessoryMoreKeyDefs[\s\S]{0,500}action: 'command-v'/.test(source), 'the More page reuses shared command/navigation definitions while the primary D-pad retains Paste');
-    assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*terminalMobileAccessoryModifierActive\(state\)[\s\S]*terminalMobileAccessoryClearModifiers\(state, \{session\}\)[\s\S]*terminalMobileAccessoryShiftText\(value\)[\s\S]*terminalMobileAccessoryControlText\(value\)/.test(source) && /function toggleTerminalMobileAccessoryModifier[\s\S]*terminalMobileAccessoryModifierDoubleTapMs[\s\S]*state\[lockedKey\] = true/.test(source), 'Ctrl/Alt/Shift/Cmd latches share terminal input handling, and double-tap locks modifiers through the shared lock path');
-    assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*routeTerminalScrollLines\(session, term, container, signedLines, \{source: 'page-key'\}\)[\s\S]*action === 'tmux-scroll-up' \? '\\x1b\[5~' : '\\x1b\[6~'[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true, bypassMobileAccessoryModifiers: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; palette PgUp/PgDn use the shared page-key router and send native bytes only when a non-mouse alternate app owns paging');
+    const modifierApplication = source.slice(source.indexOf('function terminalMobileAccessoryModifiedData('), source.indexOf('async function pasteTerminalMobileAccessoryClipboard('));
+    assert.ok(/terminalMobileAccessoryShiftText\(value\)[\s\S]*terminalMobileAccessoryControlText\(value\)[\s\S]*function terminalDataWithMobileAccessoryModifiers[\s\S]*terminalMobileAccessoryModifierActive\(state\)[\s\S]*terminalMobileAccessoryModifiedData\(text, state\)[\s\S]*terminalMobileAccessoryClearModifiers\(state, \{session\}\)/.test(modifierApplication) && /function toggleTerminalMobileAccessoryModifier[\s\S]*terminalMobileAccessoryModifierDoubleTapMs[\s\S]*state\[lockedKey\] = true/.test(source), 'Ctrl/Alt/Shift/Cmd latches share terminal input handling, and double-tap locks modifiers through the shared lock path');
+    assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*routeTerminalScrollLines\(session, term, container, signedLines, \{source: 'page-key'\}\)[\s\S]*action === 'tmux-scroll-up' \? '\\x1b\[5~' : '\\x1b\[6~'[\s\S]*sendTerminalMobileAccessoryData\(session, data, \{bypassMobileAccessoryModifiers: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; palette PgUp/PgDn use the shared page-key router and send native bytes only when a non-mouse alternate app owns paging');
     assert.ok(/function terminalMobileAccessoryHtml[\s\S]*moreKeys[\s\S]*mobile-terminal-key-launcher[\s\S]*state\.open \? ' hidden' : ''[\s\S]*>⌨<\/button>[\s\S]*data-terminal-mobile-page="primary"[\s\S]*data-terminal-mobile-page="more"/.test(source) && /function terminalMobileAccessorySurfaces[\s\S]*querySelectorAll[\s\S]*function syncTerminalMobileAccessoryState[\s\S]*for \(const launcher of launchers\)[\s\S]*launcher\.hidden = open/.test(source) && /function terminalMobileAccessoryPalettePlacement[\s\S]*side = 'below'[\s\S]*side = 'left'[\s\S]*side = 'right'/.test(source) && /function beginTerminalMobileAccessoryPalettePress[\s\S]*closest\?\.\('\.mobile-terminal-key-grabber'\)[\s\S]*function moveTerminalMobileAccessoryPalettePress/.test(source), 'both fixed pages share launcher-derived placement and every rendered launcher follows the same XOR state');
     assert.ok(/function installTerminalMobileAccessorySurfaceSync[\s\S]*new MutationObserver[\s\S]*record\.addedNodes[\s\S]*syncTerminalMobileAccessoryState\(session\)[\s\S]*function bindTerminalContainerForSession[\s\S]*installTerminalMobileAccessorySurfaceSync\(\)/.test(source), 'late-mounted launcher and palette copies rejoin the same XOR synchronizer without a second state owner');
     assert.ok(/delegate\(panel, 'click', '\[data-terminal-mobile-close\]'[\s\S]*sendTerminalMobileAccessoryInput\(button\.dataset\.terminalMobileClose \|\| session, 'close'\)/.test(source) && /function sendTerminalMobileAccessoryInput[\s\S]*action === 'close'[\s\S]*dismissTerminalMobileAccessory\(session\)[\s\S]*action === 'more' \|\| action === 'open'[\s\S]*toggleTerminalMobileAccessoryState\(session, action\)/.test(source), 'the dedicated X is the only close action while both More buttons reuse the shared palette state owner');
@@ -1219,7 +1217,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(desktopMobileOverrideApi.terminalMobileAccessoryHtmlForTest('1').includes('data-terminal-mobile-toggle="1"'), 'mobile=1 forces the shared coarse-pointer keyboard path on desktop browsers');
     assert.equal(desktopMobileOverrideApi.mobileSinglePaneModeForTest(), false, 'mobile=1 alone does not fake a narrow phone viewport or collapse desktop panes');
     assert.ok(/function browserUsesCoarsePointer\(\)[\s\S]*urlFlagEnabled\('mobile'\)[\s\S]*matchMedia\('\(pointer: coarse\)'/.test(bootstrapSource), 'mobile=1 is owned by the shared coarse-pointer predicate before media-query detection');
-    assert.ok(facadeSource.includes("primary: Object.freeze(['tmux-prefix', 'upload', 'backspace', 'more'])") && source.includes("const terminalMobileAccessoryCornerAction = 'escape';") && facadeSource.includes("side: Object.freeze(['tab', 'shift', 'ctrl'])") && source.includes("const interruptKey = key('interrupt');") && source.includes("const moreKey = key('more');"), 'both pages reuse the same More and Ctrl-C definitions while Upload occupies the free primary-row slot');
+    const terminalKeyboard = desktopMobileOverrideApi.terminalMobileAccessoryHtmlForTest('1');
+    assert.equal((terminalKeyboard.match(/data-terminal-mobile-key="interrupt"/g) || []).length, 2);
+    assert.equal((terminalKeyboard.match(/data-terminal-mobile-key="more"/g) || []).length, 2);
+    const htmlKeyboard = desktopMobileOverrideApi.terminalMobileAccessoryHtmlForTest(
+      desktopMobileOverrideApi.fileEditorItemFor('/home/test/example.html'));
+    for (const action of ['shift', 'arrow-left', 'enter', 'backspace', 'copy', 'command-v', 'home', 'delete']) {
+      assert.ok(htmlKeyboard.includes(`data-terminal-mobile-key="${action}"`), `HTML keyboard exposes ${action}`);
+    }
+    assert.doesNotMatch(htmlKeyboard, /data-terminal-mobile-key="(?:tmux-prefix|upload|interrupt|tmux-scroll-up)"/);
     const macKeyboardHtml = loadYomux('?mobile=1&platform=mac', ['1'], 'http:', 'Linux x86_64').terminalMobileAccessoryHtmlForTest('1');
     const pcKeyboardHtml = loadYomux('?mobile=1&platform=pc', ['1'], 'http:', 'MacIntel').terminalMobileAccessoryHtmlForTest('1');
     assert.ok(macKeyboardHtml.includes('>⌥</button>') && macKeyboardHtml.includes('>⌘</button>') && macKeyboardHtml.includes('>⌘C</button>') && macKeyboardHtml.includes('>⌘V</button>') && macKeyboardHtml.includes('>⌘P</button>'), 'platform=mac renders Option and Command symbols for modifiers and app actions');
@@ -2553,7 +2559,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setTmuxSignalStateForTest(signal);
     const wheelEvents = [];
     const wheelNode = {dispatchEvent(event) { wheelEvents.push(event); return true; }};
-    const container = {querySelector() { return wheelNode; }};
+    const container = {dataset: {terminalPaneTarget: '%11'}, querySelector() { return wheelNode; }};
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude', pane_target: '%11'}]});
     const claudeTerm = {rows: 40, modes: {mouseTrackingMode: 'any'}};
     const claudeFrames = [];
     const claudeItem = api.registerTerminalForTest('1', claudeTerm, {readyState: 1, send(frame) { claudeFrames.push(JSON.parse(frame)); }});
@@ -2567,13 +2574,20 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const gestureEvent = {deltaY: 4, deltaMode: 0, wheelDeltaY: -4.8};
     wheelEvents.length = 0;
     claudeFrames.length = 0;
-    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(notchEvent)}), false, 'a physical wheel notch stays with xterm');
-    assert.deepStrictEqual(claudeFrames, [], 'the router does not duplicate native mouse reports');
+    // Claude's wheel goes straight to its pane, like Codex, so a tmux client sized by another
+    // browser cannot misplace or swallow the report. Each wheel step sends three reports.
+    const claudeReport = direction => ({type: 'application-scroll', pane: '%11', direction, count: 3, column: 1, row: 1});
+    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(notchEvent)}), true, 'one Claude mouse notch immediately reaches the pane');
+    assert.deepStrictEqual(wheelEvents, [], 'the wheel no longer passes through the attached tmux client');
+    assert.deepStrictEqual(claudeFrames, [claudeReport('down')]);
 
     wheelEvents.length = 0;
     claudeFrames.length = 0;
-    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(gestureEvent)}), false, 'continuous touchpad motion stays with xterm');
-    assert.deepStrictEqual(claudeFrames, [], 'a continuous sub-line touchpad delta remains fractional instead of becoming a staircase');
+    for (const delta of [4 / 35, 4 / 35, -4 / 35]) {
+      assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, delta, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(gestureEvent)}), true);
+    }
+    assert.deepStrictEqual(wheelEvents, []);
+    assert.deepStrictEqual(claudeFrames, [claudeReport('down'), claudeReport('up')], 'Claude responds immediately to the first movement and to a reversal');
 
     let pagePrevented = 0;
     claudeFrames.length = 0;
@@ -2716,13 +2730,38 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     codexTerm.modes.mouseTrackingMode = 'none';
     codexFrames.length = 0;
-    assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, 0.8, {source: 'wheel'}), true, 'Codex preserves fractional touchpad movement until it crosses a row');
-    assert.deepStrictEqual(codexFrames, [], 'a partial touchpad movement does not send a wheel report');
+    assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, 0.8, {source: 'wheel'}), true, 'Codex responds to the first small wheel movement');
+    assert.deepStrictEqual(codexFrames, [{type: 'application-scroll', pane: '%codex', direction: 'down', count: 1, column: 1, row: 1}]);
+    codexFrames.length = 0;
     assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -1, {source: 'wheel', discreteWheel: true}), true, 'Codex accepts the next physical wheel notch');
     assert.deepStrictEqual(codexFrames, [{type: 'application-scroll', pane: '%codex', direction: 'up', count: 1, column: 1, row: 1}], 'each physical Codex wheel notch responds and drops the touchpad remainder');
     codexFrames.length = 0;
     assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -1, {source: 'wheel', discreteWheel: true}), true, 'Codex accepts another physical wheel notch');
     assert.deepStrictEqual(codexFrames, [{type: 'application-scroll', pane: '%codex', direction: 'up', count: 1, column: 1, row: 1}], 'the next physical notch responds independently');
+
+    const smallWheel = {source: 'wheel'};
+    codexFrames.length = 0;
+    api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -0.1, smallWheel);
+    codexItem.socket.readyState = 3;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -0.1, smallWheel), false);
+    codexItem.socket.readyState = 1;
+    api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -0.1, smallWheel);
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'codex', pane_target: '%next'}]});
+    codexWheelContainer.dataset.terminalPaneTarget = '%next';
+    api.routeTerminalScrollLinesForTest('1', codexTerm, codexWheelContainer, -0.1, smallWheel);
+    assert.deepStrictEqual(codexFrames.map(frame => frame.pane), ['%codex', '%codex', '%next'], 'reconnecting and changing panes start fresh wheel gestures');
+
+    const alias = '__yomux_view_codex-wheel';
+    api.setTranscriptInfoForTest('1', {
+      agents: [{kind: 'codex', pane_target: '%next'}],
+      window_metadata: [{window_index: 0, window_id: '@test-0'}],
+    });
+    api.storeTabberViewSessionForTest(alias, {sourceSession: '1', windowIndex: 0});
+    api.setTmuxSignalStateForTest({windows: [{session: '1', window_id: '@test-0', window_index: '1', panes: [{target: '%next', active: true}]}]});
+    const aliasFrames = [];
+    api.registerTerminalForTest(alias, codexTerm, {readyState: 1, send(frame) { aliasFrames.push(JSON.parse(frame)); }});
+    assert.equal(api.routeTerminalScrollLinesForTest(alias, codexTerm, {}, -0.1, smallWheel), true);
+    assert.deepStrictEqual(aliasFrames, [{type: 'application-scroll', pane: '%next', direction: 'up', count: 1, column: 1, row: 1}], 'Codex window views route the first small event to the source pane after renumbering');
 
     api.setTmuxSignalStateForTest(signal);
     api.setTmuxSignalStateForTest(null);
@@ -4591,7 +4630,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     const popover = api.sessionPopoverHtml('4', graphInfo, 'claude', true);
     assert.ok(/popover-title">tmux session 4 ·/.test(popover), 'session popover title labels the header as a tmux session');
-    assert.ok(/popover-subtitle[\s\S]*branch-indicator[^>]*>MAIN<[\s\S]*href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<[\s\S]*ci: Update the dep/.test(popover), 'merged PR popover header links the purple #number chip using the shared inferred GitHub URL');
+    assert.match(popover, /popover-subtitle-text">[^<]*ci: Update the dep/);
+    assert.equal((popover.match(/pr-number-chip pr-status-merged[^>]*>#9961</g) || []).length, 1, 'the current PR appears only in its detail row');
     assert.equal(popover.includes('#9961:'), false, 'merged PR popover header omits the old #number text prefix');
     assert.ok(/popover-label">branch<\/div><div class="popover-value"><span class="ci-indicator tab-symbol (?:chip-base )?branch-indicator[^"]*">MAIN<\/span>/.test(popover), 'merged PR popover branch row uses the same MAIN chip as the tab');
     assert.ok(/popover-label">PR<\/div><div class="popover-value"><a href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*<span class="ci-indicator tab-symbol pr-number-chip pr-status-merged[^"]*">#9961<\/span><\/a>/.test(popover), 'merged PR popover PR row links the same purple #number chip as the header');
@@ -4608,7 +4648,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     };
     api.setTranscriptInfoForTest('worktree-popover', worktreeInfo);
     const worktreePopover = api.sessionPopoverHtml('worktree-popover', api.transcriptInfoForTest('worktree-popover'), '', false);
-    assert.ok(worktreePopover.includes(api.t('popover.worktreeOf', {name: 'yolomux.dev8001', root: '/home/test/yolomux'})), 'linked-worktree session popovers use the shared formatter without an Info Bar render error');
+    assert.ok(worktreePopover.includes(api.t('popover.worktreeOf', {name: '/home/test/yolomux.dev8001', root: '/home/test/yolomux'})), 'the linked worktree row keeps the full checkout path and its parent');
+    assert.equal((worktreePopover.match(/data-copy-path="\/home\/test\/yolomux\.dev8001"/g) || []).length, 1, 'the path and worktree share one copy control');
+    assert.doesNotMatch(worktreePopover, /popover-subtitle-text/, 'a shell without a description does not repeat its branch or project in a subtitle');
     assert.equal(popover.includes('popover-label">desc'), false, 'merged PR popover omits the desc row because the header already carries the PR title');
     assert.equal(popover.includes('Status check:'), false, 'merged PR popover removes the YO!agent status sentence when the dedicated git row is present');
     assert.ok(popover.includes('10 dirty · 18 behind'), 'merged PR popover keeps git facts in the dedicated git row');
@@ -4619,7 +4661,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(headRow, '747c3fd0c6', 'merged PR popover HEAD row shows only the SHA, not the repeated subject and PR suffix');
     const branchList = popover.slice(branchListIndex);
     assert.equal(branchList.includes('info-branch-current'), false, 'popover branch list drops the redundant current label');
-    assert.ok(/branch-name"><span class="ci-indicator tab-symbol (?:chip-base )?branch-indicator[^"]*">MAIN<\/span>[\s\S]*branch-meta">[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<\/span>/.test(branchList), 'popover branch list mirrors MAIN and merged PR chips for the current branch');
+    assert.doesNotMatch(branchList, /branch-name">[^\n]*>MAIN<|>#9961</, 'the branch list does not repeat the checkout and its PR');
     assert.equal(branchList.includes('<div class="branch-subject">ci: Update the dep'), false, 'popover branch list suppresses the current branch subject when it duplicates the header title');
     assert.ok(/popover-chip-link[\s\S]*pr-number-chip[^>]*>#10075<\/span>[\s\S]*meta-pr-status pr-status-passing[^>]*>CI passing/.test(branchList), 'popover branch list shows non-current PR numbers as chips while keeping the shared localized CI status text');
     assert.ok(branchList.includes('<div class="branch-subject">feat: add HeronDel tool parser parity</div>'), 'popover branch list keeps non-current branch subjects because they add detail');
@@ -5071,6 +5113,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(perWindowHtml.includes('Transcript ID'), false, 'Codex/Claude ID rows are no longer mislabeled as transcript IDs');
     assert.ok(/popover-label">Transcript<\/div><div class="popover-value">[\s\S]*data-copy-path="\/logs\/claude-session\.jsonl"/.test(perWindowHtml), 'the transcript path remains a separate Transcript row');
     assert.ok(perWindowHtml.includes('data-copy-path="codex-thread-id"') && perWindowHtml.includes('data-copy-path="/logs/codex-thread.jsonl"'), 'HT2: transcript rows are attributed per AI window');
+    assert.match(perWindowHtml, /popover-label">Transcript<[^]*?data-copy-path="\/logs\/codex-thread\.jsonl"[^]*?popover-label">path<[^]*?data-copy-path="\/repo\/codex-a"[^]*?popover-label">path<[^]*?data-copy-path="\/repo\/codex-b"[^]*?popover-label">branch</, 'each window groups its transcript and checkout paths before Git details');
     assert.equal(perWindowText.split('tmux sub-window 0:claude').length - 1, 1, 'Claude window label appears once in the merged state/metadata row');
     assert.equal(perWindowText.split('tmux sub-window 1:codex').length - 1, 1, 'Codex window label appears once in the merged state/metadata row');
     assert.equal(perWindowHtml.includes('session-window-metadata-title'), false, 'per-window metadata no longer repeats the tmux sub-window label as a title');
@@ -6805,8 +6848,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
   test('hard-wrapped Codex report URL continues before trailing status text', () => {
     const api = loadYomux();
-    const first = '• Open the Unified acceptance report (http://keivenc-linux/dev/parser-toolkits/frontend-';
-    const continuation = 'crates_unified-batch_ABC-3124/acceptance/ACCEPTANCE_v2.html) (HTTP 200).';
+    const first = '• Open the Unified acceptance report (http://keivenc-linux/dev/parser-toolkits/parser-';
+    const continuation = 'toolkits_unified-batch_ABC-3124/acceptance/ACCEPTANCE_v2.html) (HTTP 200).';
     const lines = [terminalLine(first, false), terminalLine(continuation, false)];
     const term = {cols: first.length, yomuxAgentKind: 'codex', buffer: {active: {getLine: index => lines[index] || null}}};
     const expected = 'http://keivenc-linux/dev/parser-toolkits/parser-toolkits_unified-batch_ABC-3124/acceptance/ACCEPTANCE_v2.html';
@@ -7220,7 +7263,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(reference.text, 'https://example.test/path?原始文件=acceptance/文件.html', 'wide-character URL remains one logical reference');
     assert.deepStrictEqual(canonical(reference.range.segments), [
       {start: {x: 1, y: 1}, end: {x: 35, y: 1}},
-      {start: {x: 1, y: 2}, end: {x: 21, y: 2}},
+      {start: {x: 1, y: 2}, end: {x: 20, y: 2}},
     ], 'each URL segment uses xterm cell columns rather than JavaScript string offsets');
   });
 
@@ -9225,9 +9268,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     {
       const css = fs.readFileSync('static/yomux.css', 'utf8');
       assert.equal(/\.topbar-theme\s*\{/.test(css), false, '#257: the .topbar-theme CSS is removed with the switcher');
-      // #254/#259 follow-up: light-mode inactive-pane dim stays neutral gray, with a softer alpha.
-      assert.ok(css.includes('--inactive-pane-overlay-rgb: 90 96 105'), '#259: light-mode inactive panes dim a softer neutral gray (no red cast)');
-      assert.ok(css.includes('--inactive-pane-overlay-alpha: 0.09'), '#259: light-mode inactive panes keep the softer alpha base');
+      assert.ok(css.includes('--inactive-pane-overlay-rgb: 165 165 165'), 'light-mode inactive panes dim with a neutral gray');
       // Light-mode pane header (image 043): greenish-light tab-strip container + light frame-control
       // buttons (the minimize/zoom squares used to render dark/"black" with no light values).
       assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-dim:\s*#e1edda/.test(css), 'light mode: the pane tab-strip container is greenish-light (active-accent-dim)');
@@ -9237,8 +9278,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-zoom-bg:\s*var\(--active-control-bg\)/.test(css), 'light mode: the pane zoom button uses the shared active-control fill, not a dark square');
       assert.ok(/function uiColorVisualPreset\(value, light = false\)[\s\S]*value === 'green'[\s\S]*light[\s\S]*text:\s*'#071000'/.test(src), 'Green active-color metadata reports dark on-accent text for the light preset');
       assert.equal(css.includes('--inactive-pane-overlay-rgb: 124 82 88'), false, '#259: the earlier warm/red tint is gone (superseded by gray)');
-      assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.16'), false, '#259 follow-up: the too-dark light overlay alpha is gone');
-      assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.13'), false, '#259 follow-up: the still-too-dark light overlay alpha is gone');
+      assert.equal(css.includes('--inactive-pane-overlay-alpha:'), false, 'the opacity slider has no theme-specific alpha cap');
       // #258 follow-up: editor toolbar placement is inherited from stable parent zones, not per-button order.
       assert.ok(/\.file-editor-toolbar-left\s*\{[^}]*flex:\s*1 1 auto/.test(css), 'editor info bar: #/Differ/FROM-TO/path live in the shared left zone');
       assert.ok(/\.file-editor-toolbar-center\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%/.test(css), 'editor info bar: font-size controls live in the shared center zone');
@@ -9262,12 +9302,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.ok(/\.toast-line\s*\{[^}]*white-space:\s*normal/.test(css), '#258: toast messages wrap (white-space:normal) instead of ellipsis-clipping');
       assert.equal(/\.toast-line\s*\{[^}]*white-space:\s*nowrap/.test(css), false, '#258: the old nowrap/ellipsis clipping of the toast message line is gone');
     }
-    // #255: inactive-pane dimming is now ONE CSS rule keyed off the uniformly-toggled .focused-pane class
-    // — no per-pane JS overlay, no isVirtualItem special-case, every pane type dims identically.
-    assert.equal(/function installPanelInactiveOverlays/.test(src), false, '#255: the per-pane JS overlay installer is deleted (dimming is pure CSS)');
-    assert.equal(/class="panel-inactive-overlay"/.test(src), false, '#255: no per-pane inactive-overlay div is injected anymore');
-    assert.ok(/\.panel:not\(\.focused-pane\)[^{]*\.panel-overlay-root::after\s*\{[^}]*background:\s*var\(--inactive-pane-overlay\)/.test(fs.readFileSync('static/yomux.css', 'utf8')), '#255: inactive panes dim via one CSS rule on .panel:not(.focused-pane) .panel-overlay-root::after');
-    assert.equal(/\.panel:not\(\.focused-pane\):not\(\.typing-ready-pane\)[^{]*\.panel-overlay-root::after/.test(fs.readFileSync('static/yomux.css', 'utf8')), false, 'inactive-pane dim must still paint on a stale typing-ready pane');
+    const paneOverlayCss = fs.readFileSync('static/yomux.css', 'utf8');
+    assert.match(paneOverlayCss, /\.panel\s*>\s*\.panel-overlay-root::after\s*\{[^}]*background:\s*var\(--inactive-pane-overlay\)/);
+    assert.match(paneOverlayCss, /\.panel\.focused-pane\s*>\s*\.panel-overlay-root::after\s*\{[^}]*opacity:\s*0/);
     assert.equal(/updateInactivePaneGradientDirs|has-inactive-pane-gradient|pane-gradient-dir/.test(src), false, 'inactive-pane gradient JS is removed until the feature is revisited');
     // #260: a drag-drop open establishes a clean baseline (clears external-change flags on a fresh,
     // non-dirty open) so it never pops a spurious reload prompt — matching double-click.
@@ -9318,8 +9355,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.ok(typeof cat['unit.minute.short'] === 'string' && cat['unit.minute.short'].length, `${loc} has unit.minute.short`);
     }
     // Product feature names keep their established spelling in every locale.
-    assert.equal(en['brand.tab.info'], 'YO!info', 'en YO!info tab label');
-    assert.equal(en['brand.tab.agent'], 'YO!agent', 'en YO!agent tab label');
+    assert.equal(en['brand.tab.info'], 'YO!Info', 'en YO!Info tab label');
+    assert.equal(en['brand.tab.agent'], 'YO!Agent', 'en YO!Agent tab label');
     assert.equal(en['menu.tmux.yo.on'], 'YO (YOLO auto approve) tmux', 'the tmux YO menu identifies YO as a tmux YOLO auto-approve control');
     assert.equal(en['menu.tmux.yolo.enableFor'], "Enable YOLO (auto-approve) for Tmux Session '{session}'", 'the overflow YOLO action states its auto-approve behavior');
     assert.ok(/function tmuxCurrentYoloCommand\(session\)[\s\S]*const label = t\('menu\.tmux\.yo\.on'\)/.test(fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8')), 'the tmux dropdown uses the explicit YO auto-approve label regardless of its current state');
@@ -9344,8 +9381,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
       assertSourceKeysPresent(cat, loc);
       assert.equal(cat['brand.marker'], 'YO', `Phase 2: ${loc} keeps the YO brand marker`);
-      assert.equal(cat['brand.tab.info'], 'YO!info', `Phase 2: ${loc} keeps the YO!info tab label`);
-      assert.equal(cat['brand.tab.agent'], 'YO!agent', `Phase 2: ${loc} keeps the YO!agent tab label`);
+      assert.equal(cat['brand.tab.info'], 'YO!Info', `Phase 2: ${loc} keeps the YO!Info tab label`);
+      assert.equal(cat['brand.tab.agent'], 'YO!Agent', `Phase 2: ${loc} keeps the YO!Agent tab label`);
       assert.ok(cat['pref.appearance.file_explorer_font_size.label'].includes('{name}'), `Phase 2: ${loc} preserves the {name} placeholder`);
       assert.ok(cat['yoagent.files'].includes('{count}') && cat['yoagent.files'].includes('{added}'), `Phase 2: ${loc} preserves count/added placeholders`);
       assert.notEqual(cat['menu.file'], 'File', `Phase 2: ${loc} actually translates (menu.file not English)`);
@@ -9676,7 +9713,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     for (const englishLeak of [
       'Global appearance', 'Client pull: latency ping', 'Notification throttle',
-      'Terminal scrollback', 'File transfer size cap', 'YO!agent backend', 'Dry run',
+      'Terminal scrollback', 'File transfer size cap', 'YO!Agent backend', 'Dry run',
     ]) {
       assert.equal(html.includes(englishLeak), false, `no plain-English "${englishLeak}" leaks under the pseudo-locale`);
     }
@@ -9718,10 +9755,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.ok(zhHtml.includes(catalog['brand.yoloRules']), `${locale} renders the localized YOLO rules path label`);
       assert.ok(zhHtml.includes(catalog['pref.performance.auto_approve_interval_seconds.label']), `${locale} renders the localized YOLO worker poll label`);
       assert.ok(zhHtml.includes(catalog['pref.yolo.rule_file_path.help']), `${locale} renders the localized YOLO rule-file help`);
-      assert.ok(zhHtml.includes(catalog['brand.tab.agent']), `${locale} renders the localized YO!agent section title`);
-      assert.equal(catalog['brand.tab.agent'], 'YO!agent', `${locale} preserves the YO!agent feature name`);
-      assert.equal(catalog['brand.tab.chat'], 'YO!chat', `${locale} preserves the YO!chat feature name`);
-      assert.equal(catalog['brand.tab.info'], 'YO!info', `${locale} preserves the YO!info feature name`);
+      assert.ok(zhHtml.includes(catalog['brand.tab.agent']), `${locale} renders the localized YO!Agent section title`);
+      assert.equal(catalog['brand.tab.agent'], 'YO!Agent', `${locale} preserves the YO!Agent feature name`);
+      assert.equal(catalog['brand.tab.chat'], 'YO!Chat', `${locale} preserves the YO!Chat feature name`);
+      assert.equal(catalog['brand.tab.info'], 'YO!Info', `${locale} preserves the YO!Info feature name`);
       // The YO marker glyph localizes to 優 / 优 (the catalog value the marker renders via t('brand.marker')).
       assert.equal(catalog['brand.marker'], locale === 'zh-Hant' ? '優' : '优', `${locale} marker glyph`);
       // Product wordmark is 優mux / 优mux; approval keeps its separate YO marker key.
@@ -9814,7 +9851,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const tips = api.startupHelperCatalog();
     assert.equal(tips.length, 14, 'startup helper catalog includes the initial tip set');
     assert.ok(tips.some(tip => tip.title === 'Drag files into terminals'), 'startup helper catalog includes file drag/drop');
-    assert.ok(tips.some(tip => tip.title === 'Ask YO!agent for direction'), 'startup helper catalog includes YO!agent guidance');
+    assert.ok(tips.some(tip => tip.title === 'Ask YO!Agent for direction'), 'startup helper catalog includes YO!Agent guidance');
     assert.ok(tips.some(tip => tip.title === 'Review agent changes'), 'startup helper catalog includes Differ');
     assert.equal(api.readStartupHelperIndex(tips.length), 0, 'startup helper index defaults to first tip');
     api.writeStartupHelperIndex(15);
@@ -9922,7 +9959,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(new RegExp(`preferences-radio-swatches joined[\\s\\S]*--preferences-radio-swatch:#3b82f6[\\s\\S]*--preferences-radio-swatch:${UI_PINS.textSelectionBg}`).test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
     assert.ok(/data-setting-path="appearance\.pane_ring_opacity"[^>]*data-setting-type="range"[^>]*min="5"[^>]*max="100"/.test(appearanceHtml), 'Pane ring opacity renders as a 5-100 Appearance slider');
     assert.equal(appearanceHtml.includes('data-setting-path="appearance.inactive_pane_gradient"'), false, 'Inactive pane gradient is removed from Appearance');
-    assert.ok(/data-setting-path="appearance\.inactive_pane_opacity"[^>]*data-setting-type="range"[^>]*min="0"[^>]*max="100"/.test(appearanceHtml), 'Inactive pane opacity renders as a 0-100 Appearance slider');
+    assert.ok(/data-setting-path="appearance\.inactive_pane_dim_opacity"[^>]*data-setting-type="range"[^>]*min="0"[^>]*max="100"[^>]*step="1"/.test(appearanceHtml), 'Inactive pane opacity renders in one-point steps');
     const terminalHtml = sectionHtml('terminal');
     assert.ok(terminalHtml.includes('data-setting-path="appearance.tmux_status_bar"'), 'Terminal owns tmux status-bar placement');
     assert.ok(terminalHtml.includes('data-setting-path="terminal_editor.scrollback"'), 'Terminal owns scrollback');
@@ -9945,7 +9982,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(separateAppearanceHtml.includes('data-setting-path="appearance.global_font_size"'), false, 'global font size is hidden when synchronization is disabled');
     assert.ok(separateAppearanceHtml.includes('data-setting-path="appearance.ui_font_size"'), 'unchecking synchronization reveals the separate UI font size');
     assert.ok(separateAppearanceHtml.includes('data-setting-path="appearance.terminal_font_size"'), 'unchecking synchronization reveals the separate terminal font size');
-    assert.ok(/data-setting-path="appearance\.tab_width"[\s\S]*data-setting-path="appearance\.pane_spacing"/.test(sizesHtml), 'Sizes contains layout dimensions');
+    assert.ok(/data-setting-path="appearance\.tab_width"[\s\S]*data-setting-path="appearance\.max_tabs_per_pane"/.test(sizesHtml), 'Sizes contains layout dimensions');
+    assert.ok(/data-setting-path="appearance\.pane_ring_opacity"[\s\S]*data-setting-path="appearance\.pane_spacing"[\s\S]*data-setting-path="appearance\.inactive_pane_dim_opacity"/.test(appearanceHtml), 'Pane spacing sits with the other pane settings in Appearance');
+    assert.equal(sizesHtml.includes('data-setting-path="appearance.pane_spacing"'), false, 'Pane spacing is not repeated in Sizes');
     const editorOptionsHtml = sectionHtml('editor_options');
     assert.ok(/data-setting-path="terminal_editor\.word_wrap"[\s\S]*data-setting-path="editor\.autosave"/.test(editorOptionsHtml), 'Editor options groups editor behavior settings');
     assert.ok(sectionHtml('general').includes('data-setting-path="general.default_layout"'), 'Default layout lives in General');
@@ -9959,10 +9998,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(settingsRuntimeSource.includes("root.setProperty('--pane-active-ring-opacity', `${percent}%`)"), 'The active pane ring opacity follows the 5-100% preference');
     assert.equal(settingsRuntimeSource.includes('Math.max(75, paneRingOpacity)'), false, 'The active pane ring must not force a 75% floor');
     assert.equal(settingsRuntimeSource.includes('inactive_pane_gradient'), false, 'Inactive pane gradient is removed from runtime settings');
-    assert.ok(settingsRuntimeSource.includes("applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60))"), 'Inactive pane opacity defaults to 60% in runtime settings');
+    assert.ok(settingsRuntimeSource.includes("applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_dim_opacity', 12))"), 'Inactive pane opacity defaults to 12% in runtime settings');
     assert.deepEqual(serverSettingsSchema.SETTING_LIMITS['appearance.pane_ring_opacity'], [5, 100], 'Pane ring opacity server settings clamp allows 5%');
     assert.equal('inactive_pane_gradient' in serverSettingsSchema.DEFAULT_SETTINGS.appearance, false, 'Inactive pane gradient is removed from server settings');
-    assert.deepEqual(serverSettingsSchema.SETTING_LIMITS['appearance.inactive_pane_opacity'], [0, 100], 'Inactive pane opacity server settings clamp is 0-100');
+    assert.deepEqual(serverSettingsSchema.SETTING_LIMITS['appearance.inactive_pane_dim_opacity'], [0, 100], 'Inactive pane opacity server settings clamp is 0-100');
   });
 
   test('Preferences reset controls are fully localized', () => {

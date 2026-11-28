@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="320" viewBox="0 0 720 320" role="img" aria-labelledby="title desc">
+  <title id="title">Differ shows what an agent changed</title>
+  <desc id="desc">A Codex session in Tabber finishes its work. Differ then lists the three files it changed in the my-app repository, and selecting one shows its diff.</desc>
+  <style>
+    svg { --cycle: 12s; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .mono { font-family: ui-monospace, monospace; }
+    .working { opacity: 1; }
+    .done, .row, .diff, .pointer { opacity: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .working { animation: working var(--cycle) step-end infinite; }
+      .done { animation: done var(--cycle) step-end infinite; }
+      .spin { animation: spin 1s linear infinite; transform-origin: 46px 87px; }
+      .row { animation: row var(--cycle) step-end var(--at) infinite; }
+      .diff { animation: diff var(--cycle) step-end infinite; }
+      .pointer { animation: pointer var(--cycle) ease-in-out infinite; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .working { opacity: 0; }
+      .done, .row, .diff { opacity: 1; }
+    }
+    /* Working 0-3s, files appear 3-4.2s, the pointer opens one at 6s, hold to 12s. */
+    @keyframes working { 0% { opacity: 1; } 25%, 100% { opacity: 0; } }
+    @keyframes done { 0% { opacity: 0; } 25%, 100% { opacity: 1; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes row { 0% { opacity: 0; } 25%, 100% { opacity: 1; } }
+    @keyframes diff { 0%, 50% { opacity: 0; } 52%, 100% { opacity: 1; } }
+    @keyframes pointer {
+      0%, 38% { opacity: 0; transform: translate(560px, 300px); }
+      42% { opacity: 1; transform: translate(560px, 300px); }
+      50% { opacity: 1; transform: translate(420px, 112px); }
+      60% { opacity: 1; transform: translate(420px, 112px); }
+      66%, 100% { opacity: 0; transform: translate(420px, 112px); }
+    }
+  </style>
+  <rect width="720" height="320" rx="12" fill="#11161d"/>
+  <!-- Tabber -->
+  <rect x="12" y="12" width="230" height="296" rx="8" fill="#1b222d"/>
+  <text x="28" y="40" font-size="13" font-weight="700" fill="#edf1f7">Tabber</text>
+  <rect x="20" y="64" width="214" height="46" rx="6" fill="#304530"/>
+  <g class="working">
+    <circle class="spin" cx="46" cy="87" r="8" fill="none" stroke="#f2ce7e" stroke-width="3" stroke-dasharray="30 20"/>
+  </g>
+  <g class="done">
+    <circle cx="46" cy="87" r="9" fill="#a8e312"/>
+    <path d="M41 87 l4 4 l7 -8" fill="none" stroke="#182012" stroke-width="2.5"/>
+  </g>
+  <text x="64" y="84" font-size="13" font-weight="700" fill="#edf1f7">codex · ci-fix</text>
+  <text x="64" y="101" font-size="11" fill="#aab7ca">Add a CI build for my-app</text>
+  <rect x="20" y="118" width="214" height="46" rx="6" fill="#181e27"/>
+  <circle cx="46" cy="141" r="8" fill="#9eb3cd"/>
+  <text x="64" y="138" font-size="13" font-weight="700" fill="#cad6e6">claude · docs</text>
+  <text x="64" y="155" font-size="11" fill="#8998ad">Waiting for your reply</text>
+  <rect x="20" y="172" width="214" height="46" rx="6" fill="#181e27"/>
+  <text x="40" y="200" font-size="13" fill="#8998ad" class="mono">$</text>
+  <text x="64" y="192" font-size="13" font-weight="700" fill="#cad6e6">shell</text>
+  <text x="64" y="209" font-size="11" fill="#8998ad">~/src/my-app</text>
+  <!-- Differ -->
+  <rect x="254" y="12" width="454" height="296" rx="8" fill="#1b222d"/>
+  <text x="270" y="40" font-size="13" font-weight="700" fill="#edf1f7">Differ</text>
+  <text x="330" y="40" font-size="12" fill="#aab7ca">changes made in ci-fix</text>
+  <rect x="266" y="54" width="430" height="28" rx="5" fill="#382b12"/>
+  <text x="278" y="73" font-size="12" font-weight="700" fill="#f2ce7e" class="mono">~/src/my-app</text>
+  <text x="684" y="73" font-size="12" fill="#f2ce7e" text-anchor="end" class="row" style="--at:0s">3</text>
+  <g class="row" style="--at:0s">
+    <rect x="266" y="90" width="430" height="26" rx="4" fill="#24303f"/>
+    <text x="278" y="108" font-size="12" font-weight="700" fill="#f2ce7e" class="mono">M</text>
+    <text x="298" y="108" font-size="12" fill="#edf1f7" class="mono">BUILD.bazel</text>
+    <text x="640" y="108" font-size="12" fill="#bde991" text-anchor="end" class="mono">+12</text>
+    <text x="684" y="108" font-size="12" fill="#ffadb3" text-anchor="end" class="mono">−2</text>
+  </g>
+  <g class="row" style="--at:0.6s">
+    <text x="278" y="134" font-size="12" font-weight="700" fill="#bde991" class="mono">A</text>
+    <text x="298" y="134" font-size="12" fill="#edf1f7" class="mono">tools/ci_build.sh</text>
+    <text x="640" y="134" font-size="12" fill="#bde991" text-anchor="end" class="mono">+40</text>
+  </g>
+  <g class="row" style="--at:1.2s">
+    <text x="278" y="160" font-size="12" font-weight="700" fill="#f2ce7e" class="mono">M</text>
+    <text x="298" y="160" font-size="12" fill="#edf1f7" class="mono">.github/workflows/ci.yml</text>
+    <text x="640" y="160" font-size="12" fill="#bde991" text-anchor="end" class="mono">+8</text>
+    <text x="684" y="160" font-size="12" fill="#ffadb3" text-anchor="end" class="mono">−3</text>
+  </g>
+  <g class="diff">
+    <rect x="266" y="176" width="430" height="120" rx="5" fill="#181e27"/>
+    <text x="278" y="196" font-size="11" fill="#8998ad" class="mono">BUILD.bazel</text>
+    <rect x="266" y="204" width="430" height="20" fill="#382b12" opacity="0.6"/>
+    <text x="278" y="218" font-size="11" fill="#ffadb3" class="mono">- go_test(name = "unit", size = "small")</text>
+    <rect x="266" y="226" width="430" height="20" fill="#182012"/>
+    <text x="278" y="240" font-size="11" fill="#bde991" class="mono">+ go_test(name = "unit", size = "medium")</text>
+    <rect x="266" y="248" width="430" height="20" fill="#182012"/>
+    <text x="278" y="262" font-size="11" fill="#bde991" class="mono">+ sh_test(name = "ci_build", srcs = ["tools/ci_build.sh"])</text>
+    <text x="278" y="286" font-size="11" fill="#aab7ca">Changed by codex · ci-fix</text>
+  </g>
+  <path class="pointer" d="M0 0 L0 16 L4 12 L8 20 L11 19 L7 11 L13 11 Z" fill="#edf1f7" stroke="#11161d" stroke-width="1"/>
+</svg>

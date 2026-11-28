@@ -88,6 +88,13 @@ func TestUpdateRoutesKeepStatusReadableAndInstallationAdminOnly(t *testing.T) {
 	if failedJob["state"] != "failed" || failedJob["error"] != "checkout has tracked or untracked changes" {
 		t.Fatalf("unexpected update job status envelope: %#v", payload)
 	}
+	retry := httptest.NewRequest(http.MethodPost, "/api/update-status", nil)
+	retry.SetBasicAuth("reader", "reader-pass")
+	retryDenied := httptest.NewRecorder()
+	s.protected(http.HandlerFunc(s.updateStatus)).ServeHTTP(retryDenied, retry)
+	if retryDenied.Code != http.StatusForbidden {
+		t.Fatalf("readonly retry = %d", retryDenied.Code)
+	}
 	post := httptest.NewRequest(http.MethodPost, "/api/self-update", nil)
 	post.SetBasicAuth("reader", "reader-pass")
 	denied := httptest.NewRecorder()
@@ -258,7 +265,7 @@ func TestSelfUpdatePreparesBeforeFastForwardAndLaunchesManagedInstance(t *testin
 				buildScript += "chmod 700 bazel-bin/cmd/yomux-go/yomux-go_/yomux-go\n"
 			}
 			if scenario == "native-incompatible" {
-				buildScript = strings.ReplaceAll(buildScript, "if [ \"$1\" = \"--operator\" ]; then printf '0.10.7\\n'; exit 0; fi", "if [ \"$1\" = \"--operator\" ]; then exit 64; fi")
+				buildScript = strings.ReplaceAll(buildScript, "if [ \"$1\" = \"--operator\" ]; then printf '0.10.7\\n'; exit 0; fi", "if [ \"$1\" = \"--operator\" ]; then printf 'native verification trace payload\\nnative launch probe rejected\\n' >&2; exit 64; fi")
 			}
 			if scenario == "changed-during-build" {
 				buildScript += "printf 'local edit' > \"$YOMUX_UPDATE_TEST_SOURCE/local.txt\"\n"
@@ -316,7 +323,7 @@ chmod 700 "$2/bin/yomux"
 					}
 					// macOS platform executables must run from their signed location.
 					wrapper := "#!/bin/sh\nexec " + shellQuote(command) + " \"$@\"\n"
-					if err := os.WriteFile(filepath.Join(path, name), []byte(wrapper), 0o700); err != nil {
+					if err := testsupport.WriteExecutable(filepath.Join(path, name), []byte(wrapper), 0o700); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -353,7 +360,18 @@ chmod 700 "$2/bin/yomux"
 					}
 				}
 			})
+			if scenario == "prepared" {
+				cwd, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.config, err = filepath.Rel(cwd, config)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			prepared, prepareErr := s.prepareSelfUpdate(context.Background(), job)
+			s.config = config
 			if got := strings.TrimSpace(gitRun(t, root, "rev-parse", "HEAD")); got != baseSHA {
 				t.Fatalf("preflight changed HEAD: %s", got)
 			}
@@ -375,6 +393,15 @@ chmod 700 "$2/bin/yomux"
 			if scenario == "build-failure" || scenario == "native-incompatible" {
 				if prepareErr == nil {
 					t.Fatal("broken candidate passed preflight")
+				}
+				if scenario == "native-incompatible" {
+					data, err := os.ReadFile(filepath.Join(config, "self-update", targetSHA, job.ID, "build.log"))
+					if err != nil || !strings.Contains(string(data), "native verification trace payload") {
+						t.Fatalf("verification output missing from private log: %v %s", err, data)
+					}
+					if strings.Contains(prepareErr.Error(), "trace payload") || !strings.Contains(prepareErr.Error(), "native launch probe rejected") {
+						t.Fatalf("verification notice is not a short reason: %v", prepareErr)
+					}
 				}
 			} else {
 				if prepareErr != nil {
@@ -410,12 +437,15 @@ chmod 700 "$2/bin/yomux"
 				}
 
 				// A second build would now fail; activation must reuse the verified output.
-				if err := os.WriteFile(filepath.Join(prepared.stage, "tools", "build_go.sh"), []byte("#!/bin/sh\nexit 81\n"), 0o700); err != nil {
+				if err := testsupport.WriteExecutable(filepath.Join(prepared.stage, "tools", "build_go.sh"), []byte("#!/bin/sh\nexit 81\n"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if scenario == "build-failure" {
 				retryConfig := t.TempDir()
+				if err := os.Chmod(retryConfig, 0o700); err != nil {
+					t.Fatal(err)
+				}
 				retryServer := &server{root: runtimeRoot, config: retryConfig, updateJobPath: filepath.Join(retryConfig, "job.json")}
 				for attempt := range 3 {
 					_, err := retryServer.prepareSelfUpdate(context.Background(), selfUpdateJob{ID: fmt.Sprintf("preflight-%d", attempt), Target: job.Target, TargetSHA: targetSHA})
@@ -656,7 +686,7 @@ func TestUpdateCheckerPinsManifestAndRecoversOffline(t *testing.T) {
 		}
 		stage := t.TempDir()
 		binary := filepath.Join(stage, "yomux-go")
-		if err := os.WriteFile(binary, []byte("prepared native executable"), 0o700); err != nil {
+		if err := testsupport.WriteExecutable(binary, []byte("prepared native executable"), 0o700); err != nil {
 			return nil, err
 		}
 		for name, body := range map[string]string{"yomux.js": "prepared script", "yomux.css": "prepared style", "vendor/dependency.js": "prepared dependency"} {
@@ -772,7 +802,7 @@ func TestSelfUpdateSupervisorPersistsFailureAfterParentExit(t *testing.T) {
 	gatePath := filepath.Join(directory, "release-launcher-gate")
 	bootPath := filepath.Join(directory, "boot.sh")
 	boot := "#!/bin/sh\nwhile [ ! -f \"$1\" ]; do :; done\nprintf 'fixture launch failed\\n' >&2\nexit 23\n"
-	if err := os.WriteFile(bootPath, []byte(boot), 0o700); err != nil {
+	if err := testsupport.WriteExecutable(bootPath, []byte(boot), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&server{updateJobPath: jobPath}).saveUpdateJob(selfUpdateJob{ID: "detached-failure", State: "restarting", Target: "0.10.7", TargetSHA: strings.Repeat("a", 40)}); err != nil {
@@ -832,7 +862,7 @@ func TestSelfUpdateSupervisorCompletesAfterLauncherReadiness(t *testing.T) {
 	gatePath := filepath.Join(directory, "release-launcher-gate")
 	bootPath := filepath.Join(directory, "boot.sh")
 	boot := "#!/bin/sh\nwhile [ ! -f \"$1\" ]; do :; done\nexit 0\n"
-	if err := os.WriteFile(bootPath, []byte(boot), 0o700); err != nil {
+	if err := testsupport.WriteExecutable(bootPath, []byte(boot), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&server{updateJobPath: jobPath}).saveUpdateJob(selfUpdateJob{ID: "detached-success", State: "restarting", Target: "0.10.7", TargetSHA: strings.Repeat("c", 40)}); err != nil {
@@ -979,5 +1009,349 @@ func TestSelfUpdatePreservesEffectiveLaunchSettings(t *testing.T) {
 	args = s.selfUpdateBootArgs()
 	if slices.Contains(args, "--no-dang") || slices.Contains(args, "--cert") || !slices.Contains(args, "--http") {
 		t.Fatalf("HTTP restart changed mode: %v", args)
+	}
+}
+
+func TestUpdateStageWriterAdmission(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(base, "self-update", "preflight")
+	if err := os.MkdirAll(stage, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := stage + ".owner"
+	if err := os.WriteFile(marker, []byte("yomux-update-preflight-v1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateUpdateStage(stage); err != nil {
+		t.Fatal(err)
+	}
+	build := func() (map[string][]byte, error) { return map[string][]byte{"fixture.js": []byte("ready")}, nil }
+	if err := nativeWriteAssets(stage, filepath.Join(stage, "static"), build); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(stage, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("stage acquired .git: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(stage, ".asset-writer"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := nativeWriteAssets(stage, filepath.Join(stage, "static"), build); err == nil {
+		t.Fatal("competing writer admitted")
+	}
+	if err := os.Remove(filepath.Join(stage, ".asset-writer")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{stage, marker} {
+		if err := os.Chmod(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateUpdateStage(stage); err == nil {
+			t.Fatalf("public path admitted: %s", path)
+		}
+		mode := os.FileMode(0700)
+		if path == marker {
+			mode = 0600
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Rename(marker, marker+".saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(marker+".saved", marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateUpdateStage(stage); err == nil {
+		t.Fatal("symlink marker admitted")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(marker+".saved", marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, ".git"), []byte("gitdir: missing\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nativeAssetWriterSlot(stage); err == nil {
+		t.Fatal("broken Git checkout fell back to archive")
+	}
+	if _, err := nativeAssetWriterSlot(base); err == nil {
+		t.Fatal("unmarked archive admitted")
+	}
+}
+
+func TestManualUpdateRetryCoalescesAndThrottles(t *testing.T) {
+	checker := newUpdateChecker(t.TempDir(), "0.11.0", func() string { return "none" })
+	var queued func()
+	count := 0
+	start := func(fn func()) bool { count++; queued = fn; return true }
+	now := time.Now()
+	if accepted, limited := checker.QueueManual(context.Background(), start, now); !accepted || limited {
+		t.Fatal("first retry rejected")
+	}
+	for i := 0; i < 10; i++ {
+		if accepted, limited := checker.QueueManual(context.Background(), start, now); accepted || limited {
+			t.Fatal("burst did not coalesce")
+		}
+	}
+	if count != 1 {
+		t.Fatalf("scheduled %d checks", count)
+	}
+	queued()
+	if accepted, limited := checker.QueueManual(context.Background(), start, now.Add(29*time.Second)); accepted || !limited {
+		t.Fatal("retry was not throttled")
+	}
+	if accepted, limited := checker.QueueManual(context.Background(), start, now.Add(30*time.Second)); !accepted || limited {
+		t.Fatal("retry did not recover")
+	}
+	queued()
+}
+
+func TestUpdateWriterUsesLinkedCheckoutGitSlot(t *testing.T) {
+	root := t.TempDir()
+	gitRun(t, root, "init", "--initial-branch=main")
+	gitRun(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture")
+	linked := filepath.Join(t.TempDir(), "linked")
+	gitRun(t, root, "worktree", "add", "--detach", linked)
+	output, err := nativeRepositoryPath(linked, "--absolute-git-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, err := nativeAssetWriterSlot(linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slot != filepath.Join(strings.TrimSpace(string(output)), "yolomux", "worktree-writer") {
+		t.Fatalf("wrong linked writer slot: %s", slot)
+	}
+}
+
+func TestUpdateRetryRouteCoalescesDuringPreparation(t *testing.T) {
+	checker := newUpdateChecker(t.TempDir(), "0.11.0", nil)
+	checker.running = true
+	s := &server{updates: checker, producerContext: context.Background()}
+	// Preparation holds this mutex throughout the build. Retry must not acquire it.
+	s.updateJobMu.Lock()
+	defer s.updateJobMu.Unlock()
+	for i := 0; i < 8; i++ {
+		response := httptest.NewRecorder()
+		s.updateStatus(response, httptest.NewRequest(http.MethodPost, "/api/update-status", nil))
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("coalesced retry = %d %s", response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestUpdateStageRetiresOnlyStaleAssetWriters(t *testing.T) {
+	config, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(config, "self-update", "preflight")
+	if err := prepareUpdateStage(config, stage); err != nil {
+		t.Fatal(err)
+	}
+	hostID, err := productHostPartitionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := exec.Command("true")
+	if err := finished.Run(); err != nil {
+		t.Fatal(err)
+	}
+	live := map[string]any{
+		"stable_host_id": hostID, "boot_id": readIdentityValue("", "/proc/sys/kernel/random/boot_id", "unknown-boot"),
+		"pid": os.Getpid(), "process_start_identity": processStartIdentity(os.Getpid()),
+	}
+	with := func(changes map[string]any) map[string]any {
+		record := map[string]any{}
+		for key, value := range live {
+			record[key] = value
+		}
+		for key, value := range changes {
+			record[key] = value
+		}
+		return record
+	}
+	slot := filepath.Join(stage, ".asset-writer")
+	for _, test := range []struct {
+		name    string
+		record  map[string]any
+		age     time.Duration
+		retired bool
+	}{
+		{name: "live writer", record: live},
+		{name: "writer on another host", record: with(map[string]any{"stable_host_id": "another-host", "pid": finished.Process.Pid})},
+		{name: "writer before a reboot", record: with(map[string]any{"boot_id": "an-earlier-boot"}), retired: true},
+		{name: "exited writer", record: with(map[string]any{"pid": finished.Process.Pid, "process_start_identity": "proc:0"}), retired: true},
+		{name: "recycled writer pid", record: with(map[string]any{"process_start_identity": "proc:0"}), retired: true},
+		{name: "unrecorded writer still starting"},
+		{name: "unrecorded writer that died", age: 2 * assetWriterUnrecordedGrace, retired: true},
+	} {
+		if err := os.Mkdir(slot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if test.record != nil {
+			data, err := json.Marshal(test.record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(slot, "owner.json"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		declared := time.Now().Add(-test.age)
+		if err := os.Chtimes(slot, declared, declared); err != nil {
+			t.Fatal(err)
+		}
+		err := prepareUpdateStage(config, stage)
+		_, slotErr := os.Lstat(slot)
+		if test.retired {
+			if err != nil || !os.IsNotExist(slotErr) {
+				t.Fatalf("%s: prepare=%v slot=%v; want the slot retired", test.name, err, slotErr)
+			}
+			if err := validateUpdateStage(stage); err != nil {
+				t.Fatalf("%s: rebuilt stage invalid: %v", test.name, err)
+			}
+			continue
+		}
+		if err == nil || slotErr != nil {
+			t.Fatalf("%s: prepare=%v slot=%v; want the writer kept and the stage refused", test.name, err, slotErr)
+		}
+		if err := os.RemoveAll(slot); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestUpdateStageRejectsRedirectBeforeMutation(t *testing.T) {
+	config, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(config, "self-update")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePrivateUpdateParents(config, filepath.Join(config, "self-update", "sha")); err == nil {
+		t.Fatal("redirect admitted")
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("redirect target changed: %v %v", entries, err)
+	}
+}
+
+func TestSelfUpdateRecoveryPreservesBinaryAndArguments(t *testing.T) {
+	args := []string{"--config", "/fixture/config with spaces", "--stats", "/fixture/quote'and$space"}
+	command := selfUpdateRecoveryCommand("/fixture/root with spaces", "/fixture/prepared binary", args)
+	// Substitute only the executable to inspect the shell's exact argument roundtrip.
+	command = strings.Replace(command, "bash ", "printf '%s\\n' ", 1)
+	output, err := exec.Command("sh", "-c", command).CombinedOutput()
+	if err != nil {
+		t.Fatalf("recovery command: %v %s", err, output)
+	}
+	want := append([]string{"/fixture/root with spaces/boot.sh"}, args...)
+	if !reflect.DeepEqual(strings.Split(strings.TrimSuffix(string(output), "\n"), "\n"), want) {
+		t.Fatalf("recovery split arguments: %s", output)
+	}
+	if !strings.Contains(command, shellQuote("YOMUX_GO_BINARY=/fixture/prepared binary")) {
+		t.Fatal("recovery lost candidate binary")
+	}
+}
+
+func TestInstalledRecoveryRepairsMixedPrefixBeforeRestart(t *testing.T) {
+	root := t.TempDir()
+	stage := filepath.Join(root, "stage with spaces")
+	prefix := filepath.Join(root, "prefix with spaces")
+	app := filepath.Join(prefix, "lib", "yomux")
+	source := filepath.Join(root, "source with spaces")
+	for _, path := range []string{filepath.Join(stage, "tools"), app, source} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binary := filepath.Join(stage, "yomux-go")
+	if err := testsupport.WriteExecutable(binary, []byte("candidate executable"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(app, "version.yaml")
+	if err := os.WriteFile(manifest, []byte("old manifest"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	flag := filepath.Join(stage, "fail-once")
+	if err := os.WriteFile(flag, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	installer := `#!/bin/sh
+set -eu
+[ "$YOMUX_INSTALL_PREPARED" = 1 ]
+[ "$1" = --prefix ]
+[ "$3" = --source-root ]
+app="$2/lib/yomux"
+cp "$YOMUX_GO_BINARY" "$app/yomux-go"
+if [ -f fail-once ]; then rm fail-once; exit 83; fi
+printf 'new manifest' > "$app/version.yaml"
+printf '#!/bin/sh\n[ "$(cat "$(dirname "$0")/version.yaml")" = "new manifest" ] || exit 84\nprintf restarted > "$(dirname "$0")/restarted"\n' > "$app/boot.sh"
+`
+	path := filepath.Join(stage, "tools", "install.sh")
+	if err := testsupport.WriteExecutable(path, []byte(installer), 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared := &preparedSelfUpdate{root: source, stage: stage, binary: binary, runtimeRoot: app, installation: &nativeInstallSource{Prefix: prefix}}
+	command := prepared.recoveryCommand([]string{"--config", filepath.Join(root, "config with spaces")})
+	first := exec.Command("sh", "-c", command)
+	if output, err := first.CombinedOutput(); err == nil {
+		t.Fatalf("partial installer did not fail: %s", output)
+	}
+	if data, err := os.ReadFile(filepath.Join(app, "yomux-go")); err != nil || string(data) != "candidate executable" {
+		t.Fatalf("partial binary = %q %v", data, err)
+	}
+	if data, err := os.ReadFile(manifest); err != nil || string(data) != "old manifest" {
+		t.Fatalf("manifest changed before failure: %q %v", data, err)
+	}
+	if output, err := exec.Command("sh", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("printed recovery did not repair prefix: %v %s", err, output)
+	}
+	if data, err := os.ReadFile(filepath.Join(app, "restarted")); err != nil || string(data) != "restarted" {
+		t.Fatalf("managed restart did not follow repair: %q %v", data, err)
+	}
+}
+
+func TestUpdatePermissionDiagnosticPreservesExistingMode(t *testing.T) {
+	config := t.TempDir()
+	if err := os.Chmod(config, 0755); err != nil {
+		t.Fatal(err)
+	}
+	err := ensurePrivateUpdateParents(config, filepath.Join(config, "self-update"))
+	if err == nil || !strings.Contains(err.Error(), "0755") || !strings.Contains(err.Error(), "0700") {
+		t.Fatalf("permission diagnostic: %v", err)
+	}
+	info, statErr := os.Stat(config)
+	if statErr != nil || info.Mode().Perm() != 0755 {
+		t.Fatalf("existing mode changed: %v %v", info, statErr)
+	}
+}
+
+func TestUpdatePreparationFailureKeepsConcreteReason(t *testing.T) {
+	stage := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stage, "build.log"), []byte("fatal: executable cannot load library libfixture\nVerification: native launch support\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("exit status 1")
+	err := updatePreparationFailure(stage, "verification", cause)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "cannot load library") || strings.Contains(err.Error(), ": Verification:") {
+		t.Fatalf("lost concrete update failure: %v", err)
 	}
 }

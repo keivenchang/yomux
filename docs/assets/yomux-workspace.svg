@@ -1,0 +1,657 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="595" viewBox="0 0 1120 595" role="img" aria-labelledby="title desc">
+  <title id="title">A YOmux workspace in dark mode</title>
+  <desc id="desc">Codex starts a test run beside Claude and keeps running as the pointer opens TODO.md, Split view, Differ, and YO!Stats. The yellow completion notice returns to Codex’s finished test output and idle prompt before the next run starts.</desc>
+  <style>
+    svg { --cycle: 25s; }
+    .screen, .codex-done, .codex-finished, .codex-settled { visibility: hidden; }
+    .initial { visibility: visible; }
+    .task-checked, .visual-task-checked, .demo-pointer, .click-ring, .typing-caret, .codex-output { opacity: 0; }
+    .typing-demo { --typed-width: 154px; }
+    .typed-text { clip-path: inset(-3px calc(100% - var(--typed-width)) -3px 0); }
+    .typing-caret { transform: translateX(calc(var(--typed-width) + 2px)); }
+    @media (prefers-reduced-motion: no-preference) {
+      .screen { animation: var(--frame) var(--cycle) step-end infinite; }
+      .task-unchecked { animation: uncheck-task var(--cycle) step-end infinite; }
+      .task-checked { animation: check-task var(--cycle) step-end infinite; }
+      .visual-task-checked { animation: check-visual-task var(--cycle) step-end infinite; }
+      .demo-pointer { animation: move-pointer var(--cycle) ease-in-out infinite; }
+      .click-ring { animation: show-click var(--cycle) ease-out var(--click-at) infinite; }
+      .codex-running { animation: codex-running var(--cycle) step-end infinite, pulse-play 1s ease-in-out infinite; }
+      .codex-done { animation: codex-done var(--cycle) step-end infinite, pulse-pause var(--cycle) ease-in-out infinite; }
+      .codex-finished, .codex-settled { animation: var(--frame) var(--cycle) step-end infinite; }
+      .codex-output { animation: show-output var(--cycle) step-end var(--output-at) infinite; }
+      .claude-timer { animation: tick-timer var(--cycle) steps(6, end) infinite; }
+      .codex-query { animation: type-codex-query var(--cycle) steps(32, end) infinite; }
+      .codex-command { animation: submit-codex-query var(--cycle) step-end infinite; }
+      .codex-draft { animation: show-codex-draft var(--cycle) step-end infinite; }
+      .stats-samples { animation: reveal-samples var(--cycle) step-end infinite; }
+      .typing-demo { animation: type-task var(--cycle) step-end infinite; }
+      .typing-caret { animation: show-caret var(--cycle) step-end infinite; }
+    }
+    .codex-finished { --frame: codex-finished; }
+    .codex-settled { --frame: codex-settled; }
+    .stack { --frame: stack; }
+    .todo { --frame: todo; }
+    .split { --frame: split; }
+    .document { --frame: document; }
+    .finder-demo { --frame: finder-demo; }
+    .differ { --frame: differ; }
+    .differ-files { --frame: differ-files; }
+    .stats { --frame: stats; }
+    .tabber { --frame: tabber; }
+    .full-workspace { --frame: full-workspace; }
+    .return-notice { --frame: return-notice; }
+
+    /* Claude and Codex 0–7s, ViewEdit 7–10s, Split 10–17s, Differ 17–20s, YO!Stats 20–25s. */
+    @keyframes stack {
+      0% { visibility: visible; }
+      28%, 100% { visibility: hidden; }
+    }
+    @keyframes todo {
+      0%, 40%, 100% { visibility: hidden; }
+      28% { visibility: visible; }
+    }
+    @keyframes split {
+      0%, 68%, 100% { visibility: hidden; }
+      40% { visibility: visible; }
+    }
+    @keyframes document {
+      0%, 68%, 100% { visibility: hidden; }
+      28% { visibility: visible; }
+    }
+    @keyframes finder-demo {
+      0%, 68%, 100% { visibility: hidden; }
+      62.4% { visibility: visible; }
+    }
+    @keyframes differ {
+      0%, 80%, 100% { visibility: hidden; }
+      68% { visibility: visible; }
+    }
+    @keyframes differ-files {
+      0%, 74.4%, 100% { visibility: hidden; }
+      68% { visibility: visible; }
+    }
+    @keyframes stats {
+      0% { visibility: hidden; }
+      80%, 100% { visibility: visible; }
+    }
+    @keyframes tabber {
+      0%, 74.4%, 100% { visibility: visible; opacity: 1; }
+      /* Animated status icons have their own visibility. Hide the whole pane while it is inactive. */
+      62.4% { visibility: hidden; opacity: 0; }
+    }
+    @keyframes full-workspace {
+      0% { visibility: hidden; }
+      28%, 100% { visibility: visible; }
+    }
+    @keyframes codex-running {
+      0%, 92%, 100% { visibility: hidden; }
+      14% { visibility: visible; }
+    }
+    @keyframes type-codex-query {
+      0%, 5.68% { clip-path: inset(-3px 100% -3px 0); }
+      13.68%, 100% { clip-path: inset(-3px 0 -3px 0); }
+    }
+    @keyframes submit-codex-query {
+      0% { opacity: 0; }
+      14%, 100% { opacity: 1; }
+    }
+    @keyframes show-codex-draft {
+      0%, 14%, 100% { opacity: 0; }
+      5% { opacity: 1; }
+    }
+    @keyframes return-notice {
+      0% { visibility: hidden; }
+      92%, 100% { visibility: visible; }
+    }
+    @keyframes show-output {
+      0% { opacity: 1; }
+      34.8%, 100% { opacity: 0; }
+    }
+    @keyframes tick-timer {
+      0% { transform: translateY(0); }
+      24%, 100% { transform: translateY(-120px); }
+    }
+    @keyframes codex-done {
+      0%, 92%, 100% { visibility: visible; }
+      14% { visibility: hidden; }
+    }
+    @keyframes codex-finished {
+      0% { visibility: visible; }
+      14%, 100% { visibility: hidden; }
+    }
+    @keyframes codex-settled {
+      0% { visibility: visible; }
+      5%, 100% { visibility: hidden; }
+    }
+    @keyframes pulse-play {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .25; }
+    }
+    @keyframes pulse-pause {
+      0%, 92%, 96%, 100% { opacity: 1; }
+      94%, 98% { opacity: .25; }
+    }
+    @keyframes reveal-samples {
+      0% { width: 0; }
+      80% { width: 252px; }
+      84% { width: 270px; }
+      88% { width: 288px; }
+      92% { width: 306px; }
+      96%, 100% { width: 324px; }
+    }
+    @keyframes uncheck-task {
+      0%, 68%, 100% { opacity: 1; }
+      56.8% { opacity: 0; }
+    }
+    @keyframes check-task {
+      0%, 68%, 100% { opacity: 0; }
+      56.8% { opacity: 1; }
+    }
+    @keyframes check-visual-task {
+      0%, 68%, 100% { opacity: 0; }
+      52.8% { opacity: 1; }
+    }
+    @keyframes type-task {
+      0% { --typed-width: 106.625px; }
+      30.08% { --typed-width: 112.53125px; }
+      30.8% { --typed-width: 121.59375px; }
+      31.52% { --typed-width: 125.46875px; }
+      32.24% { --typed-width: 129.34375px; }
+      32.96% { --typed-width: 138.40625px; }
+      33.68% { --typed-width: 147.6875px; }
+      34.4%, 100% { --typed-width: 154px; }
+    }
+    @keyframes show-caret {
+      0%, 36.4%, 100% { opacity: 0; }
+      29.36% { opacity: 1; }
+    }
+    @keyframes move-pointer {
+      0%, 0.48% { opacity: 1; transform: translate(956px, 135px); }
+      1.84% { opacity: 0; transform: translate(978px, 159px); }
+      24.32% { opacity: 0; transform: translate(704px, 225px); }
+      25.08% { opacity: 1; transform: translate(676px, 191px); }
+      27.48%, 28.4% { opacity: 1; transform: translate(598px, 83px); }
+      29.36% { opacity: 1; transform: translate(524px, 417px); }
+      30.08% { opacity: 0; transform: translate(536px, 435px); }
+      35.8% { opacity: 0; transform: translate(632px, 379px); }
+      37% { opacity: 1; transform: translate(606px, 342px); }
+      39.4%, 40.32% { opacity: 1; transform: translate(566px, 125px); }
+      41.6% { opacity: 0; transform: translate(583px, 145px); }
+      43.2% { opacity: 0; transform: translate(1010px, 465px); }
+      45.2% { opacity: 1; transform: translate(974px, 453px); }
+      52%, 57% { opacity: 1; transform: translate(744px, 405px); }
+      62%, 62.8% { opacity: 1; transform: translate(54px, 83px); }
+      67.4%, 68.6% { opacity: 1; transform: translate(105px, 205px); }
+      70.4% { opacity: 0; transform: translate(129px, 222px); }
+      70.8% { opacity: 0; transform: translate(456px, 242px); }
+      72% { opacity: 1; transform: translate(394px, 207px); }
+      74.4%, 75.2% { opacity: 1; transform: translate(218px, 83px); }
+      79.4%, 80.72% { opacity: 1; transform: translate(105px, 247px); }
+      82.6% { opacity: 0; transform: translate(129px, 268px); }
+      96.48% { opacity: 0; transform: translate(759px, 252px); }
+      97.44% { opacity: 1; transform: translate(804px, 217px); }
+      99.56%, 100% { opacity: 1; transform: translate(956px, 135px); }
+    }
+    @keyframes show-click {
+      0% { opacity: .95; }
+      1.68%, 100% { opacity: 0; }
+    }
+    .tab { fill: #293c26; stroke: #628043; }
+    .tab-active { fill: #a8e312; }
+    .tab-name { font-size: 15px; font-weight: 650; }
+    .codex-draft { opacity: 0; }
+    .active-pane { fill: none; stroke: #8aca24; stroke-width: 2px; }
+    .pane-separator { stroke: #e2b844; stroke-width: 2px; stroke-opacity: .5; }
+    .pane-separator-grip { stroke: #e8c86a; stroke-width: 4px; stroke-linecap: round; }
+  </style>
+  <defs>
+    <linearGradient id="workspace" x2="0" y2="1">
+      <stop stop-color="#1d2430"/>
+      <stop offset="1" stop-color="#141a23"/>
+    </linearGradient>
+    <path id="play" d="M0 0v12l10-6z" fill="#a6e64c"/>
+    <path id="pause" d="M0 0h3v12H0zm6 0h3v12H6z" fill="#f6c65b"/>
+    <rect id="stop" width="10" height="10" rx="1.5" fill="#f66d71"/>
+    <path id="tab-shape" d="M0 34V10A10 10 0 0 1 10 0h162a10 10 0 0 1 10 10v24z"/>
+    <path id="tab-controls" d="M0 0h9m12-4 8 8m0-8-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <path id="sidebar-tab" d="M0 31V9a9 9 0 0 1 9-9h58a9 9 0 0 1 9 9v22z" stroke="#628043"/>
+    <path id="sidebar-tab-minus" d="M0 0h8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <text id="claude-label" class="tab-name">Claude/tmux</text>
+    <text id="codex-label" class="tab-name">Codex/tmux</text>
+    <text id="markdown-label" class="tab-name">TODO.md</text>
+    <text id="stats-label" class="tab-name">YO!Stats</text>
+    <text id="codex-question">Can you plz run the tests again?</text>
+    <g id="codex-notice">
+      <rect width="224" height="60" rx="11" fill="#f6d572" stroke="#bc9a41"/>
+      <text x="14" y="24" fill="#382b12" font-size="14" font-weight="700">Working AI finished</text>
+      <text x="14" y="44" fill="#382b12" font-size="13">Codex finished the tests.</text>
+      <path d="m204 14 8 8m0-8-8 8" stroke="#624c25" stroke-width="1.5" stroke-linecap="round"/>
+    </g>
+    <clipPath id="stats-window">
+      <rect class="stats-samples" width="324" height="530"/>
+    </clipPath>
+    <g id="chart">
+      <rect width="360" height="175" rx="8" fill="#1b222d" stroke="#354150"/>
+      <path d="M20 59h320M20 99h320M20 139h320" stroke="#354150" fill="none"/>
+      <g font-size="12" fill="#aab7ca">
+        <text x="20" y="160">19:25</text>
+        <text x="340" y="160" text-anchor="end">19:40</text>
+      </g>
+    </g>
+    <rect id="checkbox" width="15" height="15" rx="4" fill="none" stroke="#7d92a8"/>
+    <g id="checked">
+      <rect width="15" height="15" rx="4" fill="#385d40"/>
+      <path d="m4 7 2.5 2.5 4.5-5" fill="none" stroke="#b6e68a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <g id="checklist">
+      <text fill="#d6ecaa" y="24" font-size="30" font-weight="750">Release checklist</text>
+      <path d="M0 38h328" stroke="#354150"/>
+      <text y="67" fill="#9eb3cd" font-size="17" font-weight="650">Before shipping</text>
+      <use href="#checked" y="80"/>
+      <use href="#checked" y="107"/>
+      <use href="#checkbox" y="134"/>
+      <g fill="#dce5f2" font-size="15">
+        <text x="26" y="93">Review the timeout change</text>
+        <text x="26" y="120">Run the regression tests</text>
+        <text x="26" y="147">Share the release notes</text>
+      </g>
+    </g>
+  </defs>
+
+  <rect width="1120" height="595" rx="20" fill="url(#workspace)"/>
+  <g font-family="system-ui, sans-serif">
+    <!-- Wordmark -->
+    <rect x="21" y="12" width="22" height="36" rx="6" fill="#a8e312"/>
+    <text x="32" y="41" text-anchor="middle" font-size="29" font-weight="600" fill="#121a12">Y</text>
+    <text x="45" y="41" font-size="29" font-weight="600"><tspan fill="#80c400">O</tspan><tspan fill="#4285f4">m</tspan><tspan fill="#ea4335">u</tspan><tspan fill="#ffbe00">x</tspan></text>
+    <g font-size="17" font-weight="650" fill="#dbe4f1">
+      <text x="169" y="38">File</text>
+      <text x="245" y="38">View</text>
+      <text x="327" y="38">tmux</text>
+      <text x="415" y="38">Tabs</text>
+      <text x="495" y="38">Help</text>
+    </g>
+    <path d="M156 27v9l6-4.5zM232 27v9l6-4.5zM314 27v9l6-4.5zM402 27v9l6-4.5zM482 27v9l6-4.5z" fill="#8e9bae"/>
+    <rect x="974" y="17" width="126" height="29" rx="8" fill="#202937" stroke="#354150"/>
+    <text x="988" y="37" font-size="13" fill="#c6cfdd">Agents</text>
+    <use href="#play" x="1038" y="26" aria-label="Running"/>
+    <text x="1052" y="37" font-size="13" fill="#c6cfdd">1</text>
+    <use class="codex-running" href="#play" x="1070" y="26"/>
+    <use class="codex-done" href="#pause" x="1070" y="26" aria-label="Done"/>
+    <text x="1084" y="37" font-size="13" fill="#c6cfdd">1</text>
+
+    <!-- Workspace tabs begin beside the sidebar header. -->
+    <g transform="translate(332 65)" fill="#edf1f7" color="#a9b8a4">
+      <use href="#tab-shape" class="tab"/>
+      <use href="#tab-shape" class="tab" x="195"/>
+      <use href="#tab-shape" class="tab" x="390"/>
+      <use href="#tab-shape" class="tab" x="585"/>
+      <use href="#tab-shape" class="tab-active screen initial stack"/>
+      <use href="#tab-shape" class="tab-active screen initial stack" x="390"/>
+      <use href="#tab-shape" class="tab-active screen document" x="195"/>
+      <use href="#tab-shape" class="tab-active screen differ" x="195"/>
+      <use href="#tab-shape" class="tab-active screen stats" x="585"/>
+      <use href="#claude-label" x="31" y="22"/>
+      <use href="#markdown-label" x="210" y="22"/>
+      <use href="#codex-label" x="421" y="22"/>
+      <use href="#stats-label" x="600" y="22"/>
+      <g fill="#182012">
+        <use href="#claude-label" class="screen initial stack" x="31" y="22"/>
+        <use href="#markdown-label" class="screen document" x="210" y="22"/>
+        <use href="#markdown-label" class="screen differ" x="210" y="22"/>
+        <use href="#codex-label" class="screen initial stack" x="421" y="22"/>
+        <use href="#stats-label" class="screen stats" x="600" y="22"/>
+      </g>
+      <use href="#play" x="13" y="11"/>
+      <use class="codex-running" href="#play" x="405" y="11"/>
+      <use class="codex-done" href="#pause" x="405" y="11"/>
+      <use href="#tab-controls" x="138" y="17"/>
+      <use href="#tab-controls" x="333" y="17"/>
+      <use href="#tab-controls" x="528" y="17"/>
+      <use href="#tab-controls" x="723" y="17"/>
+    </g>
+
+    <!-- Finder, Differ, and Tabber stay to the left of the workspace tabs. -->
+    <rect x="20" y="61" width="300" height="514" rx="10" fill="#1b222d" stroke="#354150"/>
+    <path class="pane-separator" d="M326 62v512"/>
+    <path class="pane-separator-grip" d="M326 302v32"/>
+    <path d="M20 99h300" stroke="#354150"/>
+    <g fill="#293c26">
+      <use href="#sidebar-tab" x="26" y="68"/>
+      <use href="#sidebar-tab" x="104" y="68"/>
+      <use href="#sidebar-tab" x="182" y="68"/>
+    </g>
+    <g fill="#c6cfdd" font-size="14" font-weight="650">
+      <text x="35" y="88">Finder</text>
+      <text x="113" y="88">Differ</text>
+      <text x="191" y="88">Tabber</text>
+    </g>
+    <g color="#a9b8a4">
+      <use href="#sidebar-tab-minus" x="85" y="84"/>
+      <use href="#sidebar-tab-minus" x="163" y="84"/>
+      <use href="#sidebar-tab-minus" x="241" y="84"/>
+    </g>
+    <g class="screen initial tabber">
+      <use href="#sidebar-tab" x="182" y="68" fill="#a8e312"/>
+      <text x="191" y="88" fill="#182012" font-size="14" font-weight="700">Tabber</text>
+      <use href="#sidebar-tab-minus" x="241" y="84" color="#40551d"/>
+      <g fill="#252e3b">
+        <rect x="30" y="111" width="280" height="34" rx="6"/>
+        <rect x="30" y="151" width="280" height="34" rx="6"/>
+        <rect x="30" y="191" width="280" height="34" rx="6"/>
+        <rect x="30" y="231" width="280" height="34" rx="6"/>
+      </g>
+      <g fill="#304530">
+        <rect class="screen initial stack" x="30" y="111" width="280" height="34" rx="6"/>
+        <rect class="screen initial stack" x="30" y="191" width="280" height="34" rx="6"/>
+        <rect class="screen document" x="30" y="151" width="280" height="34" rx="6"/>
+        <rect class="screen stats" x="30" y="231" width="280" height="34" rx="6"/>
+      </g>
+      <g fill="#edf1f7">
+        <use href="#play" x="44" y="122" aria-label="Running"/>
+        <use href="#claude-label" x="62" y="133"/>
+        <use href="#markdown-label" x="44" y="173"/>
+        <use class="codex-running" href="#play" x="44" y="202"/>
+        <use class="codex-done" href="#pause" x="44" y="202" aria-label="Done"/>
+        <use href="#codex-label" x="62" y="213"/>
+        <use href="#stats-label" x="44" y="253"/>
+      </g>
+    </g>
+
+    <g class="screen finder-demo">
+      <use href="#sidebar-tab" x="26" y="68" fill="#a8e312"/>
+      <text x="35" y="88" fill="#182012" font-size="14" font-weight="700">Finder</text>
+      <use href="#sidebar-tab-minus" x="85" y="84" color="#40551d"/>
+      <g fill="#d4deeb" font-size="14">
+        <text x="40" y="132" font-weight="650">▾  release-demo</text>
+        <text x="58" y="160">▸  docs</text>
+        <text x="58" y="184">▸  src</text>
+        <rect x="31" y="192" width="278" height="25" rx="4" fill="#304530"/>
+        <text x="61" y="210" fill="#f2ce7e" font-weight="650">TODO.md</text>
+        <text x="296" y="210" text-anchor="end" font-size="12"><tspan fill="#bde991">+6</tspan><tspan fill="#ffadb3"> −6</tspan></text>
+        <text x="61" y="238">README.md</text>
+        <text x="61" y="264">package.json</text>
+      </g>
+    </g>
+
+    <g class="screen differ-files">
+      <use href="#sidebar-tab" x="104" y="68" fill="#a8e312"/>
+      <text x="113" y="88" fill="#182012" font-size="14" font-weight="700">Differ</text>
+      <use href="#sidebar-tab-minus" x="163" y="84" color="#40551d"/>
+      <text x="37" y="126" fill="#edf1f7" font-size="15" font-weight="650">Session · Claude</text>
+      <text x="37" y="152" fill="#aab7ca" font-size="13">1 repository · 12 changed files</text>
+      <rect x="30" y="165" width="280" height="26" rx="5" fill="#303745"/>
+      <text x="40" y="183" fill="#f2ce7e" font-size="14" font-weight="650">▾  release-demo</text>
+      <text x="40" y="209" fill="#aab7ca" font-size="12">Compare  main → Working tree</text>
+      <rect x="31" y="221" width="278" height="22" rx="4" fill="#304530"/>
+      <g font-size="13" fill="#cbd6e6">
+        <text x="44" y="237" fill="#f2ce7e" font-weight="650">TODO.md</text>
+        <text x="43" y="260">▾  .github</text>
+        <text x="57" y="283">▾  workflows</text>
+        <text x="76" y="306">ci.yml</text>
+        <text x="43" y="329">▾  docs</text>
+        <text x="61" y="352">getting-started.md</text>
+        <text x="61" y="375">release-notes.md</text>
+        <text x="43" y="398">▾  src</text>
+        <text x="61" y="421">config.ts</text>
+        <text x="61" y="444">routes.ts</text>
+        <text x="61" y="467">server.ts</text>
+        <text x="43" y="490">▸  tests</text>
+        <text x="44" y="513">README.md</text>
+        <text x="44" y="536">package.json</text>
+        <text x="44" y="559">tsconfig.json</text>
+      </g>
+      <g text-anchor="end" font-size="12" font-family="ui-monospace, monospace" fill="#bde991">
+        <text x="298" y="237">+6<tspan fill="#ffadb3"> −6</tspan> M</text>
+        <text x="298" y="306">+7 M</text>
+        <text x="298" y="352">+9 M</text>
+        <text x="298" y="375">+32 A</text>
+        <text x="298" y="421">+2 M</text>
+        <text x="298" y="444">+4 M</text>
+        <text x="298" y="467">+1<tspan fill="#ffadb3"> −1</tspan> M</text>
+        <text x="298" y="490" fill="#aab7ca">2 files</text>
+        <text x="298" y="513">+5 M</text>
+        <text x="298" y="536">+2 M</text>
+        <text x="298" y="559">+3 M</text>
+      </g>
+    </g>
+
+
+    <!-- Separate tab groups for the two terminal panes. -->
+    <g class="screen initial stack">
+      <path class="pane-separator" d="M716 61v514"/>
+      <path class="pane-separator-grip" d="M716 302v32"/>
+      <rect x="332" y="105" width="377" height="470" rx="10" fill="#181e27" stroke="#354150"/>
+      <rect x="722" y="105" width="378" height="470" rx="10" fill="#181e27" stroke="#354150"/>
+      <path d="M332 143h377m13 0h378" stroke="#354150"/>
+      <use href="#play" x="351" y="118" aria-label="Running"/>
+      <text x="370" y="130" fill="#f0d0bd" font-size="16" font-weight="700">Claude</text>
+      <use href="#stop" x="680" y="119" aria-label="Stop terminal"/>
+      <use class="codex-running" href="#play" x="741" y="118" aria-label="Running"/>
+      <use class="codex-done" href="#pause" x="741" y="118" aria-label="Done"/>
+      <text x="761" y="130" fill="#bdcefa" font-size="16" font-weight="700">Codex</text>
+      <use href="#stop" x="1071" y="119" aria-label="Stop terminal"/>
+      <g font-family="ui-monospace, monospace" font-size="14">
+        <text x="351" y="179" fill="#edf1f7"><tspan fill="#f1a582">❯ </tspan>Review the timeout change</text>
+        <text x="368" y="202" fill="#edf1f7">and update TODO.md.</text>
+        <text x="351" y="249" fill="#cad6e6">The timeout is now 1.5 seconds.</text>
+        <text x="351" y="273" fill="#cad6e6">I’ll update the release checklist.</text>
+        <g fill="#b4c0d3">
+          <text x="351" y="319" fill="#f1a582">✻</text>
+          <text x="369" y="319">Working… (</text>
+          <svg x="454" y="306" width="9" height="17" overflow="hidden">
+            <g class="claude-timer">
+              <text y="13">0</text>
+              <text y="33">1</text>
+              <text y="53">2</text>
+              <text y="73">3</text>
+              <text y="93">4</text>
+              <text y="113">5</text>
+              <text y="133">6</text>
+            </g>
+          </svg>
+          <text x="464" y="319">s · esc to interrupt)</text>
+        </g>
+        <g class="codex-command">
+          <text x="741" y="272" fill="#9db7f9">❯</text>
+          <use href="#codex-question" x="758" y="272" fill="#edf1f7"/>
+          <text x="741" y="295" fill="#cad6e6">$ npm test -- timeout</text>
+        </g>
+        <text class="codex-output" style="--output-at: 4s" x="741" y="319" fill="#b4c0d3">Running 2 test suites…</text>
+        <text class="codex-output" style="--output-at: 5s" x="741" y="343" fill="#bde991">PASS  tests/timeout.test.ts</text>
+        <text class="codex-output" style="--output-at: 6s" x="741" y="367" fill="#b4c0d3">Running tests/server.test.ts…</text>
+        <g class="codex-finished">
+          <text x="741" y="218" fill="#8998ad" font-size="12">Previous run</text>
+          <text x="741" y="249" fill="#9db7f9">❯</text>
+          <use href="#codex-question" x="758" y="249" fill="#edf1f7"/>
+          <text x="741" y="295" fill="#cad6e6">$ npm test -- timeout</text>
+          <text x="741" y="343" fill="#bde991">PASS  tests/timeout.test.ts</text>
+          <text x="741" y="367" fill="#bde991">PASS  tests/server.test.ts</text>
+          <text x="741" y="391" fill="#cad6e6">12 tests passed.</text>
+        </g>
+        <g class="codex-draft">
+          <path d="M740 449h342" stroke="#354150"/>
+          <text x="741" y="478" fill="#edf1f7">❯</text>
+          <use class="codex-query" href="#codex-question" x="758" y="478" fill="#edf1f7"/>
+        </g>
+        <g class="codex-settled">
+          <path d="M740 449h342" stroke="#354150"/>
+          <text x="741" y="478" fill="#edf1f7">❯</text>
+          <rect x="762" y="464" width="9" height="17" fill="#f5de46"/>
+          <text x="762" y="478" fill="#9da9b8"><tspan fill="#121820">A</tspan>sk Codex to do anything</text>
+          <text x="741" y="506" fill="#aab7ca" font-size="13">GPT-6.2-Sol medium · ~/release-demo</text>
+        </g>
+      </g>
+      <path d="M350 521h341m49 0h342" stroke="#354150"/>
+      <text x="351" y="546" fill="#aab7ca" font-size="13" font-family="ui-monospace, monospace">tmux · release:claude</text>
+      <text x="741" y="546" fill="#aab7ca" font-size="13" font-family="ui-monospace, monospace">tmux · release:codex</text>
+    </g>
+
+    <!-- TODO takes over the workspace in ViewEdit. -->
+    <g class="screen todo">
+      <rect x="332" y="105" width="768" height="470" rx="10" fill="#1b222d" stroke="#354150"/>
+      <path d="M332 143h768" stroke="#354150"/>
+      <text x="350" y="130" fill="#edf1f7" font-size="16" font-weight="700">TODO.md</text>
+      <text x="457" y="130" fill="#b4c0d3" font-size="13">ViewEdit</text>
+      <rect x="541" y="112" width="50" height="25" rx="5" fill="#252f3d" stroke="#53647a"/>
+      <text x="566" y="130" text-anchor="middle" fill="#dce5f2" font-size="13" font-weight="650">Split</text>
+      <use href="#checklist" x="390" y="191"/>
+      <text x="390" y="396" fill="#9eb3cd" font-size="17" font-weight="650">After shipping</text>
+      <use href="#checkbox" x="390" y="410"/>
+      <g class="typing-demo">
+        <text class="typed-text" x="416" y="423" fill="#dce5f2" font-size="15">Watch the first rollout</text>
+        <path class="typing-caret" d="M416 409v17" stroke="#b6e68a" stroke-width="2"/>
+      </g>
+    </g>
+
+    <!-- Markdown source and the rendered checklist side by side. -->
+    <g class="screen split">
+      <rect x="332" y="105" width="768" height="470" rx="10" fill="#1b222d" stroke="#354150"/>
+      <rect x="334" y="144" width="381" height="429" rx="8" fill="#161d26"/>
+      <path d="M333 143h766" stroke="#354150"/>
+      <path class="pane-separator" d="M716 144v430"/>
+      <text x="350" y="130" fill="#edf1f7" font-size="16" font-weight="700">TODO.md</text>
+      <text x="457" y="130" fill="#b4c0d3" font-size="13">ViewEdit</text>
+      <rect x="541" y="112" width="50" height="25" rx="5" fill="#a8e312"/>
+      <text x="566" y="130" text-anchor="middle" fill="#182012" font-size="13" font-weight="700">Split</text>
+      <g fill="#b4c0d3" font-size="14" font-weight="650">
+        <text x="350" y="174">TextEdit</text>
+        <text x="736" y="174">ViewEdit · WYSIWYG</text>
+      </g>
+      <rect x="334" y="317" width="381" height="25" fill="#223045"/>
+      <g font-family="ui-monospace, monospace" font-size="13">
+        <text x="350" y="218" fill="#a9caff">1  # Release checklist</text>
+        <text x="350" y="242" fill="#8998ad">2</text>
+        <text x="350" y="266" fill="#a9caff">3  ## Before shipping</text>
+        <text x="350" y="290" fill="#e0e8f5">4  - [x] Review the timeout change</text>
+        <text x="350" y="314" fill="#e0e8f5">5  - [x] Run the regression tests</text>
+        <text x="350" y="338" fill="#e0e8f5">6  - [ ] Share the release notes</text>
+        <text x="350" y="362" fill="#8998ad">7</text>
+        <text x="350" y="386" fill="#a9caff">8  ## After shipping</text>
+        <text class="task-unchecked" x="350" y="410" fill="#e0e8f5">9  - [ ] Watch the first rollout</text>
+        <text class="task-checked" x="350" y="410" fill="#bde991">9  - [x] Watch the first rollout</text>
+      </g>
+      <use href="#checklist" x="736" y="205"/>
+      <text x="736" y="386" fill="#9eb3cd" font-size="17" font-weight="650">After shipping</text>
+      <use href="#checkbox" x="736" y="397"/>
+      <use class="visual-task-checked" href="#checked" x="736" y="397"/>
+      <text x="762" y="410" fill="#dce5f2" font-size="15">Watch the first rollout</text>
+    </g>
+
+    <!-- Differ opens a full-width code diff beside its file list. -->
+    <g class="screen differ">
+      <rect x="332" y="105" width="768" height="470" rx="10" fill="#161d26" stroke="#354150"/>
+      <path d="M332 143h768" stroke="#354150"/>
+      <text x="350" y="130" fill="#edf1f7" font-size="16" font-weight="700">TODO.md</text>
+      <text x="443" y="130" font-size="14" font-weight="650"><tspan fill="#bde991">+6</tspan><tspan dx="10" fill="#ffadb3">−6</tspan></text>
+      <text x="1080" y="130" text-anchor="end" fill="#b4c0d3" font-size="14">TextEdit · Diff</text>
+      <rect x="348" y="161" width="736" height="338" rx="6" fill="#202834"/>
+      <path d="M348 217h736v20H348zM348 257h736v60H348zM348 397h736v40H348z" fill="#432b33"/>
+      <path d="M348 237h736v20H348zM348 317h736v60H348zM348 437h736v40H348z" fill="#293b2b"/>
+      <path d="M348 217v20m0 20v60m0 80v40" stroke="#e47483" stroke-width="3"/>
+      <path d="M348 237v20m0 60v60m0 60v40" stroke="#87bd5b" stroke-width="3"/>
+      <path d="M432 188v289" stroke="#8998ad" opacity=".25"/>
+      <g font-family="ui-monospace, monospace" font-size="14" style="white-space: pre">
+        <text x="360" y="180" fill="#a7b9d4">@@ -1,9 +1,9 @@</text>
+        <g fill="#a7b9d4">
+          <text x="360" y="203"> 1   1     <tspan fill="#e0e8f5"># Release checklist</tspan></text>
+          <text x="360" y="216"> 2   2</text>
+          <text x="360" y="392"> 7   7</text>
+        </g>
+        <g fill="#ffadb3">
+          <text x="360" y="232"> 3      −  ## <tspan fill="#ffd1d5" font-weight="700">Open tasks</tspan></text>
+          <text x="360" y="272"> 4      −  - [ ] <tspan fill="#ffd1d5" font-weight="700">Investigate request timeouts</tspan></text>
+          <text x="360" y="292"> 5      −  - <tspan fill="#ffd1d5" font-weight="700">[ ]</tspan> Run the regression tests</text>
+          <text x="360" y="312"> 6      −  - [ ] Draft a release announcement</text>
+          <text x="360" y="412"> 8      −  ## Later</text>
+          <text x="360" y="432"> 9      −  - [ ] Decide how to monitor the rollout</text>
+        </g>
+        <g fill="#bde991">
+          <text x="360" y="252">     3  +  ## <tspan fill="#e2f8b8" font-weight="700">Before shipping</tspan></text>
+          <text x="360" y="332">     4  +  - [x] <tspan fill="#e2f8b8" font-weight="700">Review the timeout change</tspan></text>
+          <text x="360" y="352">     5  +  - <tspan fill="#e2f8b8" font-weight="700">[x]</tspan> Run the regression tests</text>
+          <text x="360" y="372">     6  +  - [ ] Share the release notes</text>
+          <text x="360" y="452">     8  +  ## After shipping</text>
+          <text x="360" y="472">     9  +  - [x] Watch the first rollout</text>
+        </g>
+      </g>
+    </g>
+
+    <g transform="translate(0 44)">
+      <g class="screen stats">
+        <rect x="332" y="61" width="768" height="470" rx="10" fill="#151b24" stroke="#354150"/>
+        <text x="350" y="87" fill="#edf1f7" font-size="16" font-weight="700">YO!Stats</text>
+        <rect x="441" y="68" width="71" height="26" rx="6" fill="#a8e312"/>
+        <text x="476.5" y="86" text-anchor="middle" fill="#182012" font-size="13" font-weight="700">Graphs</text>
+        <text x="531" y="86" fill="#b4c0d3" font-size="13">Cost</text>
+        <text x="1080" y="86" text-anchor="end" fill="#b4c0d3" font-size="13">Last 15 minutes</text>
+        <use href="#chart" x="350" y="109"/>
+        <use href="#chart" x="722" y="109"/>
+        <use href="#chart" x="350" y="296"/>
+        <use href="#chart" x="722" y="296"/>
+        <g font-size="15" font-weight="650" fill="#edf1f7">
+          <text x="370" y="136">CPU</text>
+          <text x="742" y="136">System memory</text>
+          <text x="370" y="323">Agents</text>
+          <text x="742" y="323">Session tokens/min</text>
+        </g>
+        <g font-size="12" fill="#d9e3f0">
+          <text x="742" y="341">Claude</text>
+          <text x="742" y="357">Codex</text>
+          <rect x="796" y="332" width="8" height="8" rx="2" fill="#f4a168"/>
+          <text x="810" y="341">Fable High</text>
+          <rect x="921" y="332" width="8" height="8" rx="2" fill="#f4d272"/>
+          <text x="935" y="341">Opus Medium</text>
+          <rect x="796" y="348" width="8" height="8" rx="2" fill="#65bbff"/>
+          <text x="810" y="357">Sol High</text>
+          <rect x="921" y="348" width="8" height="8" rx="2" fill="#bb9aff"/>
+          <text x="935" y="357">Terra Medium</text>
+        </g>
+        <g transform="translate(370)" clip-path="url(#stats-window)">
+          <g transform="translate(-370)">
+            <path d="M370 248V228L393 220 411 230 429 215 446 224 471 232 495 219 510 224 530 208 550 221 565 229 593 223 618 231 630 222 646 174 658 189 669 218 690 235V248Z" fill="#213b52"/>
+            <path d="M370 228L393 220 411 230 429 215 446 224 471 232 495 219 510 224 530 208 550 221 565 229 593 223 618 231 630 222 646 174 658 189 669 218 690 235" stroke="#65bbff" stroke-width="2" fill="none"/>
+          </g>
+        </g>
+        <g transform="translate(742)" clip-path="url(#stats-window)">
+          <g transform="translate(-742)">
+            <path d="M742 248V230H788V225H852V219H908V224H968V229H998V215H1016V182H1036V217H1050V230H1062V248Z" fill="#60479c"/>
+            <path d="M742 230H788V225H852V219H908V224H968V229H998V215H1016V182H1036V217H1050V230H1062" stroke="#d5a9ff" stroke-width="2" fill="none"/>
+          </g>
+        </g>
+        <g transform="translate(370)" clip-path="url(#stats-window)">
+          <g transform="translate(-370)">
+            <path d="M370 435V426H423V411H496V420H575V410H620V424H632V403H648V370H663V396H678V424H690V435Z" fill="#4ca782"/>
+            <path d="M370 431H464V426H507V431H652V421H677V431H690V435H370Z" fill="#f4c15d"/>
+          </g>
+        </g>
+        <g transform="translate(742)" clip-path="url(#stats-window)">
+          <g transform="translate(-742)">
+            <g fill="none" stroke-width="12">
+              <path d="M752 435v-14m36 14v-31m36 31v-22m36 22v-41m36 41v-20m36 20v-31m36 31v-15m36 15v-42m36 42v-24" stroke="#65bbff"/>
+              <path d="M770 435v-9m36 9v-16m36 16v-12m36 12v-23m36 23v-10m36 10v-17m36 17v-28m36 28v-16m36 16v-21" stroke="#f4a168"/>
+              <path d="M752 421v-12m36-5v-15m36 24v-11m36-8v-25m36 46v-16m36 5v-20m36 36v-7m36-20v-12m36 30v-21" stroke="#bb9aff"/>
+              <path d="M770 426v-6m36-1v-23m36 27v-15m36 4v-27m36 40v-9m36 2v-24m36 13v-15m36 27v-20m36 15v-9" stroke="#f4d272"/>
+            </g>
+          </g>
+        </g>
+      </g>
+    </g>
+    <!-- The focus ring encloses the tab strip and the pane body. -->
+    <rect class="active-pane screen initial stack" x="720" y="62" width="382" height="515" rx="12"/>
+    <rect class="active-pane screen full-workspace" x="330" y="62" width="772" height="515" rx="12"/>
+    <use class="screen return-notice" href="#codex-notice" x="861" y="109" aria-label="Return to the Codex session"/>
+    <g fill="none" stroke="#b6e68a" stroke-width="2">
+      <circle class="click-ring" style="--click-at: 7s" cx="598" cy="83" r="14"/>
+      <circle class="click-ring" style="--click-at: 10s" cx="566" cy="125" r="14"/>
+      <circle class="click-ring" style="--click-at: 13.2s" cx="744" cy="405" r="14"/>
+      <circle class="click-ring" style="--click-at: 15.6s" cx="54" cy="83" r="14"/>
+      <circle class="click-ring" style="--click-at: 17s" cx="105" cy="205" r="14"/>
+      <circle class="click-ring" style="--click-at: 18.6s" cx="218" cy="83" r="14"/>
+      <circle class="click-ring" style="--click-at: 20s" cx="105" cy="247" r="14"/>
+      <circle class="click-ring" style="--click-at: 25s" cx="956" cy="135" r="14"/>
+    </g>
+    <path class="demo-pointer" d="M0 0v21l5-5 4 8 4-2-4-8h8z" fill="#f0f5fb" stroke="#111820" stroke-width="1.5" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"sync/atomic"
 	"testing"
@@ -54,19 +55,6 @@ func TestSessionFilesRequestNormalizesLegacyRefAliasesWithCanonicalPrecedence(t 
 	}
 	if request.fromRef != "canonical-from" || request.toRef != "canonical-to" || request.repoRefs["/repo"]["from"] != "canonical-nested-from" || request.repoRefs["/repo"]["to"] != "canonical-nested-to" {
 		t.Fatalf("canonical refs did not win: %#v", request)
-	}
-}
-
-func TestSessionFilesStreamCandidatesPrioritizeVisibleRepositoryPaths(t *testing.T) {
-	visible := []string{"/repos/alpha", "/repos/beta"}
-	liveRoots := []string{"/home/user", "/repos/alpha"}
-	candidates := sessionFilesStreamRoots(visible, liveRoots)
-	if len(candidates) != 3 || candidates[0] != "/repos/alpha" || candidates[1] != "/repos/beta" || candidates[2] != "/home/user" {
-		t.Fatalf("stream candidates = %#v, want visible paths first", candidates)
-	}
-	plan := newSessionFilesPlan(sessionFilesRequest{repoPaths: visible})
-	if got := sessionFilesPlanRoots(plan, liveRoots); len(got) != len(candidates) || got[0] != candidates[0] || got[1] != candidates[1] || got[2] != candidates[2] {
-		t.Fatalf("canonical plan roots = %#v, want %#v", got, candidates)
 	}
 }
 
@@ -156,5 +144,21 @@ func TestRunSessionFilesBatchBoundsWorkersAndKeepsSiblingResults(t *testing.T) {
 	}
 	if completed.statuses["bad"] != 503 || completed.statuses["one"] != 200 || len(completed.payloads) != len(sessions) {
 		t.Fatalf("batch dropped sibling results: statuses=%#v payloads=%#v", completed.statuses, completed.payloads)
+	}
+}
+
+func TestSessionFilesCachedViewProducedDuringPartialPreparationIsNotFinal(t *testing.T) {
+	for _, test := range []struct {
+		payload string
+		partial bool
+	}{
+		{`{"repos":[],"preparation":{"state":"indexing","partial":true}}`, true},
+		{`{"repos":[],"preparation":{"state":"ready","partial":false}}`, false},
+		{`{"repos":[]}`, false},
+		{`not json`, false},
+	} {
+		if got := sessionFilesCachedViewPartial(sessionFilesCacheRecord{Payload: json.RawMessage(test.payload)}); got != test.partial {
+			t.Fatalf("cached view %s partial = %t, want %t", test.payload, got, test.partial)
+		}
 	}
 }

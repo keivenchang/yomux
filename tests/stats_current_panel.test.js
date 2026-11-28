@@ -4558,7 +4558,7 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
      sourceFunction('refreshDebugGraphElement', 'bindDebugGraphTouchSelection'),
     sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel'),
   ].join('\n');
-  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null, jsDebugGraphPendingScrollRestore: new WeakMap()};
   vm.runInNewContext(`
     const nowMs = 3600000;
     const Date = {now: () => nowMs};
@@ -4882,7 +4882,7 @@ test('a focused stable graph control preserves focus while a newer generation co
     sourceFunction('paintJsDebugCurrentStatsGeneration', 'ensureJsDebugCurrentStatsClient'),
   ].join('\n');
   const refreshSource = sourceFunction('refreshDebugGraphElement', 'bindDebugGraphTouchSelection');
-  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
+  const context = {result: null, sessions: [], tabberViewSessions: new Map(), transcriptMetadataState: {epoch: 'test'}, tmuxTopologyGeneration: 1, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null, jsDebugGraphPendingScrollRestore: new WeakMap()};
   vm.runInNewContext(`
     const toggle = {dataset: {jsDebugChartToggle: 'modelTokens'}};
     const panel = {};

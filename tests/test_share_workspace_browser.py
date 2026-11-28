@@ -6,6 +6,7 @@ import json
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,10 +14,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import browser_auth_yaml, new_chrome_driver, register_browser_new_document_script, remove_browser_test_new_document_scripts
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
-from tests.browser_helpers.native_keyboard import native_editor_modifier, native_logical_key
+from tests.browser_helpers.native_keyboard import native_document_end, native_editor_modifier, native_logical_key
 from tests.browser_helpers.webdriver_lease import WebDriverLease, retire_all
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
-from tests.browser_helpers.share_workspace import _button, _share_json
+from tests.browser_helpers.share_workspace import login_owner, _button, _share_json, _workspace_mode
 
 pytestmark = pytest.mark.browser
 
@@ -31,11 +32,377 @@ def _workspace_editor(driver, writable=None):
     """, writable)
 
 
-def _workspace_mode(driver, mode):
-    WebDriverWait(driver, 10).until(lambda d: d.execute_script("""
-      return [...document.querySelectorAll('.file-editor-panel [data-editor-mode]')].find(node=>
-        node.dataset.editorMode===arguments[0] && node.getClientRects().length) || false;
-    """, mode)).click()
+def test_shared_markdown_viewedit_merges_with_textedit(browser, isolated_dev_server_factory, tmp_path):
+    server = isolated_dev_server_factory('share-rich-edit', tls=True, auth_bypass=False)
+    server.paths.auth_config_path.write_text(browser_auth_yaml(), encoding='utf-8')
+    path = server.paths.workspace_dir / 'rich.md'
+    bullets = '### 2026-11-25 Wed\n- h\n- \n- \n- next item'
+    mixed = '* hello\n\n* \n- next group'
+    details = '<details><summary>Details</summary>\n\ndetail-body\n\n</details>'
+    table = '| A | B |\n| :--- | ---: |\n| C | D |'
+    remainder = f'\n\n*untouched*\n\n{table}\n\n{bullets}\n\nA &amp; B\n\n{mixed}\n\n{details}\n\nThis has __bold__ and ordinary text\n'
+    original = 'Middle' + remainder
+    path.write_text(original, encoding='utf-8')
+    login_owner(browser, server)
+    WebDriverWait(browser, 15).until(lambda d: d.execute_script(
+        "return !!window.YOmuxShare && typeof openFileEditorPane === 'function'"))
+    item = browser.execute_async_script("""
+      const path = arguments[0], done = arguments[1];
+      openFileInEditor(path, 'rich.md', {viewMode: 'edit', userInitiated: true}).then(async item => {
+        await openFileEditorPane(path, {item});
+        done(item);
+      }, error => done({error: String(error)}));
+    """, str(path))
+    assert isinstance(item, str), item
+    created = _share_json(browser, '/api/share', {'guest': 'RichWriter', 'minutes': 5, 'limit': 1,
+        'resources': [{'kind': 'file', 'path': str(path), 'writable': True, 'saved_content': original}]})
+    assert created['status'] == 201, created
+    WebDriverWait(browser, 10).until(lambda d: d.execute_script(
+        'return !!panelNodes.get(arguments[0])?._shareConnection', item))
+    guest = new_chrome_driver(profile_dir=tmp_path / 'rich-guest')
+    lease = WebDriverLease.from_driver(guest)
+    try:
+        guest.get(created['body']['url'])
+        rich = WebDriverWait(guest, 15).until(lambda d: d.execute_script("""
+          const panel = [...document.querySelectorAll('.file-editor-panel')].find(p => p._pmView?.editable);
+          if (!panel?._shareConnection || !panel._cmView?.dom.closest('.file-editor-codemirror-panel').hidden) return false;
+          const view = panel._pmView;
+          view.focus();
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 7)));
+          return view.dom;
+        """))
+        hold_guest_edits = """
+          const original = window.fetch;
+          let held = true;
+          window.__releaseRichSync = null;
+          window.fetch = (input, options) => {
+            if (!held || options?.method !== 'POST' || !options.body ||
+                !JSON.parse(options.body).updates?.length) return original(input, options);
+            return new Promise(resolve => {
+              window.__releaseRichSync = () => {
+                held = false;
+                resolve(original(input, options));
+              };
+            });
+          };
+        """
+        guest.execute_script(hold_guest_edits)
+        try:
+            native_logical_key(guest, 'G')
+            assert rich.find_element(By.CSS_SELECTOR, 'p').text == 'MiddleG'
+            assert path.read_text(encoding='utf-8') == original
+            WebDriverWait(guest, 5).until(lambda d: d.execute_script('return !!window.__releaseRichSync'))
+            browser.execute_script("""
+              const view = panelNodes.get(arguments[0])._cmView;
+              view.focus();
+              view.dispatch({selection: {anchor: 2}});
+            """, item)
+            assert browser.execute_script("""
+              return panelNodes.get(arguments[0]).querySelector('.file-editor-cursor-status').textContent;
+            """, item) == "1:3"
+            browser.execute_script("""
+              const view = panelNodes.get(arguments[0])._cmView;
+              view.dispatch({selection: {anchor: 0}});
+            """, item)
+            native_logical_key(browser, 'H')
+            WebDriverWait(browser, 10).until(lambda _: path.read_text(encoding='utf-8') == 'H' + original)
+        finally:
+            guest.execute_script('window.__releaseRichSync?.()')
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == 'HMiddleG' + remainder)
+        WebDriverWait(guest, 5).until(lambda _: rich.find_element(By.CSS_SELECTOR, 'p').text == 'HMiddleG')
+        WebDriverWait(guest, 8).until(lambda d: d.find_elements(By.CSS_SELECTOR, '.share-rich-caret[data-share-caret-name="keivenc"]'))
+        WebDriverWait(browser, 8).until(lambda d: d.find_elements(By.CSS_SELECTOR, '.share-remote-caret[data-share-caret-name="RichWriter"]'))
+        _workspace_mode(browser, 'split')
+        _workspace_mode(guest, 'split')
+        guest.execute_script("""
+          const view = document.querySelector('.file-editor-panel')._pmView;
+          view.focus();
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 3)));
+        """)
+        def host_carets(driver, primary, offset):
+            return driver.execute_script("""
+              const rendered = selector => [...document.querySelectorAll(selector)]
+                .filter(node => node.getClientRects().length);
+              const labels = rendered('.share-caret-label:not([hidden])')
+                .filter(node => node.textContent === 'RichWriter')
+                .map(node => getComputedStyle(node).opacity).sort();
+              const carets = rendered('[data-share-caret-name="RichWriter"]');
+              const primary = arguments[0];
+              return labels.join() === '0.85,0.85' && carets.length === 2 && carets.every(node => {
+                const pane = node.classList.contains('share-rich-caret') ? 'view' : 'text';
+                const ink = getComputedStyle(node, '::before');
+                const panel = node.closest('.file-editor-panel');
+                const actual = pane === 'view' ? panel._pmView.posAtDOM(node, 0) - 1 : panel._cmView.posAtDOM(node);
+                if (actual !== arguments[1]) return false;
+                return ink.animationName === 'none' && (pane === primary
+                  ? node.hasAttribute('data-share-caret-primary')
+                  : node.hasAttribute('data-share-caret-follower') && ink.opacity === '0.5');
+              });
+            """, primary, offset)
+        WebDriverWait(browser, 8).until(lambda d: host_carets(d, 'view', 2))
+        guest.execute_script("""
+          const view = document.querySelector('.file-editor-panel')._cmView;
+          view.focus();
+          view.dispatch({selection: {anchor: 4}});
+        """)
+        WebDriverWait(browser, 8).until(lambda d: host_carets(d, 'text', 4))
+        _workspace_mode(guest, 'preview')
+        guest.execute_script("document.querySelector('.file-editor-panel')._pmView.focus()")
+        native_logical_key(guest, 'z', [native_editor_modifier(guest)])
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == 'H' + original)
+        guest.execute_script("""
+          const view = [...document.querySelectorAll('.file-editor-panel')].find(p => p._pmView?.editable)._pmView;
+          view.focus();
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 2, 8)));
+        """)
+        native_logical_key(guest, 'b', [native_editor_modifier(guest)])
+        expected = 'H**Middle**' + remainder
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        assert rich.find_element(By.TAG_NAME, 'strong').text == 'Middle'
+        _workspace_mode(browser, 'preview')
+        WebDriverWait(browser, 10).until(lambda d: d.execute_script("""
+          const panel = panelNodes.get(arguments[0]);
+          return panel?._shareConnection && panel._pmView?.editable && panel._pmView.dom.textContent.includes('ordinary');
+        """, item))
+        guest.execute_script("""
+          const view = document.querySelector('.file-editor-panel')._pmView;
+          let target;
+          view.state.doc.descendants((node, position) => {
+            if (node.isText && node.text === 'bold') target = position + 2;
+          });
+          view.focus();
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, target)));
+        """)
+        WebDriverWait(browser, 8).until(lambda d: d.execute_script("""
+          const view = panelNodes.get(arguments[0])._pmView;
+          const caret = view.dom.querySelector('strong [data-share-caret-name="RichWriter"]:not([data-share-caret-approximate])');
+          return !!caret?.getClientRects().length;
+        """, item))
+        guest.execute_script("""
+          const view = document.querySelector('.file-editor-panel')._pmView;
+          let target;
+          view.state.doc.descendants((node, position) => {
+            if (node.isText && node.text === 'A & B') target = position + 3;
+          });
+          view.focus();
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, target)));
+        """)
+        WebDriverWait(browser, 8).until(lambda d: d.execute_script("""
+          const view = panelNodes.get(arguments[0])._pmView;
+          const caret = view.dom.querySelector('.share-rich-caret[data-share-caret-name="RichWriter"]:not([data-share-caret-approximate])');
+          if (!caret) return false;
+          let expected;
+          view.state.doc.descendants((node, position) => {
+            if (node.isText && node.text === 'A & B') expected = position + 3;
+          });
+          return view.posAtDOM(caret, 0) === expected;
+        """, item))
+        for bullet_index in (1, 2):
+            guest.execute_script("""
+              const view = document.querySelector('.file-editor-panel')._pmView;
+              let target;
+              view.state.doc.descendants((node, position, parent, index) => {
+                if (parent?.type.name === 'bullet_list' && parent.attrs.bullet === '-' && index === arguments[0] &&
+                    !node.firstChild.content.size) target = position + 2;
+              });
+              view.focus();
+              view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, target)));
+            """, bullet_index)
+            WebDriverWait(browser, 8).until(lambda d: d.execute_script("""
+              const [item, index] = arguments;
+              const dom = panelNodes.get(item)._pmView.dom;
+              const li = dom.querySelectorAll('ul > li')[index];
+              const caret = li.querySelector('p .share-rich-caret[data-share-caret-name="RichWriter"]:not([data-share-caret-approximate])');
+              if (!caret) return false;
+              const row = li.getBoundingClientRect(), point = caret.getBoundingClientRect();
+              return row.height > 0 && point.top >= row.top && point.top <= row.bottom &&
+                !dom.querySelector('ul > .share-rich-caret');
+            """, item, bullet_index))
+        guest.execute_script("""
+          const view = [...document.querySelectorAll('.file-editor-panel')].find(p => p._pmView?.editable)._pmView;
+          view.focus();
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
+        """)
+        guest.execute_script(hold_guest_edits)
+        try:
+            native_logical_key(guest, 'Q')
+            assert rich.find_elements(By.CSS_SELECTOR, 'p')[-1].text.endswith('textQ')
+            WebDriverWait(guest, 5).until(lambda d: d.execute_script('return !!window.__releaseRichSync'))
+            browser.execute_script("""
+              const view = panelNodes.get(arguments[0])._pmView;
+              let offset;
+              view.state.doc.descendants((node, position) => {
+                if (node.isText && node.text.includes('ordinary')) offset = position + node.text.indexOf('ordinary');
+              });
+              view.focus();
+              view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, offset)));
+            """, item)
+            native_logical_key(browser, 'R')
+            expected = expected.replace('ordinary', 'Rordinary')
+            WebDriverWait(browser, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        finally:
+            guest.execute_script('window.__releaseRichSync?.()')
+        expected = expected.rstrip('\n') + 'Q\n'
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        WebDriverWait(guest, 5).until(lambda _: rich.find_elements(By.CSS_SELECTOR, 'p')[-1].text.endswith('Rordinary textQ'))
+        native_logical_key(guest, 'Enter')
+        native_logical_key(guest, 'B')
+        expected += '\nB\n'
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        for select_letter in (False, True):
+            guest.execute_script("""
+              const view = document.querySelector('.file-editor-panel')._pmView;
+              let end;
+              view.state.doc.descendants((node, pos) => {
+                if (node.isText && node.text === 'h') end = pos + 1;
+              });
+              view.focus();
+              view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, end)));
+            """)
+            if select_letter:
+                native_logical_key(guest, 'ArrowLeft', ('shift',), commands=['moveLeftAndModifySelection'])
+                WebDriverWait(guest, 5).until(lambda d: d.execute_script("""
+                  const {doc, selection} = document.querySelector('.file-editor-panel')._pmView.state;
+                  return selection.anchor > selection.head && doc.textBetween(selection.from, selection.to) === 'h';
+                """))
+            native_logical_key(guest, 'Backspace', commands=['deleteBackward'])
+            assert rich.find_element(By.CSS_SELECTOR, 'ul > li:first-child').text == ''
+            assert rich.find_element(By.CSS_SELECTOR, 'ul > li:last-child').text == 'next item'
+            expected = expected.replace('\n- h\n', '\n- \n')
+            WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+            WebDriverWait(browser, 8).until(lambda d: d.execute_script("""
+              const panel = panelNodes.get(arguments[0]);
+              return panel?._pmView?.dom.querySelector('ul > li')?.textContent === '' &&
+                panel._cmView.state.doc.toString() === arguments[1];
+            """, item, expected))
+            if not select_letter:
+                native_logical_key(guest, 'h')
+                assert rich.find_element(By.CSS_SELECTOR, 'ul > li:first-child').text == 'h'
+                expected = expected.replace('\n- \n', '\n- h\n', 1)
+                WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        for key, command, remaining in (('Backspace', 'deleteBackward', 3), ('Delete', 'deleteForward', 2)):
+            guest.execute_script("""
+              const view = document.querySelector('.file-editor-panel')._pmView;
+              let caret;
+              view.state.doc.descendants((node, pos, parent, index) => {
+                if (parent?.type.name === 'bullet_list' && parent.attrs.bullet === '-' && index === 1) caret = pos + 2;
+              });
+              view.focus();
+              view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, caret)));
+            """)
+            native_logical_key(guest, key, commands=[command])
+            assert len(rich.find_elements(By.CSS_SELECTOR, ':scope > ul:first-of-type > li')) == remaining
+            assert rich.find_element(By.CSS_SELECTOR, 'ul > li:last-child').text == 'next item'
+            expected = expected.replace('\n- \n', '\n', 1)
+            WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        guest.execute_script("""
+          const view = document.querySelector('.file-editor-panel')._pmView;
+          let target;
+          view.state.doc.descendants((node, position, parent, index) => {
+            if (parent?.type.name === 'bullet_list' && parent.attrs.bullet === '*' && index === 1) target = position + 2;
+          });
+          view.focus();
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, target)));
+        """)
+        native_logical_key(guest, 'Enter')
+        assert guest.execute_script("""
+          const view = document.querySelector('.file-editor-panel')._pmView;
+          const caret = view.state.selection.$head, list = caret.node(1);
+          return list.attrs.bullet === '*' && list.childCount === 3 &&
+            list.child(0).textContent === 'hello' && list.child(1).textContent === '' &&
+            list.child(2).textContent === '' && caret.index(1) === 2 && caret.parentOffset === 0;
+        """)
+        expected = expected.replace(mixed, '* hello\n\n* \n\n* \n- next group')
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        WebDriverWait(browser, 8).until(lambda d: d.execute_script("""
+          const panel = panelNodes.get(arguments[0]);
+          const list = [...panel._pmView.dom.querySelectorAll(':scope > ul')]
+            .find(node => node.firstElementChild?.textContent === 'hello');
+          return panel._cmView.state.doc.toString() === arguments[1] &&
+            list?.querySelectorAll(':scope > li').length === 3 && list.lastElementChild.textContent === '';
+        """, item, expected))
+        before_enter = expected.replace('* hello\n\n* \n\n* \n- next group', mixed)
+        modifier = native_editor_modifier(guest)
+        native_logical_key(guest, 'z', [modifier])
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == before_enter)
+        native_logical_key(guest, 'z', [modifier, 'shift'])
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        guest.execute_script("""
+          const view = document.querySelector('.file-editor-panel')._pmView;
+          let target;
+          view.state.doc.descendants((node, position) => {
+            if (node.isText && node.text === 'detail-body') target = position + node.text.length;
+          });
+          view.focus();
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, target)));
+        """)
+        native_logical_key(guest, 'Z')
+        assert rich.find_element(By.CSS_SELECTOR, 'details p').text == 'detail-bodyZ'
+        expected = expected.replace('detail-body', 'detail-bodyZ')
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        guest.execute_script("""
+          const editor = document.querySelector('.file-editor-panel')._pmView.dom;
+          window.__richComposition = [];
+          for (const type of ['compositionstart', 'compositionend']) {
+            editor.addEventListener(type, event => window.__richComposition.push([type, event.isTrusted]), {once: true});
+          }
+        """)
+        guest.execute_cdp_cmd('Input.imeSetComposition', {'text': 'に', 'selectionStart': 1, 'selectionEnd': 1})
+        assert guest.execute_script("return document.querySelector('.file-editor-panel')._pmView.composing")
+        assert path.read_text(encoding='utf-8') == expected
+        guest.execute_cdp_cmd('Input.insertText', {'text': '日本'})
+        composition = guest.execute_script('return window.__richComposition')
+        assert composition[0] == ['compositionstart', True]
+        assert [event[0] for event in composition] == ['compositionstart', 'compositionend']
+        expected = expected.replace('detail-bodyZ', 'detail-bodyZ日本')
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        WebDriverWait(browser, 8).until(lambda d: d.execute_script("""
+          const panel = panelNodes.get(arguments[0]);
+          return panel._pmView?.dom.querySelector('details p')?.textContent === 'detail-bodyZ日本';
+        """, item))
+        ActionChains(guest).context_click(rich.find_element(By.CSS_SELECTOR, 'td:last-child')).perform()
+        _button(guest, '.markdown-table-context-menu', 'Insert column right').click()
+        assert len(rich.find_elements(By.CSS_SELECTOR, 'th')) == 3
+        table_edit = expected.replace(table, '| A | B |  |\n| :--- | ---: | --- |\n| C | D |  |')
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == table_edit)
+        WebDriverWait(browser, 8).until(lambda d: d.execute_script("""
+          const panel = panelNodes.get(arguments[0]);
+          return panel._pmView?.dom.querySelectorAll('th').length === 3 &&
+            panel._cmView.state.doc.toString() === arguments[1];
+        """, item, table_edit))
+        native_logical_key(guest, 'z', [native_editor_modifier(guest)])
+        WebDriverWait(guest, 10).until(lambda _: path.read_text(encoding='utf-8') == expected)
+        guest.execute_script("""
+          const original = window.fetch;
+          window.fetch = (input, options) => {
+            if (options?.method === 'POST' && options.body && JSON.parse(options.body).updates?.length) {
+              return new Promise(() => {});
+            }
+            return original(input, options);
+          };
+          const panel = document.querySelector('.file-editor-panel');
+          const view = panel._pmView;
+          view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1)));
+          view.focus();
+        """)
+        native_logical_key(guest, 'X')
+        assert rich.find_element(By.CSS_SELECTOR, 'p').text.startswith('X')
+        grant = created['body']['share']
+        updated = _share_json(browser, '/api/share?id=' + grant['id'], {'revision': grant['revision'],
+            'resources': [{'id': grant['resources'][0]['id'], 'writable': False}]}, method='PATCH')
+        assert updated['status'] == 200, updated
+        WebDriverWait(guest, 10).until(lambda d: d.execute_script("""
+          return document.querySelector('#share-retained-drafts textarea')?.value.startsWith('X') &&
+            !document.querySelector('.file-editor-preview-pane-panel [contenteditable="true"]');
+        """))
+        assert path.read_text(encoding='utf-8') == expected
+    finally:
+        try:
+            guest.get('about:blank')
+        finally:
+            retired = retire_all([lease])
+            assert retired['proven_gone'], retired
+            browser.get('about:blank')
 
 
 def _native_text_selection(driver, node):
@@ -68,6 +435,134 @@ def _workspace_snapshot(driver):
     """)
 
 
+@pytest.mark.parametrize('writable', [False, True])
+def test_guest_editor_follows_external_atomic_save(browser, isolated_dev_server_factory, tmp_path, writable):
+    server = isolated_dev_server_factory('share-atomic-save', tls=True, auth_bypass=False)
+    server.paths.auth_config_path.write_text(browser_auth_yaml(), encoding='utf-8')
+    source = server.paths.workspace_dir / '2026.md'
+    original = '# 2026\n\nOriginal\n'
+    updated = '# 2026\n\nUpdated by AI\n'
+    source.write_text(original, encoding='utf-8')
+    login_owner(browser, server)
+    WebDriverWait(browser, 15).until(lambda d: d.execute_script(
+        "return !!window.YOmuxShare && typeof openFileEditorPane === 'function'"))
+    if not writable:
+        opened = browser.execute_async_script("""
+          const path = arguments[0], done = arguments[1];
+          (async () => {
+            const item = await openFileInEditor(path, '2026.md', {viewMode: 'edit', userInitiated: true});
+            await openFileEditorPane(path, {item});
+            done({item});
+          })().catch(error => done({error: String(error.stack)}));
+        """, str(source))
+        assert 'item' in opened, opened
+        WebDriverWait(browser, 10).until(lambda d: _workspace_editor(d, writable=True))
+        browser.execute_script("""
+          const view = panelNodes.get(arguments[0])._cmView;
+          view.focus();
+          view.dispatch({selection: {anchor: 3}});
+        """, opened['item'])
+    created = _share_json(browser, '/api/share', {
+        'guest': 'AtomicSaveGuest', 'minutes': 5, 'limit': 1,
+        'resources': [{'kind': 'file', 'path': str(source), 'writable': writable, 'saved_content': original}],
+    })
+    assert created['status'] == 201, created
+
+    guest = new_chrome_driver(profile_dir=tmp_path / 'atomic-save-guest')
+    lease = WebDriverLease.from_driver(guest)
+    try:
+        guest.get(created['body']['url'])
+        WebDriverWait(guest, 15).until(lambda d: d.execute_script("""
+          return typeof shareWorkspace !== 'undefined' && shareWorkspace.active &&
+            !!document.querySelector('.file-editor-panel [data-editor-mode="edit"]');
+        """))
+        _workspace_mode(guest, 'preview')
+
+        def preview_text(driver, text):
+            return driver.execute_script("""
+              return [...document.querySelectorAll('.file-editor-preview-pane-panel')]
+                .some(panel => panel.getClientRects().length && panel.innerText.includes(arguments[0]));
+            """, text)
+
+        def editor_text(driver):
+            return driver.execute_script("""
+              const panel = [...document.querySelectorAll('.file-editor-panel')]
+                .find(node => node.getClientRects().length);
+              if (arguments[0] && !panel?._shareConnection) return null;
+              return panel._cmView?.state.doc.toString();
+            """, writable)
+
+        WebDriverWait(guest, 10).until(lambda d: preview_text(d, 'Original'))
+        if not writable:
+            _workspace_mode(guest, 'edit')
+            WebDriverWait(guest, 10).until(lambda d: d.execute_script("""
+              const caret = document.querySelector('.cm-content .share-remote-caret');
+              if (!caret) return false;
+              const view = YOmuxCodeMirror.EditorView.findFromDOM(caret.closest('.cm-editor'));
+              return view.state.readOnly && view.posAtDOM(caret) === 3 &&
+                [...document.querySelectorAll('.share-caret-label')].some(label =>
+                  !label.hidden && label.textContent === 'keivenc');
+            """))
+            _workspace_mode(guest, 'preview')
+        previous_inode = source.stat().st_ino
+        temporary = source.with_suffix('.next')
+        temporary.write_text(updated, encoding='utf-8')
+        temporary.replace(source)
+        assert source.stat().st_ino != previous_inode
+        WebDriverWait(guest, 10).until(lambda d: preview_text(d, 'Updated by AI'))
+        _workspace_mode(guest, 'edit')
+        WebDriverWait(guest, 10).until(lambda d: _workspace_editor(d, writable=writable))
+        WebDriverWait(guest, 10).until(lambda d: editor_text(d) == updated)
+
+        if not writable:
+            return
+        _workspace_mode(guest, 'split')
+        editor = _workspace_editor(guest, writable=True)
+        editor.click()
+        native_document_end(guest)
+        assert guest.execute_script("""
+          const view = YOmuxCodeMirror.EditorView.findFromDOM(arguments[0].closest('.cm-editor'));
+          return view.hasFocus && view.state.selection.main.head === view.state.doc.length;
+        """, editor)
+        guest.execute_script("""
+          const id = arguments[0], original = window.fetch;
+          window.__releaseTypingSync = () => { window.fetch = original; };
+          window.fetch = (input, options) => {
+            if (options?.method !== 'POST' || !new URL(String(input), location.href).pathname.endsWith('/' + id) ||
+                !JSON.parse(options.body).updates?.length) return original(input, options);
+            return new Promise(resolve => {
+              window.__typingSyncPending = true;
+              window.__releaseTypingSync = () => {
+                window.fetch = original;
+                resolve(original(input, options));
+              };
+            });
+          };
+        """, created['body']['share']['resources'][0]['id'])
+        try:
+            native_logical_key(guest, 'x')
+            assert guest.execute_script("return arguments[0].innerText.endsWith('x')", editor)
+            native_logical_key(guest, 'ArrowLeft')
+            assert guest.execute_script("""
+              const view = YOmuxCodeMirror.EditorView.findFromDOM(arguments[0].closest('.cm-editor'));
+              return view.state.selection.main.head === view.state.doc.length - 1;
+            """, editor)
+            WebDriverWait(guest, 5).until(lambda d: preview_text(d, 'x'))
+            WebDriverWait(guest, 5).until(lambda d: d.execute_script("return window.__typingSyncPending === true"))
+            assert source.read_text(encoding='utf-8') == updated
+        finally:
+            guest.execute_script("window.__releaseTypingSync()")
+        WebDriverWait(guest, 10).until(lambda d: source.read_text(encoding='utf-8') == updated + 'x')
+        assert editor_text(guest) == updated + 'x'
+    finally:
+        try:
+            guest.get('about:blank')
+        finally:
+            retired = retire_all([lease])
+            assert retired['proven_gone'], retired
+            browser.get('about:blank')
+
+
 def test_guest_normal_workspace_scope_theme_find_and_retained_draft(browser, isolated_dev_server_factory, tmp_path):
     server = isolated_dev_server_factory('share-workspace', tls=True, auth_bypass=False, session_count=1)
     server.paths.auth_config_path.write_text(browser_auth_yaml(), encoding='utf-8')
@@ -80,10 +575,7 @@ def test_guest_normal_workspace_scope_theme_find_and_retained_draft(browser, iso
     guest = None
     lease = None
     try:
-        browser.get(server.base_url + '/login')
-        browser.find_element(By.NAME, 'username').send_keys('keivenc')
-        browser.find_element(By.NAME, 'password').send_keys('random-password')
-        browser.find_element(By.CSS_SELECTOR, 'form[action="/login"] button[type="submit"]').click()
+        login_owner(browser, server)
         WebDriverWait(browser, 15).until(lambda d: d.execute_script("return typeof openFileInEditor==='function' && !!window.YOmuxShare"))
         opened = browser.execute_async_script("""
           const [path,done]=arguments;
@@ -385,7 +877,7 @@ def test_guest_normal_workspace_scope_theme_find_and_retained_draft(browser, iso
           const dialog = document.querySelector('dialog:modal');
           const notice = document.getElementById('shareAccessNotice');
           const brand = dialog?.querySelector('.brand-title')?.getBoundingClientRect();
-          const message = 'This share link has expired or ended. Ask the owner to open File → YO!share → New Share, select the tabs, then click Create New Share and send you the new link.';
+          const message = 'This share link has expired or ended. Ask the owner to open File → YO!Share → New Share, select the tabs, then click Create New Share and Copy URL and send you the new link.';
           return dialog?.contains(notice) && notice.textContent === message && !notice.isContentEditable &&
             brand?.width > 0 && brand.left < 48 && brand.top < 48 &&
             dialog.contains(document.querySelector('#share-retained-drafts')) &&
@@ -461,10 +953,7 @@ def test_guest_startup_reconciles_membership_changed_during_first_read(browser, 
     guest = None
     lease = None
     try:
-        browser.get(server.base_url + '/login')
-        browser.find_element(By.NAME, 'username').send_keys('keivenc')
-        browser.find_element(By.NAME, 'password').send_keys('random-password')
-        browser.find_element(By.CSS_SELECTOR, 'form[action="/login"] button[type="submit"]').click()
+        login_owner(browser, server)
         WebDriverWait(browser, 15).until(lambda d: d.execute_script("return typeof openFileInEditor==='function' && !!window.YOmuxShare"))
         created = _share_json(browser, '/api/share', {
             'guest': 'StartupGuest', 'minutes': 5, 'limit': 1,

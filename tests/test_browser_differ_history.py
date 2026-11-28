@@ -20,7 +20,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
-from tests.tmux_runtime import run_isolated_tmux
+from tests.tmux_runtime import codex_exec_record, respawn_pane_with_codex_agent, run_isolated_tmux, write_codex_rollout
 from tests.latency_calibration import assert_fixed_ceiling, browser_calibration_qualification, certification_phase_fixture, merged_qualification, run_browser_latency_calibration, write_latency_evidence
 from yomux_lib.local_services.registry import read_process_cpu_seconds_and_rss
 
@@ -43,7 +43,10 @@ def test_differ_repo_sha_enter_preserves_comparison_after_clearing_rows(browser,
     target.write_text('after\n', encoding='utf-8')
     subprocess.run(['git', '-C', str(repo), 'commit', '-am', 'changed'], check=True, capture_output=True)
     session = server.tmux.sessions[0]
-    run_isolated_tmux(server.tmux, 'respawn-pane', '-k', '-t', f'={session}:', '-c', str(repo), 'bash', '--noprofile', '--norc')
+    # Differ shows repositories the session's agent touched, never the pane directory.
+    transcript = write_codex_rollout(server.paths.home_dir / '.codex' / 'sessions', 'differ-refs', server.paths.home_dir,
+                                     [codex_exec_record('git add note.py', repo)])
+    respawn_pane_with_codex_agent(server.tmux, f'={session}:', repo, transcript)
     browser.get(server.base_url + f'/?sessions={session}')
     WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
         "return typeof fetchSessionFiles === 'function' && typeof applyLayoutSlots === 'function' && document.querySelector('#grid')"))
@@ -56,8 +59,13 @@ def test_differ_repo_sha_enter_preserves_comparison_after_clearing_rows(browser,
         applyLayoutSlots(slots);fileExplorerChangesSelectedSession=session;
         diffRefFrom='HEAD';diffRefTo='current';diffRefsByRepo={};
         await fetchSessionFiles({destination:'differ',session,force:true,freshGit:true,silent:true});
-        await window.__yomuxTestWaitFor(()=>[...document.querySelectorAll('[data-diff-ref-controls]')]
-          .some(node=>node.dataset.diffRefRepo===repo && node.querySelector('[data-diff-ref-from]')),{timeoutMs:10000});
+        // The repository appears once history preparation has indexed the agent's transcript;
+        // wait for that settled render before reading its comparison controls.
+        await window.__yomuxTestWaitFor(()=>fileExplorerSessionFilesState.payload?.preparation?.partial === false
+          && !sessionFilesRequestIsActiveForDestination('differ')
+          && fileTreeRenderOwners.get(document.querySelector('.file-explorer-changes-panel .changes-groups'))?.completed === true
+          && [...document.querySelectorAll('[data-diff-ref-controls]')]
+            .some(node=>node.dataset.diffRefRepo===repo && node.querySelector('[data-diff-ref-from]')),{timeoutMs:10000});
         const originalFetch=window.fetch;window.__comparisonUrls=[];
         window.fetch=(url,...args)=>{
           if(String(url).includes('/api/session-files'))window.__comparisonUrls.push(String(url));
@@ -116,8 +124,10 @@ def _certify_differ_history_view(nodeid, label, metrics, qualification):
 
 def _differ_history_workload(browser, isolated_dev_server_factory, tmp_path, request, *, certify=None):
     home = tmp_path / 'runtime-1-differ-history' / 'home'
-    archive = home / '.codex' / 'sessions'
-    archive.mkdir(parents=True)
+    # The live agent's transcript root is outside the archive the server pre-indexes at startup,
+    # so the first Differ request sees history preparation still in progress.
+    live_sessions = tmp_path / 'runtime-1-differ-history' / 'live-codex-sessions'
+    home.mkdir(parents=True)
     repositories = [home / 'alpha', home / 'beta']
     records = []
     for repository in repositories:
@@ -127,17 +137,15 @@ def _differ_history_workload(browser, isolated_dev_server_factory, tmp_path, req
                      ['config', 'user.email', 'fixture@example.invalid'], ['add', 'note.py'], ['commit', '-qm', 'initial']):
             subprocess.run(['git', '-C', str(repository), *args], check=True, capture_output=True)
         (repository / 'note.py').write_bytes(b'modified\n')
-        records.append({'type': 'response_item', 'payload': {'type': 'function_call', 'name': 'exec_command',
-                        'arguments': {'cmd': 'git add note.py', 'workdir': str(repository)}}})
-    transcript = archive / 'rollout-reference.jsonl'
-    transcript.write_bytes(b''.join(json.dumps(record).encode() + b'\n' for record in records)
-                           + b'{"type":"progress"}\n' * 12000)
-    server = isolated_dev_server_factory('differ-history', env_overrides={'YOMUX_CODEX_TRANSCRIPT_ROOT': str(archive)})
+        records.append(codex_exec_record('git add note.py', repository))
+    # The live Codex agent in the pane, started in home, worked in both repositories.
+    transcript = write_codex_rollout(live_sessions, 'reference', home, records, padding=b'{"type":"progress"}\n' * 12000)
+    server = isolated_dev_server_factory('differ-history', env_overrides={'YOMUX_CODEX_TRANSCRIPT_ROOT': str(live_sessions)})
     request.addfinalizer(lambda: browser.get('about:blank'))
     session = server.tmux.sessions[0]
     run_isolated_tmux(server.tmux, 'rename-session', '-t', session, '1')
     server.tmux.sessions[:] = ['1']
-    run_isolated_tmux(server.tmux, 'respawn-pane', '-k', '-t', '=1:', '-c', str(home), 'bash', '--noprofile', '--norc')
+    respawn_pane_with_codex_agent(server.tmux, '=1:', home, transcript)
     assert not (home / '.git').exists()
     assert not list(server.paths.state_dir.rglob('view-*.json'))
     browser.get(server.base_url + '/?sessions=1')
@@ -175,6 +183,9 @@ def _differ_history_workload(browser, isolated_dev_server_factory, tmp_path, req
           terminal.socket.send(JSON.stringify({type:'input',data:'printf "DIFFER%s" PONG\\r'}));
         });
         const [ping_ms,terminal_ms]=await Promise.all([ping,terminalLatency]);
+        // The Differ draws in stages. Read the payload and the text together once its drawing finishes.
+        const groups=()=>document.querySelector('.file-explorer-changes-panel .changes-groups');
+        await window.__yomuxTestWaitFor(()=>fileTreeRenderOwners.get(groups())?.completed===true,{timeoutMs:15000});
         return {elapsed,ping_ms,terminal_ms,preparation:fileExplorerSessionFilesState.payload.preparation,
           repos:fileExplorerSessionFilesState.payload.repos.map(repo=>repo.repo),
           visible:fileExplorerSessionFilesPaneIsVisible(),text:document.querySelector('.file-explorer-changes-panel')?.textContent||''};

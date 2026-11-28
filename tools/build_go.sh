@@ -15,5 +15,10 @@ if [ -n "$sdk_version" ]; then
   bazel_args+=("--@rules_go//go/toolchain:sdk_version=$sdk_version")
 fi
 bazel_args+=("$@" //cmd/yomux-go:yomux-go //tools/staticgen:staticgen)
+# Keep the legacy updater invocation unchanged and retain its failing phase.
+if [ -f "$repo_root.owner" ]; then printf '%s\n' 'compilation' > "$repo_root/.update-build-phase"; fi
 bazel "${bazel_args[@]}"
+if [ -f "$repo_root.owner" ]; then printf '%s\n' 'browser asset setup' > "$repo_root/.update-build-phase"; fi
 "$repo_root/bazel-bin/cmd/yomux-go/yomux-go_/yomux-go" --operator setup-assets --root "$repo_root"
+
+if [ -f "$repo_root.owner" ]; then rm -f -- "$repo_root/.update-build-phase"; fi

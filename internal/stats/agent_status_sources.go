@@ -34,8 +34,9 @@ func CurrentPlatformAgentStatusProcess(ctx context.Context, pid int) (AgentStatu
 
 func agentStatusSources(database string, process func(context.Context, int) (AgentStatusProcess, error)) AgentStatusSources {
 	return AgentStatusSources{
-		CapturePane: linuxCaptureAgentPane,
-		Process:     process,
+		CapturePane:    linuxCaptureAgentPane,
+		Process:        process,
+		claudeActivity: &claudePaneActivity{},
 		OpenCodeState: func(ctx context.Context, request AgentStatusRequest) (string, []string, error) {
 			return OpenCodeSQLiteStateReader(database)(ctx, request)
 		},
@@ -48,6 +49,7 @@ func agentStatusSources(database string, process func(context.Context, int) (Age
 // admitted command/executable; no host /proc lookup is allowed in fixtures.
 func SyntheticAgentStatusSources(database string) AgentStatusSources {
 	return AgentStatusSources{
+		claudeActivity: &claudePaneActivity{},
 		CapturePane: func(ctx context.Context, target string) (AgentStatusPane, error) {
 			if !syntheticTmuxSocketConfigured() {
 				return AgentStatusPane{}, errSyntheticTmuxSocketUnset

@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="320" viewBox="0 0 720 320" role="img" aria-labelledby="title desc">
+  <title id="title">Quick Open finds files and commands</title>
+  <desc id="desc">Quick Open searches the file index: typing login lists login.go, login.png, and login_test.py across the indexed roots. Typing a greater-than sign switches to commands: typing new lists new Claude, new Codex, and new Codex with auto-approve.</desc>
+  <style>
+    svg { --cycle: 12s; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .mono { font-family: ui-monospace, monospace; }
+    .files { visibility: visible; }
+    .commands { visibility: hidden; }
+    .typed-files { clip-path: inset(-4px 100% -4px 0); }
+    .typed-commands { clip-path: inset(-4px 100% -4px 0); }
+    .file-rows, .command-rows { opacity: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .files { animation: files var(--cycle) step-end infinite; }
+      .commands { animation: commands var(--cycle) step-end infinite; }
+      .typed-files { animation: type-files var(--cycle) steps(5, end) infinite; }
+      .typed-commands { animation: type-commands var(--cycle) steps(5, end) infinite; }
+      .file-rows { animation: file-rows var(--cycle) step-end infinite; }
+      .command-rows { animation: command-rows var(--cycle) step-end infinite; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .typed-files { clip-path: none; }
+      .file-rows { opacity: 1; }
+    }
+    /* Files 0-6s (typing 0.6-2.4s), commands 6-12s (typing 6.6-8.4s). */
+    @keyframes files { 0% { visibility: visible; } 50%, 100% { visibility: hidden; } }
+    @keyframes commands { 0% { visibility: hidden; } 50%, 100% { visibility: visible; } }
+    @keyframes type-files { 0%, 5% { clip-path: inset(-4px 100% -4px 0); } 20%, 100% { clip-path: inset(-4px 0 -4px 0); } }
+    @keyframes type-commands { 0%, 55% { clip-path: inset(-4px 100% -4px 0); } 70%, 100% { clip-path: inset(-4px 0 -4px 0); } }
+    @keyframes file-rows { 0% { opacity: 0; } 20%, 100% { opacity: 1; } }
+    @keyframes command-rows { 0% { opacity: 0; } 70%, 100% { opacity: 1; } }
+  </style>
+  <rect width="720" height="320" rx="12" fill="#11161d"/>
+  <!-- The workspace behind the palette -->
+  <rect x="12" y="12" width="696" height="296" rx="8" fill="#161c24"/>
+  <rect x="24" y="24" width="160" height="272" rx="6" fill="#1b222d" opacity="0.7"/>
+  <rect x="196" y="24" width="500" height="272" rx="6" fill="#1b222d" opacity="0.7"/>
+  <!-- Quick Open -->
+  <rect x="120" y="40" width="480" height="240" rx="10" fill="#1f2834" stroke="#3a4759"/>
+  <rect x="136" y="56" width="448" height="34" rx="6" fill="#11161d" stroke="#a8e312"/>
+  <text x="560" y="78" font-size="11" fill="#8998ad" text-anchor="end">Mod+P</text>
+  <g class="files">
+    <text x="150" y="78" font-size="14" fill="#edf1f7" class="mono typed-files">login</text>
+    <g class="file-rows">
+      <text x="148" y="114" font-size="11" font-weight="700" fill="#8998ad">FILES</text>
+      <rect x="136" y="122" width="448" height="30" rx="5" fill="#304530"/>
+      <text x="150" y="142" font-size="13" font-weight="700" fill="#edf1f7">login.go</text>
+      <text x="572" y="142" font-size="11" fill="#bde991" text-anchor="end" class="mono">~/src/my-app/auth</text>
+      <text x="150" y="172" font-size="13" fill="#cad6e6">login.png</text>
+      <text x="572" y="172" font-size="11" fill="#8998ad" text-anchor="end" class="mono">~/src/my-app/img</text>
+      <text x="150" y="200" font-size="13" fill="#cad6e6">login_test.py</text>
+      <text x="572" y="200" font-size="11" fill="#8998ad" text-anchor="end" class="mono">~/src/api/tests</text>
+      <line x1="136" y1="226" x2="584" y2="226" stroke="#3a4759"/>
+      <text x="150" y="250" font-size="11" fill="#8998ad">~/src/my-app + 2 indexed roots</text>
+    </g>
+  </g>
+  <g class="commands">
+    <text x="150" y="78" font-size="14" fill="#edf1f7" class="mono typed-commands">&gt; new</text>
+    <g class="command-rows">
+      <text x="148" y="114" font-size="11" font-weight="700" fill="#8998ad">MENU</text>
+      <rect x="136" y="122" width="448" height="30" rx="5" fill="#304530"/>
+      <text x="150" y="142" font-size="13" font-weight="700" fill="#edf1f7">new Claude</text>
+      <text x="150" y="172" font-size="13" fill="#cad6e6">new Codex</text>
+      <text x="150" y="200" font-size="13" fill="#cad6e6">new Codex (dangerously auto approve)</text>
+      <line x1="136" y1="226" x2="584" y2="226" stroke="#3a4759"/>
+      <text x="150" y="250" font-size="11" fill="#8998ad">Commands, tabs, and settings in one list</text>
+    </g>
+  </g>
+</svg>

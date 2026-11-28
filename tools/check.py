@@ -503,7 +503,7 @@ def whitespace_revision(repo_root: Path = REPO_ROOT) -> str:
     context = bazel_execution_contract.repository_release_context(repo_root)
     revision = context["revision"]
     # A release gate must inspect the committed release as well as pending edits.
-    return revision + "^" if context["commit_subject"] == f"Release YOmux {YOMUX_VERSION}" else revision
+    return revision + "^" if bazel_execution_contract.is_release_subject(context["commit_subject"], YOMUX_VERSION) else revision
 
 
 def step_catalog(*, serial: bool = False, cpu_percent: int | None = None, whitespace_base: str = "HEAD") -> dict[StepId, Step]:

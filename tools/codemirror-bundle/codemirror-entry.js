@@ -13,6 +13,7 @@ import {Compartment, EditorState, ChangeSet, StateField, StateEffect, EditorSele
 import {
   Decoration,
   EditorView,
+  RectangleMarker,
   ViewPlugin,
   WidgetType,
   crosshairCursor,
@@ -21,6 +22,7 @@ import {
   highlightActiveLine,
   highlightActiveLineGutter,
   keymap,
+  layer,
   lineNumbers,
   rectangularSelection,
 } from "@codemirror/view";
@@ -85,6 +87,7 @@ window.YOmuxCodeMirror = {
   EditorState,
   ensureSyntaxTree,
   EditorView,
+  RectangleMarker,
   ViewPlugin,
   basicSetup,
   bracketMatching,
@@ -115,6 +118,7 @@ window.YOmuxCodeMirror = {
   javascript,
   json,
   keymap,
+  layer,
   LanguageDescription,
   LanguageSupport,
   lineNumbers,

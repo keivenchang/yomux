@@ -233,7 +233,7 @@ func TestLinuxSystemLogicalCPUsUsesInjectedOnlineList(t *testing.T) {
 func TestRunBoundedHostCommandsUseStableSyntheticLocale(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"ps", "df"} {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(testsupport.ShellScript(t, "printf '%s\\n' \"$LC_ALL\"\n")), 0o700); err != nil {
+		if err := testsupport.WriteExecutable(filepath.Join(root, name), []byte(testsupport.ShellScript(t, "printf '%s\\n' \"$LC_ALL\"\n")), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}

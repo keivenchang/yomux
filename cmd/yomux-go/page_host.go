@@ -53,7 +53,18 @@ func (s *server) pageVersion(parent context.Context) pageVersion {
 			result.Error += err.Error()
 		}
 	}
-	if output, err := git("log", "v"+version+"^{}..HEAD", "--format=%cI%x09%s"); err == nil {
+	tags, err := git("for-each-ref", "--merged=HEAD", "--sort=-version:refname", "--format=%(refname:strip=2)", "refs/tags/v*")
+	var output string
+	if err == nil {
+		for tag := range strings.SplitSeq(tags, "\n") {
+			release, ok := strings.CutPrefix(tag, "v")
+			if ok && (release == version || versionChangeLevel(release, version) != "none") {
+				output, err = git("log", "refs/tags/"+tag+"^{}..HEAD", "--format=%cI%x09%s")
+				break
+			}
+		}
+	}
+	if err == nil {
 		for _, line := range strings.Split(output, "\n") {
 			if line == "" {
 				continue

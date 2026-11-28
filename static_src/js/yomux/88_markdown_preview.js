@@ -7,12 +7,14 @@ function markdownTextWithSourceAnchors(text) {
 }
 
 function markdownInlinePlainText(value) {
-  return String(value || '')
+  const text = String(value || '')
     .replace(/\\([\\`*_[\]{}()#+.!\-|>])/g, '$1')
     .replace(/(`+)(.*?)\1/g, '$2')
     .replace(/\*\*|__/g, '')
-    .replace(/~~/g, '')
-    .replace(/<[^>]+>/g, '')
+    .replace(/~~/g, '');
+  // A suffix without a closing angle bracket cannot contain a complete tag.
+  const tagEnd = text.lastIndexOf('>') + 1;
+  return (text.slice(0, tagEnd).replace(/<[^>]+>/g, '') + text.slice(tagEnd))
     .replace(/[*_]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -671,49 +673,69 @@ function applyMarkdownTaskListClasses(root, sourceText = '') {
   }
 }
 
+function markdownSourceSearchIndex(positions, start) {
+  let low = 0;
+  let high = positions.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (positions[middle] < start) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
 function applyMarkdownSourceLines(container, source) {
-  const lines = String(source || '').split('\n');
+  const lines = String(source || '').split('\n').map(line => line.trim());
+  const textOffsets = [];
+  const plainLines = new Map();
+  const rules = [];
+  const tableRows = [];
+  let offset = 0;
+  for (const [index, line] of lines.entries()) {
+    textOffsets.push(offset);
+    offset += line.length + 1;
+    if (!line) continue;
+    if (/^-{3,}$/.test(line)) rules.push(index);
+    if (line.startsWith('|')) tableRows.push(index);
+    const plain = markdownInlinePlainText(line);
+    if (!plainLines.has(plain)) plainLines.set(plain, []);
+    plainLines.get(plain).push(index);
+  }
+  const sourceText = lines.join('\n');
+  const next = (positions, start) => positions?.[markdownSourceSearchIndex(positions, start)] ?? lines.length;
   let searchFrom = 0;
   const blocks = Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote,pre,ul,ol,table,hr'));
   for (const block of blocks) {
+    if (searchFrom >= lines.length) break;
     const text = markdownPreviewVisibleText(block).trim();
-    let lineIndex = -1;
-    let lineEnd = -1;
-    for (let index = searchFrom; index < lines.length; index += 1) {
-      const trimmed = lines[index].trim();
-      if (!trimmed) continue;
-      if (block.tagName === 'HR' && /^-{3,}$/.test(trimmed)) {
-        lineIndex = index;
-        break;
-      }
-      if (block.tagName === 'TABLE' && trimmed.startsWith('|')) {
-        lineIndex = index;
-        break;
-      }
-      if (text && (trimmed.includes(text.slice(0, Math.min(text.length, 40)))
-        || markdownInlinePlainText(trimmed) === markdownInlinePlainText(text))) {
-        lineIndex = index;
-        lineEnd = index;
-        if (block.tagName === 'P') {
-          let sourceText = trimmed;
-          while (lineEnd + 1 < lines.length && markdownSourceContinuationLine(lines[lineEnd + 1])) {
-            sourceText += ` ${lines[lineEnd + 1].trim()}`;
-            if (markdownInlinePlainText(sourceText) === markdownInlinePlainText(text)) break;
-            lineEnd += 1;
-          }
-        }
-        break;
+    let lineIndex = block.tagName === 'HR' ? next(rules, searchFrom) :
+      block.tagName === 'TABLE' ? next(tableRows, searchFrom) : lines.length;
+    const plain = markdownInlinePlainText(text);
+    if (text) {
+      lineIndex = Math.min(lineIndex, next(plainLines.get(plain), searchFrom));
+      const prefix = text.slice(0, 40);
+      if (!prefix.includes('\n')) {
+        const match = sourceText.indexOf(prefix, textOffsets[searchFrom]);
+        if (match >= 0) lineIndex = Math.min(lineIndex, markdownSourceSearchIndex(textOffsets, match + 1) - 1);
       }
     }
-    if (lineIndex >= 0) {
-      block.dataset.sourceLine = String(lineIndex + 1);
-      block.dataset.sourceEndLine = String((lineEnd >= lineIndex ? lineEnd : lineIndex) + 1);
-      const anchor = document.createElement('span');
-      anchor.className = 'markdown-source-anchor';
-      anchor.dataset.sourceLine = String(lineIndex + 1);
-      block.appendChild(anchor);
-      searchFrom = (lineEnd >= lineIndex ? lineEnd : lineIndex) + 1;
+    if (lineIndex === lines.length) continue;
+    let lineEnd = lineIndex;
+    if (block.tagName === 'P') {
+      let paragraph = lines[lineIndex];
+      while (lineEnd + 1 < lines.length && markdownSourceContinuationLine(lines[lineEnd + 1])) {
+        paragraph += ` ${lines[lineEnd + 1]}`;
+        if (markdownInlinePlainText(paragraph) === plain) break;
+        lineEnd += 1;
+      }
     }
+    block.dataset.sourceLine = String(lineIndex + 1);
+    block.dataset.sourceEndLine = String(lineEnd + 1);
+    const anchor = document.createElement('span');
+    anchor.className = 'markdown-source-anchor';
+    anchor.dataset.sourceLine = String(lineIndex + 1);
+    block.appendChild(anchor);
+    searchFrom = lineEnd + 1;
   }
 }
 
@@ -1181,6 +1203,10 @@ function splitMarkdownResourceUrl(value) {
   };
 }
 
+function markdownAutoFitSvg(src, width) {
+  return !width && /\.svg$/i.test(splitMarkdownResourceUrl(src).path);
+}
+
 function markdownPreviewImageTarget(src, markdownPath) {
   const raw = String(src || '').trim();
   if (!raw || !markdownPath) return null;
@@ -1306,6 +1332,11 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
     if (!target) continue;
     const reloadGeneration = img._markdownReloadGeneration;
     img.classList.add('markdown-preview-image');
+    const parent = img.parentElement;
+    if (parent?.tagName === 'P' && parent.parentNode === root && parent.childElementCount === 1 &&
+        !parent.textContent.trim() && markdownAutoFitSvg(original, img.getAttribute('width'))) {
+      parent.classList.add('markdown-fit-svg');
+    }
     img.dataset.originalSrc = original;
     if (target.path) img.dataset.resolvedPath = target.path;
     if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
@@ -1379,6 +1410,8 @@ function updateMarkdownInlineFromPreview(container, block) {
 function markdownFormattingContextMenu(event, context, options = {}) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu markdown-preview-context-menu';
+  const table = options.table;
+  if (table) menu.classList.add('markdown-table-context-menu', 'context-menu-icon-rows');
   menu.setAttribute('role', 'menu');
   const closeMenu = () => markdownPreviewContextMenuController.close();
   const apply = command => options.applyCommand?.(command, context) === true;
@@ -1395,10 +1428,36 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     appendContextMenuButton(menu, localizedLabel('contextmenu.addUrl', 'Add URL'), options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
+  if (options.image) {
+    appendImageContextMenuItems(menu, options.image, closeMenu);
+    appendContextMenuSeparator(menu);
+  }
+  const tableAction = (label, axis, offset, direction) => {
+    appendContextMenuButton(menu, t(`contextmenu.table.${label}`), () => table.edit({axis, offset}), closeMenu, {
+      iconHtml: direction ? tabDirectionalActionIconHtml(direction) : fileContextMenuIcon('delete'),
+    });
+  };
+  if (table) {
+    tableAction('insertColumnLeft', 'column', -1, 'left');
+    tableAction('insertColumnRight', 'column', 1, 'right');
+    tableAction('insertRowAbove', 'row', -1, 'top');
+    tableAction('insertRowBelow', 'row', 1, 'bottom');
+    appendContextMenuSeparator(menu);
+    for (const [align, label] of [
+      ['left', 'alignLeft'], ['center', 'alignCenter'], ['right', 'alignRight'], [null, 'alignDefault'],
+    ]) {
+      appendContextMenuButton(menu, t(`contextmenu.table.${label}`), () => table.edit({align}), closeMenu, {
+        checked: align === table.align,
+      });
+    }
+    appendContextMenuSeparator(menu);
+  }
   appendContextMenuButton(menu, localizedLabel('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
   const hasRichContent = Boolean(context.selectedText || context.block?.querySelector?.('img'));
   appendContextMenuButton(menu, localizedLabel('contextmenu.copyWithStyle', 'Copy with format'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
-  appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
+  if (!table || options.paste) {
+    appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
+  }
   appendContextMenuSeparator(menu);
   const action = (label, command, disabled = false, checked = undefined) => {
     const button = appendContextMenuButton(
@@ -1414,11 +1473,17 @@ function markdownFormattingContextMenu(event, context, options = {}) {
   if (options.canFormat === true) {
     for (const entry of markdownFormatCommands) {
       if (entry.surface && entry.surface !== options.surface) continue;
+      if (table && entry.group) continue;
       const shortcut = markdownFormatShortcut(entry);
       const state = options.formatState?.(entry.id) || 'false';
       const button = action(entry.label + (shortcut ? ` (${shortcut})` : ''), entry.id, false, state === 'true');
       if (state === 'mixed') button.setAttribute('aria-checked', 'mixed');
     }
+  }
+  if (table) {
+    appendContextMenuSeparator(menu);
+    tableAction('deleteRow', 'row', 0);
+    tableAction('deleteColumn', 'column', 0);
   }
   markdownPreviewContextMenuController.open(menu, event.clientX, event.clientY);
 }
@@ -1992,22 +2057,21 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    if (options.snapshot === true || img.isConnected) {
-      const isCurrent = () => container._markdownPreviewGeneration === generation && img.isConnected;
-      const onImageFailure = () => showMarkdownPreviewImageFailure(
-        container,
-        img,
-        rawPath,
-        markdownImageUnavailableMessage(rawPath),
-        isCurrent,
-      );
-      localImagePromises.push(installRawFileMediaSource(img, rawPath, {
-        snapshot: options.snapshot === true,
-        isCurrent,
-        onFailure: onImageFailure,
-        onDecodeFailure: onImageFailure,
-      }));
-    }
+    // Dockview can build the preview before attaching the panel to the page.
+    const isCurrent = () => container._markdownPreviewGeneration === generation && container.contains(img);
+    const onImageFailure = () => showMarkdownPreviewImageFailure(
+      container,
+      img,
+      rawPath,
+      markdownImageUnavailableMessage(rawPath),
+      isCurrent,
+    );
+    localImagePromises.push(installRawFileMediaSource(img, rawPath, {
+      snapshot: options.snapshot === true,
+      isCurrent,
+      onFailure: onImageFailure,
+      onDecodeFailure: onImageFailure,
+    }));
     delete img.dataset.markdownRawPath;
   }
   applyMarkdownSourceLines(container, text);

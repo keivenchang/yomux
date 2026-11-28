@@ -46,7 +46,7 @@ func TestGoSearchIndexColdStartupAndRestartPreserveOwnedDatabase(t *testing.T) {
 	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}); err != nil {
 		t.Fatal(err)
 	}
-	before, err := engine.search(root, fileID(info), "tech blog", 10, "", 0)
+	before, err := engine.search(root, fileID(info), "write up", 10, "", 0)
 	if err != nil || before["count"] != 1 {
 		t.Fatalf("initial search=%#v err=%v", before, err)
 	}
@@ -58,7 +58,7 @@ func TestGoSearchIndexColdStartupAndRestartPreserveOwnedDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.db.Close()
-	after, err := newSearchIndexEngine(reopened).search(root, fileID(info), "tech blog", 10, "", 0)
+	after, err := newSearchIndexEngine(reopened).search(root, fileID(info), "write up", 10, "", 0)
 	if err != nil || after["count"] != before["count"] || before["generation"] == nil || after["generation"] != before["generation"] || after["indexed"] != true {
 		t.Fatalf("restart lost indexed results: before=%#v after=%#v err=%v", before, after, err)
 	}
@@ -882,8 +882,8 @@ func TestSearchIndexPublishesSearchableGeneration(t *testing.T) {
 	}
 	for name, content := range map[string]string{
 		"src/writeup.md":  "sentinel",
-		"src/tech-blog.md": "sentinel",
-		".git/ignored.md":  "sentinel",
+		"src/write-up.md": "sentinel",
+		".git/ignored.md": "sentinel",
 	} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -906,7 +906,7 @@ func TestSearchIndexPublishesSearchableGeneration(t *testing.T) {
 	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 2000, maxBytes: DefaultIndexBytes}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := engine.search(root, fileID(info), "tech blog", 20, "", 0)
+	result, err := engine.search(root, fileID(info), "write up", 20, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -921,7 +921,7 @@ func TestSearchIndexPublishesSearchableGeneration(t *testing.T) {
 	if result["index_coverage"] != "complete" || result["indexed"] != true {
 		t.Fatalf("index coverage = %#v", result)
 	}
-	singleToken, err := engine.search(root, fileID(info), "blog", 20, "", 0)
+	singleToken, err := engine.search(root, fileID(info), "up", 20, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -931,7 +931,7 @@ func TestSearchIndexPublishesSearchableGeneration(t *testing.T) {
 		found = found || file["name"] == "writeup.md"
 	}
 	if !ok || !found {
-		t.Fatalf("single-token indexed search for blog = %#v", singleToken)
+		t.Fatalf("single-token indexed search for up = %#v", singleToken)
 	}
 }
 
@@ -1052,7 +1052,7 @@ func TestSearchIndexTraversesBeyondDirectSearchDirectoryLimit(t *testing.T) {
 	if status["count"] != 1 || status["index_coverage"] != "complete" {
 		t.Fatalf("directory boundary coverage = %#v", status)
 	}
-	result, err := engine.search(root, fileID(info), "blog", 10, "", 0)
+	result, err := engine.search(root, fileID(info), "up", 10, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1303,7 +1303,7 @@ func TestSearchIndexPurgeQuiescesBuildsAndClearsRootMetadata(t *testing.T) {
 }
 
 func TestSearchIndexTokensMatchOnePathSegmentEach(t *testing.T) {
-	if _, matched := searchEntrySortKey("notes.md", "archive/d/i/s/notes.md", []string{"dis"}); matched {
+	if _, matched := searchEntrySortKey("notes.md", "archive/a/b/c/notes.md", []string{"abc"}); matched {
 		t.Fatal("query matched across path separators")
 	}
 	if _, matched := searchEntrySortKey("notes.md", "src/tech/blog/notes.md", []string{"tech", "blog"}); !matched {
@@ -1327,16 +1327,16 @@ func TestSearchIndexTokensMatchOnePathSegmentEach(t *testing.T) {
 	if _, matched := searchEntrySortKey("20261012-022.png", "Meetings/yo7110/20261012-022.png", []string{"meetings/"}); !matched {
 		t.Fatal("case-insensitive folder path query failed to match")
 	}
-	if _, matched := searchEntrySortKey("20261012-022.png", "meetings/yo7110/20261012-022.png", []string{"inter/"}); !matched {
+	if _, matched := searchEntrySortKey("20261012-022.png", "meetings/yo7110/20261012-022.png", []string{"meet/"}); !matched {
 		t.Fatal("partial trailing-slash folder query failed to match")
 	}
-	if _, matched := searchEntrySortKey("20261012-022.png", "Meetings/yo7110/20261012-022.png", []string{"inter/"}); !matched {
+	if _, matched := searchEntrySortKey("20261012-022.png", "Meetings/yo7110/20261012-022.png", []string{"meet/"}); !matched {
 		t.Fatal("case-insensitive partial trailing-slash folder query failed to match")
 	}
 	if _, matched := searchEntrySortKey("meetings.md", "meetings.md", []string{"meetings/"}); matched {
 		t.Fatal("trailing-slash folder query matched only a basename")
 	}
-	if _, matched := searchEntrySortKey("meetings.md", "meetings.md", []string{"inter/"}); matched {
+	if _, matched := searchEntrySortKey("meetings.md", "meetings.md", []string{"meet/"}); matched {
 		t.Fatal("partial trailing-slash folder query matched only a basename")
 	}
 	if _, matched := searchEntrySortKey("20261012-022.png", "20261012-022.png", []string{"/"}); matched {
@@ -1346,12 +1346,12 @@ func TestSearchIndexTokensMatchOnePathSegmentEach(t *testing.T) {
 
 func TestSearchIndexPublishesSlashQueriesAcrossNestedComponents(t *testing.T) {
 	root := t.TempDir()
-	relative := filepath.Join("meetings", "yo7110", "2026-interview.md")
+	relative := filepath.Join("meetings", "yo7110", "2026-meeting.md")
 	path := filepath.Join(root, relative)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("interview fixture"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("meeting fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	doitPath := filepath.Join(root, "DOIT-123.md")
@@ -1385,7 +1385,7 @@ func TestSearchIndexPublishesSlashQueriesAcrossNestedComponents(t *testing.T) {
 	if err := engine.build(indexBuildJob{root: root, identity: fileID(info), maxFiles: 10, maxBytes: DefaultIndexBytes}); err != nil {
 		t.Fatal(err)
 	}
-	for _, query := range []string{"meetings/", "inter/", "inter/06", "inter/2026", "interv/20", "2026/meetings"} {
+	for _, query := range []string{"meetings/", "meet/", "meet/06", "meet/2026", "meeti/20", "2026/meetings"} {
 		result, err := engine.search(root, fileID(info), query, 10, "", 0)
 		if err != nil {
 			t.Fatalf("search %q: %v", query, err)
@@ -1760,7 +1760,7 @@ func BenchmarkSearchIndexSyntheticScale(b *testing.B) {
 				}
 				b.ReportMetric(float64(time.Since(start).Microseconds())/1000, "publication_ms")
 				start = time.Now()
-				result, err := engine.search("/synthetic", "identity", "tech blog", 100, "", 0)
+				result, err := engine.search("/synthetic", "identity", "write up", 100, "", 0)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -1832,7 +1832,7 @@ func BenchmarkSearchIndexCrawlScale(b *testing.B) {
 				}
 				b.ReportMetric(float64(status["count"].(int)), "covered_files")
 				begin = time.Now()
-				result, err := engine.search(root, fileID(info), "tech blog", 100, "", 0)
+				result, err := engine.search(root, fileID(info), "write up", 100, "", 0)
 				if err != nil {
 					b.Fatal(err)
 				}

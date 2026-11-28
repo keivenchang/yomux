@@ -7430,7 +7430,7 @@ function buildTabberNormalRows() {
       name: tabberTabPath(item).slice(1), kind: 'file', mtime: Math.max(Number(tabberLocalItemActivity.get(item) || 0), tabberRecency(item)), sortName: label,
       tabber: {type: 'tab', item, label, icon: '◷', active: visibleItems.has(item), current: focusedItem === item,
         ...(itemPath ? {description: itemPath, descriptionIsPath: true} : {}),
-        normalNameHtml: tabberRowNameHtml(pinnedTabIconHtml(item) + esc(label), itemPath || '')},
+        normalNameHtml: tabberRowNameHtml(pinnedTabIconHtml(item) + esc(label) + shareTabberWritableHtml(itemPath), itemPath || '')},
     });
   }
   return rows;

@@ -2680,9 +2680,11 @@ func TestGitCommitDoesNotRequireDisplayOnlyRemoteMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, finderErr := service.sessionFilesRepositoryForTarget(context.Background(), root, false); finderErr != nil {
+	scope, finderErr := service.openGitHistoryScopeWithOptions(context.Background(), root, gitHistoryScopeOptions{})
+	if finderErr != nil {
 		t.Fatalf("session-files repository discovery depended on display-only remote metadata: %v", finderErr)
 	}
+	scope.close()
 	if _, finderErr := service.GitHistoryWorktree(context.Background(), root); finderErr != nil {
 		t.Fatalf("worktree status depended on display-only remote metadata: %v", finderErr)
 	}

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/finder"
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func officeFixture(t *testing.T, extension string) []byte {
@@ -288,7 +289,7 @@ func TestOfficeConcurrentRequestsAndAbandonedJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := "#!/bin/sh\nprintf x > " + shellQuote(started) + "\nIFS= read -r release < " + shellQuote(release) + "\n"
-	if err := os.WriteFile(filepath.Join(tools, "bwrap"), []byte(script), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(tools, "bwrap"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("/usr/bin/true", filepath.Join(tools, "libreoffice")); err != nil {
@@ -356,5 +357,79 @@ func TestOfficeConcurrentRequestsAndAbandonedJobs(t *testing.T) {
 	entries, err := os.ReadDir(jobs)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("conversion directories leaked: %v %v", entries, err)
+	}
+}
+
+// The same document bytes convert once; changed bytes convert again; failures are never cached.
+func TestOfficePreviewCacheConvertsEachDocumentVersionOnce(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux subprocess contract")
+	}
+	if _, err := exec.LookPath("prlimit"); err != nil {
+		t.Skip("prlimit unavailable")
+	}
+	root, tools := t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", t.TempDir())
+	runs, failing := filepath.Join(tools, "runs"), filepath.Join(tools, "failing")
+	// The fake sandbox stands in for bubblewrap and LibreOffice: it writes the converted PDF into
+	// the job directory bound at /job.
+	script := "#!/bin/sh\nprintf x >> " + shellQuote(runs) + "\n[ -e " + shellQuote(failing) + " ] && exit 1\n" +
+		"while [ \"$1\" != --bind ]; do shift; done\nprintf '%%PDF-1.4\\nconverted\\n' > \"$2/out/document.pdf\"\n"
+	if err := testsupport.WriteExecutable(filepath.Join(tools, "bwrap"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/true", filepath.Join(tools, "libreoffice")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{finder: service}
+	path := filepath.Join(root, "document.docx")
+	count := func() int {
+		data, err := os.ReadFile(runs)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(data)
+	}
+	preview := func(wantStatus, wantRuns int, wantCache string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		s.officePreview(response, httptest.NewRequest("POST", "/api/fs/office-preview", strings.NewReader(`{"path":"`+path+`"}`)))
+		if response.Code != wantStatus || count() != wantRuns || response.Header().Get("X-YOmux-Preview-Cache") != wantCache {
+			t.Fatalf("status=%d runs=%d cache=%q (want %d, %d, %q) %s", response.Code, count(), response.Header().Get("X-YOmux-Preview-Cache"), wantStatus, wantRuns, wantCache, response.Body.String())
+		}
+	}
+	if err := os.WriteFile(path, officeFixture(t, ".docx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preview(200, 1, "miss")
+	preview(200, 1, "hit")
+	changed := officeFixture(t, ".docx")
+	changed = append(changed[:len(changed):len(changed)], []byte("trailing bytes keep the archive readable")...)
+	if err := os.WriteFile(path, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preview(200, 2, "miss")
+	preview(200, 2, "hit")
+	if err := os.WriteFile(failing, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path = strings.TrimSuffix(path, ".docx") + ".pptx"
+	if err := os.WriteFile(path, officeFixture(t, ".pptx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preview(422, 3, "")
+	preview(422, 4, "")
+	stats := s.memoryCache.snapshot()["kinds"].(map[string]memoryCacheStats)[memoryCacheOffice]
+	if stats.Hits != 2 || stats.Misses != 4 || stats.Entries != 2 {
+		t.Fatalf("Office counters %+v", stats)
 	}
 }

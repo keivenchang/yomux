@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net"
 	"net/http"
@@ -852,11 +853,10 @@ func nativePublishAssets(checkout string) error {
 }
 
 func nativeWriteAssets(checkout, destination string, build func() (map[string][]byte, error)) error {
-	output, err := nativeRepositoryPath(checkout, "--absolute-git-dir")
+	slot, err := nativeAssetWriterSlot(checkout)
 	if err != nil {
 		return fmt.Errorf("resolve asset writer slot: %w", err)
 	}
-	slot := filepath.Join(strings.TrimSpace(string(output)), "yolomux", "worktree-writer")
 	if err := os.MkdirAll(filepath.Dir(slot), 0700); err != nil {
 		return err
 	}
@@ -921,6 +921,80 @@ func nativeWriteAssets(checkout, destination string, build func() (map[string][]
 	}
 	_, err = staticassets.Publish(destination, outputs, false)
 	return err
+}
+
+// Archives are admitted only through the updater's private ownership record.
+// A present but broken .git must never fall back to archive ownership.
+func nativeAssetWriterSlot(root string) (string, error) {
+	if _, err := os.Lstat(filepath.Join(root, ".git")); os.IsNotExist(err) {
+		if err := validateUpdateStage(root); err != nil {
+			return "", err
+		}
+		return filepath.Join(root, ".asset-writer"), nil
+	} else if err != nil {
+		return "", err
+	}
+	output, err := nativeRepositoryPath(root, "--absolute-git-dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(strings.TrimSpace(string(output)), "yolomux", "worktree-writer"), nil
+}
+
+func validateUpdateStage(stage string) error {
+	absolute, err := filepath.Abs(stage)
+	if err != nil {
+		return err
+	}
+	real, err := filepath.EvalSymlinks(absolute)
+	if err != nil || real != absolute {
+		return errors.New("update stage contains a symlink redirect")
+	}
+	parent := filepath.Dir(absolute)
+	if filepath.Base(absolute) != "preflight" {
+		parent = filepath.Dir(parent)
+	}
+	if filepath.Base(parent) != "self-update" {
+		return errors.New("archive is not an owned self-update stage")
+	}
+	for path := absolute; ; path = filepath.Dir(path) {
+		if err := privateUpdatePath(path, true); err != nil {
+			return err
+		}
+		if path == parent {
+			break
+		}
+	}
+	return validateUpdateStageMarker(absolute + ".owner")
+}
+
+const updateStageOwnerMarker = "yomux-update-preflight-v1\n"
+
+func validateUpdateStageMarker(marker string) error {
+	if err := privateUpdatePath(marker, false); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != updateStageOwnerMarker {
+		return errors.New("update stage has no valid ownership record")
+	}
+	return nil
+}
+
+func privateUpdatePath(path string, directory bool) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if ok && stat.Uid == uint32(os.Getuid()) && info.IsDir() && directory && info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("update directory %s has permissions %04o; set permissions to 0700 before retrying", path, info.Mode().Perm())
+	}
+	if !ok || stat.Uid != uint32(os.Getuid()) || info.Mode().Perm()&0o077 != 0 ||
+		(directory && !info.IsDir()) || (!directory && (!info.Mode().IsRegular() || stat.Nlink != 1)) {
+		return fmt.Errorf("update path must be private, owned and free of redirects: %s", path)
+	}
+	return nil
 }
 
 func nativeTLSSAN() (string, error) {
@@ -1599,4 +1673,131 @@ func nativeInheritedLaunchPreflight(checkout, host string, port, fd int, planJSO
 		return err
 	}
 	return nativeRootsAvailable(checkout, os.Getpid())
+}
+
+// Admit ancestors before creating any stage or ownership record.
+func ensurePrivateUpdateParents(config, parent string) error {
+	absolute, err := filepath.Abs(config)
+	if err != nil {
+		return err
+	}
+	real, err := filepath.EvalSymlinks(absolute)
+	if err != nil || real != absolute {
+		return errors.New("update configuration contains a symlink redirect")
+	}
+	if err := privateUpdatePath(absolute, true); err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(absolute, parent)
+	if err != nil || !filepath.IsLocal(relative) {
+		return errors.New("update stage escapes configuration")
+	}
+	path := absolute
+	for _, part := range strings.Split(relative, string(filepath.Separator)) {
+		path = filepath.Join(path, part)
+		if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
+			return err
+		}
+		if err := privateUpdatePath(path, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// A writer records owner.json right after creating its slot, so an unrecorded slot older than
+// this belongs to a writer that died between the two steps.
+const assetWriterUnrecordedGrace = 10 * time.Minute
+
+// retireStaleAssetWriter removes an archive stage's asset writer slot left by a killed or
+// rebooted writer. A live writer, one on another host, or one that cannot be identified
+// yet keeps the slot, and the stage is refused.
+func retireStaleAssetWriter(slot string, now time.Time) error {
+	info, err := os.Lstat(slot)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("update stage has a malformed asset writer slot")
+	}
+	recordPath := filepath.Join(slot, "owner.json")
+	data, err := os.ReadFile(recordPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	var record map[string]any
+	if err == nil {
+		if err := json.Unmarshal(data, &record); err != nil {
+			slog.Warn("asset writer record is unreadable", "slot", slot, "error", err)
+			record = nil
+		}
+	}
+	if host, _ := record["stable_host_id"].(string); host == "" || backgroundRecordInt64(record, "pid") <= 0 {
+		record = nil
+	}
+	if record == nil {
+		// Unrecorded slots come from older builds or a writer killed before recording itself.
+		if now.Sub(info.ModTime()) < assetWriterUnrecordedGrace {
+			return errors.New("update stage already has an asset writer")
+		}
+	} else if live, err := assetWriterOwnerLive(record); err != nil {
+		return err
+	} else if live {
+		return errors.New("update stage already has an asset writer")
+	}
+	slog.Warn("retiring stale self-update asset writer", "slot", slot, "pid", record["pid"])
+	return os.RemoveAll(slot)
+}
+
+// assetWriterOwnerLive reports whether the recorded writer may still run. Another host's
+// process cannot be checked from here, so it counts as live.
+func assetWriterOwnerLive(record map[string]any) (bool, error) {
+	hostID, err := productHostPartitionID()
+	if err != nil {
+		return false, err
+	}
+	if recorded, _ := record["stable_host_id"].(string); recorded != hostID {
+		return true, nil
+	}
+	bootID := readIdentityValue("", "/proc/sys/kernel/random/boot_id", "unknown-boot")
+	if recorded, _ := record["boot_id"].(string); recorded != bootID {
+		return false, nil
+	}
+	return sameOwnerProcess(record, nil), nil
+}
+
+func prepareUpdateStage(config, stage string) error {
+	if err := ensurePrivateUpdateParents(config, filepath.Dir(stage)); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(stage); err == nil {
+		if err := validateUpdateStage(stage); err != nil {
+			return err
+		}
+		if err := retireStaleAssetWriter(filepath.Join(stage, ".asset-writer"), time.Now()); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(stage); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	marker := stage + ".owner"
+	if _, err := os.Lstat(marker); err == nil {
+		if err := validateUpdateStageMarker(marker); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	} else if err := writeAtomicFile(marker, []byte(updateStageOwnerMarker)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(stage, 0700); err != nil {
+		return err
+	}
+	return validateUpdateStage(stage)
 }

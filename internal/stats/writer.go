@@ -793,6 +793,25 @@ func (w *Writer) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResu
 	return w.AppendWithCheckpoints(ctx, batch, nil)
 }
 
+// Disk samples project coverage or unavailability through the next cadence.
+// The sole disk collector resumes after those committed intervals.
+func (w *Writer) diskHistoryEnd(ctx context.Context, after float64) (float64, error) {
+	var end sql.NullFloat64
+	err := w.db.QueryRowContext(ctx, `
+SELECT max(ended_at) FROM (
+	SELECT max(ended_at) AS ended_at FROM coverage_epochs WHERE family='system_disk' AND ended_at > ?
+	UNION ALL
+	SELECT max(ended_at) AS ended_at FROM unavailable_spans WHERE family='system_disk' AND ended_at > ?
+)`, after, after).Scan(&end)
+	if err != nil {
+		return 0, fmt.Errorf("read the end of recorded disk history: %w", err)
+	}
+	if !end.Valid {
+		return after, nil
+	}
+	return end.Float64, nil
+}
+
 // AppendWithCheckpoints advances collector progress only with its durable facts.
 // Checkpoints do not invalidate graphs or advance their source generation.
 func (w *Writer) AppendWithCheckpoints(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint) (AppendResult, error) {

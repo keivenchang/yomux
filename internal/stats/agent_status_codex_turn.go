@@ -5,7 +5,6 @@ package stats
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +20,7 @@ const maxCodexTurnTailLines = 4096
 // bounded tail reader. It keeps no lifecycle cache that could survive PID reuse,
 // transcript replacement, or a resumed process. Recent item events establish an
 // active turn even when its start has scrolled out of the bounded suffix.
-func CodexTurnStateReader(root string) func(context.Context, int, float64) AgentStatus {
+func CodexTurnStateReader(root string, ingestion *tailfile.Ingestion) func(context.Context, int, float64) AgentStatus {
 	return func(ctx context.Context, pid int, startedAt float64) AgentStatus {
 		if ctx.Err() != nil || pid <= 0 || startedAt <= 0 {
 			return ""
@@ -46,12 +45,12 @@ func CodexTurnStateReader(root string) func(context.Context, int, float64) Agent
 		if err != nil {
 			return AgentStatusUnavailable
 		}
-		text, err := tailfile.ReadFile(file, maxCodexTurnTailLines, maxCodexTurnTailBytes)
+		text, err := ingestion.ReadFileTail(file, maxCodexTurnTailLines, maxCodexTurnTailBytes)
 		after, statErr := os.Stat(path)
 		if err != nil || statErr != nil || !os.SameFile(before, after) || after.Size() < before.Size() || (after.Size() == before.Size() && !after.ModTime().Equal(before.ModTime())) || CodexTranscriptFromProcess(pid, root) != path {
 			return AgentStatusUnavailable
 		}
-		return codexTurnTailState(text, startedAt)
+		return codexTurnTailState(ingestion, text, startedAt)
 	}
 }
 
@@ -124,7 +123,30 @@ func codexPaginatedTurnState(ctx context.Context, root string, targets []string,
 	}
 }
 
-func codexTurnTailState(text string, startedAt float64) AgentStatus {
+type codexTurnRecordData struct {
+	kind, turnID string
+	at           float64
+}
+
+var codexTurnRecord = tailfile.RegisterProjection(func(_ []byte, record map[string]any) codexTurnRecordData {
+	if record["type"] != "event_msg" {
+		return codexTurnRecordData{}
+	}
+	timestamp, _ := record["timestamp"].(string)
+	stamp, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return codexTurnRecordData{}
+	}
+	payload, _ := record["payload"].(map[string]any)
+	kind, kindOK := payload["type"].(string)
+	turnID, turnOK := payload["turn_id"].(string)
+	if !kindOK || (!turnOK && payload["turn_id"] != nil) {
+		return codexTurnRecordData{}
+	}
+	return codexTurnRecordData{kind: kind, turnID: turnID, at: float64(stamp.UnixNano()) / 1e9}
+})
+
+func codexTurnTailState(ingestion *tailfile.Ingestion, text string, startedAt float64) AgentStatus {
 	// Ignore a partially appended record; the preceding complete event remains
 	// authoritative until its terminal event has actually been published.
 	end := strings.LastIndexByte(text, '\n')
@@ -134,34 +156,23 @@ func codexTurnTailState(text string, startedAt float64) AgentStatus {
 	state := AgentStatusUnavailable
 	turnID := ""
 	closed := map[string]bool{}
-	for _, line := range strings.Split(text[:end], "\n") {
-		var record struct {
-			Type      string `json:"type"`
-			Timestamp string `json:"timestamp"`
-			Payload   struct {
-				Type   string `json:"type"`
-				TurnID string `json:"turn_id"`
-			} `json:"payload"`
-		}
-		if json.Unmarshal([]byte(line), &record) != nil || record.Type != "event_msg" {
+	for line := range strings.SplitSeq(text[:end], "\n") {
+		record := codexTurnRecord.Read(ingestion, []byte(line))
+		if record.at < startedAt {
 			continue
 		}
-		stamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
-		if err != nil || float64(stamp.UnixNano())/1e9 < startedAt {
-			continue
-		}
-		switch record.Payload.Type {
+		switch record.kind {
 		case "task_started", "item_started", "item_completed":
-			if record.Payload.TurnID != "" && !closed[record.Payload.TurnID] {
-				turnID, state = record.Payload.TurnID, AgentStatusRun
+			if record.turnID != "" && !closed[record.turnID] {
+				turnID, state = record.turnID, AgentStatusRun
 			}
 		case "task_complete", "turn_aborted":
-			if record.Payload.TurnID != "" {
-				closed[record.Payload.TurnID] = true
+			if record.turnID != "" {
+				closed[record.turnID] = true
 			} else if turnID != "" {
 				closed[turnID] = true
 			}
-			if turnID == "" || record.Payload.TurnID == "" || record.Payload.TurnID == turnID {
+			if turnID == "" || record.turnID == "" || record.turnID == turnID {
 				state = AgentStatusIdle
 			}
 		}

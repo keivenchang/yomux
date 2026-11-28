@@ -4467,7 +4467,6 @@ def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
           </div>
           <div class="tabs">
             <button id="frame-control" type="button" class="tab pane-minimize"></button>
-            <button id="pane-close" type="button" class="tab pane-close"></button>
           </div>
           <button id="detail-close" type="button" class="panel-detail-close"></button>
           <button id="tab-close" type="button" class="pane-tab-close"></button>
@@ -4522,13 +4521,13 @@ def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
             };
             const gridIds = ['preferences-grid', 'debug-grid', 'panel-grid', 'editor-grid'];
             return {
-              glyphs: ['detail-close', 'pane-close', 'tab-close'].map(readGlyph),
+              glyphs: ['detail-close', 'tab-close'].map(readGlyph),
               grids: gridIds.map(id => getComputedStyle(document.getElementById(id)).gridTemplateRows),
             };
             """
         )
         glyphs = metrics["glyphs"]
-        assert glyphs[0]["base"] == glyphs[1]["base"] == glyphs[2]["base"]
+        assert glyphs[0]["base"] == glyphs[1]["base"]
         assert glyphs[0]["base"]["width"] == "8px"
         assert abs(float(glyphs[0]["base"]["height"].removesuffix("px")) - 1.4) <= 0.02
         for glyph in glyphs:
@@ -5776,8 +5775,8 @@ def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmu
     assert_terminal_wheel_observation(terminal_wheel_observation(browser, tmp_path))
 
 
-@pytest.mark.parametrize("protocol", ["sgr", "legacy"])
-def test_real_xterm_native_wheel_and_page_keys_without_tmux_signals(browser, tmp_path, protocol):
+@pytest.mark.parametrize(("protocol", "window_view"), [("sgr", ""), ("legacy", ""), ("sgr", "alias"), ("sgr", "renumbered")])
+def test_real_xterm_native_wheel_and_page_keys(browser, tmp_path, protocol, window_view):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     browser.execute_async_script(
         """
@@ -5792,7 +5791,9 @@ def test_real_xterm_native_wheel_and_page_keys_without_tmux_signals(browser, tmp
     metrics = browser.execute_async_script(
         """
         const protocol = arguments[0];
+        const windowView = arguments[1];
         const done = arguments[arguments.length - 1];
+        const session = windowView ? `${tabberViewSessionPrefix}scroll-probe` : 'scroll-probe';
         const container = document.createElement('div');
         container.id = 'term-scroll-probe';
         container.className = 'terminal';
@@ -5803,18 +5804,25 @@ def test_real_xterm_native_wheel_and_page_keys_without_tmux_signals(browser, tmp
         const item = {term, container, socket: {readyState: WebSocket.OPEN,
           send(raw) { window.__nativeScrollFrames.push(typeof raw === 'string' ? JSON.parse(raw)
             : {type: 'input', data: String.fromCharCode(...raw), user_input: false, binary: true}); }}};
-        terminals.set('scroll-probe', item);
+        terminals.set(session, item);
         term.open(container);
-        term.onData(data => handleTerminalData('scroll-probe', data));
-        term.onBinary(data => handleTerminalData('scroll-probe', data, {binary: true, bypassMobileAccessoryModifiers: true, userInput: false}));
-        enableTerminalScroll('scroll-probe', term, container);
-        installTerminalCopyShortcut('scroll-probe', term, container);
+        term.onData(data => handleTerminalData(session, data));
+        term.onBinary(data => handleTerminalData(session, data, {binary: true, bypassMobileAccessoryModifiers: true, userInput: false}));
+        enableTerminalScroll(session, term, container);
+        installTerminalCopyShortcut(session, term, container);
         tmuxSignalState = null;
         transcriptMetadataState.payload.sessions['scroll-probe'] = {
-          agents: [{kind: 'claude', pane_target: '%11'}],
-          panes: [{target: '%11', active: true, window_active: true}],
-          selected_pane: {target: '%11'},
+          agents: [{kind: 'claude', pane_target: '%11'}, {kind: 'codex', pane_target: '%12'}],
+          panes: [{target: '%11', window: '1', active: true, window_active: !windowView},
+            {target: '%12', window: '0', active: true, window_active: windowView}],
+          selected_pane: {target: windowView ? '%12' : '%11'},
+          window_metadata: [{window_id: '@1', window_index: 1}],
         };
+        if (windowView) tabberViewSessions.set(session, {sourceSession: 'scroll-probe', windowId: '@1', windowIndex: 1});
+        if (windowView === 'renumbered') tmuxSignalState = {ok: true, windows: [
+          {session: 'scroll-probe', window_id: '@2', window_index: '1', panes: [{target: '%12', active: true}]},
+          {session: 'scroll-probe', window_id: '@1', window_index: '2', panes: [{target: '%11', active: true}]},
+        ]};
         term.write('\\x1b[?1049h\\x1b[?1003h' + (protocol === 'sgr' ? '\\x1b[?1006h' : '\\x1b[?1006l'), () => {
           term.focus();
           window.__nativeScrollFrames.length = 0;
@@ -5824,29 +5832,57 @@ def test_real_xterm_native_wheel_and_page_keys_without_tmux_signals(browser, tmp
         });
         """,
         protocol,
+        window_view,
     )
     assert metrics["mouse"] == "any" and metrics["buffer"] == "alternate", metrics
     assert metrics["rows"] == 20, metrics
-    for delta in [-120, 120]:
+    # Claude's wheel goes straight to its pane, so a tmux client sized by another browser cannot
+    # misplace it. The server encodes each report in the pane's own protocol (SGR or legacy).
+    reports_per_notch = 3
+    for notch, delta in enumerate([-10, 10], start=1):
         browser.execute_cdp_cmd("Input.dispatchMouseEvent", {
             "type": "mouseWheel", "x": metrics["x"], "y": metrics["y"], "deltaY": delta, "deltaX": 0,
         })
-    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__nativeScrollFrames.length >= 2"))
+        WebDriverWait(browser, 3).until(
+            lambda driver: driver.execute_script("return window.__nativeScrollFrames.length") == notch,
+            f"Claude mouse notch {notch} should send one direct scroll",
+        )
     for key, code in [("PageUp", 33), ("PageDown", 34)]:
         for event_type in ["keyDown", "keyUp"]:
             browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": event_type, "key": key, "code": key, "windowsVirtualKeyCode": code})
     frames = browser.execute_script("return window.__nativeScrollFrames")
-    assert len(frames) == 4 and all(frame["type"] == "input" for frame in frames), frames
-    if protocol == "sgr":
-        assert re.fullmatch(r"\x1b\[<64;\d+;\d+M", frames[0]["data"]), frames
-        assert frames[1]["data"] == frames[0]["data"].replace("<64;", "<65;"), frames
-    else:
-        assert frames[0]["binary"] is True, frames
-        assert ord(frames[0]["data"][4]) > 127, frames
-        assert frames[0]["data"].startswith("\x1b[M`"), frames
-        assert frames[1]["data"] == frames[0]["data"].replace("[M`", "[Ma"), frames
-    assert [frame["data"] for frame in frames[2:]] == ["\x1b[5~", "\x1b[6~"], frames
-    assert all(frame["user_input"] is False for frame in frames), frames
+    wheel_frames, key_frames = frames[:-2], frames[-2:]
+    assert [(frame["type"], frame["pane"], frame["direction"], frame["count"], frame.get("global")) for frame in wheel_frames] == [
+        ("application-scroll", "%11", "up", reports_per_notch, True),
+        ("application-scroll", "%11", "down", reports_per_notch, True),
+    ], frames
+    assert [(frame["type"], frame["data"], frame["user_input"]) for frame in key_frames] == [
+        ("input", "\x1b[5~", False), ("input", "\x1b[6~", False),
+    ], frames
+    continuous = browser.execute_async_script(
+        """
+        const [x, y, done] = arguments;
+        const screen = document.querySelector('#term-scroll-probe .xterm-screen');
+        const start = window.__nativeScrollFrames.length;
+        const reports = () => window.__nativeScrollFrames.slice(start)
+          .flatMap(frame => Array(frame.count).fill(frame.direction));
+        const counts = [];
+        const wheel = deltaY => {
+          screen.dispatchEvent(new WheelEvent('wheel', {deltaY, clientX: x, clientY: y, bubbles: true, cancelable: true}));
+          counts.push(reports().length);
+        };
+        [4, 4, 70, -4].forEach(wheel);
+        setTimeout(() => {
+          wheel(-4);
+          done({counts, reports: reports()});
+        }, 200);
+        """,
+        metrics["x"], metrics["y"],
+    )
+    assert continuous == {
+        "counts": [step * reports_per_notch for step in [1, 1, 2, 3, 4]],
+        "reports": ["down"] * (2 * reports_per_notch) + ["up"] * (2 * reports_per_notch),
+    }, continuous
 
 
 def test_claude_alternate_screen_without_mouse_tracking_uses_page_keys(browser, tmp_path):
@@ -6502,7 +6538,7 @@ def test_codex_page_and_wheel_scrolling_use_application_route_in_both_screen_mod
           applyTmuxSignalsPayload({data: tmuxSignalState});
           const page = new KeyboardEvent('keydown', {key: 'PageUp', code: 'PageUp', bubbles: true, cancelable: true});
           const pageAccepted = screen.dispatchEvent(page);
-          const wheel = new WheelEvent('wheel', {deltaY: -35, bubbles: true, cancelable: true});
+          const wheel = new WheelEvent('wheel', {deltaY: -4, bubbles: true, cancelable: true});
           screen.dispatchEvent(wheel);
           outcomes.push({alternateOn, pageAccepted, pagePrevented: page.defaultPrevented, wheelPrevented: wheel.defaultPrevented});
         }
@@ -6533,8 +6569,8 @@ def test_codex_page_and_wheel_scrolling_use_application_route_in_both_screen_mod
     assert metrics["singleNotchWheelPrevented"] is True, metrics
     assert metrics["frames"] == [
         {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "page": True},
-        {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "page": True},
         {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "global": True},
+        {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "page": True},
         {"type": "application-scroll", "pane": "%codex-scroll", "direction": "up", "count": 1, "column": 1, "row": 1, "global": True},
         {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"] * 2},
     ], metrics
@@ -7072,6 +7108,36 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
             return {locked, unlocked: {active: state.shift, locked: state.shiftLocked, pressed: button.getAttribute('aria-pressed'), classLocked: button.classList.contains('locked')}};
             """
         )
+        browser.execute_script("""
+          window.__paletteInput = [];
+          terminals.get('1').socket = {readyState: WebSocket.OPEN,
+            send(frame) { window.__paletteInput.push(JSON.parse(frame)); }};
+        """)
+        bar = browser.find_element(By.CSS_SELECTOR, '[data-terminal-mobile-keybar="1"]')
+        shift = bar.find_element(By.CSS_SELECTOR, '[data-terminal-mobile-key="shift"]')
+        backspace = bar.find_element(By.CSS_SELECTOR, '[data-terminal-mobile-key="backspace"]')
+        shift.click()
+        assert shift.get_attribute('aria-pressed') == 'true'
+        backspace.click()
+        assert shift.get_attribute('aria-pressed') == 'false'
+        backspace.click()
+        frames = browser.execute_script("return window.__paletteInput.filter(frame => frame.type === 'input')")
+        assert [frame['data'] for frame in frames] == ['\x1b[127;2u', '\x7f'], frames
+        left = bar.find_element(By.CSS_SELECTOR, '[data-terminal-mobile-key="arrow-left"]')
+        shift.click()
+        fast_pointer_actions(browser).click_and_hold(left).perform()
+        try:
+            WebDriverWait(browser, 4).until(lambda driver: driver.execute_script("""
+              return window.__paletteInput.filter(frame => frame.type === 'input').length >= 4;
+            """))
+        finally:
+            fast_pointer_actions(browser).release().perform()
+        assert shift.get_attribute('aria-pressed') == 'false'
+        left.click()
+        frames = browser.execute_script("return window.__paletteInput.filter(frame => frame.type === 'input')")
+        assert len(frames) >= 5, frames
+        assert all(frame['data'] == '\x1b[1;2D' for frame in frames[2:-1]), frames
+        assert frames[-1]['data'] == '\x1b[D', frames
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
@@ -7486,7 +7552,6 @@ def test_touch_pane_controls_keep_desktop_geometry_and_accept_one_tap(browser, t
             <button class="tab pane-expand pc-window-control pc-zoom" type="button"></button>
             <button class="tab pane-actions" type="button"></button>
             <button class="tab panel-tab-overflow" type="button"></button>
-            <button class="tab pane-close" type="button"></button>
             <button class="tab pane-detail-toggle" type="button"></button>
             <button class="tab pane-popout" type="button"></button>
           </div></div></div></div></div>
@@ -9336,7 +9401,9 @@ def test_tabber_editor_and_repo_diff_activity_updates_without_counting_scroll(br
         document.body.append(diffPanel);
         const diffBody = diffPanel.querySelector('.git-diff-panel-body');
         const diffBefore = tabberLocalItemActivity.get(diffItem) || 0;
+        diffBody.dispatchEvent(new PointerEvent('pointerdown', {pointerType: 'touch', bubbles: true}));
         diffBody.dispatchEvent(new Event('scroll', {bubbles: true}));
+        diffBody.dispatchEvent(new PointerEvent('pointercancel', {pointerType: 'touch', bubbles: true}));
         const afterScroll = tabberLocalItemActivity.get(diffItem) || 0;
         diffBody.dispatchEvent(new MouseEvent('click', {bubbles: true}));
         renderTabberTree(groups);
@@ -11604,17 +11671,17 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         if menu_id == "file":
             yo_commands = [command for command in metrics["commands"] if command["label"].startswith("YO!")]
             assert [command["label"] for command in yo_commands] == [
-                "YO!agent",
-                "YO!chat",
-                "YO!info",
-                "YO!share",
-                "YO!stats",
+                "YO!Agent",
+                "YO!Chat",
+                "YO!Info",
+                "YO!Share",
+                "YO!Stats",
             ], metrics
             icons = {command["label"]: command["iconClass"] for command in yo_commands}
-            assert "app-menu-ui-icon-robot" in icons["YO!agent"], metrics
-            assert "app-menu-ui-icon-chat-bubble" in icons["YO!chat"], metrics
-            assert "app-menu-ui-icon-share" in icons["YO!share"], metrics
-            assert "app-menu-ui-icon-chart" in icons["YO!stats"], metrics
+            assert "app-menu-ui-icon-robot" in icons["YO!Agent"], metrics
+            assert "app-menu-ui-icon-chat-bubble" in icons["YO!Chat"], metrics
+            assert "app-menu-ui-icon-share" in icons["YO!Share"], metrics
+            assert "app-menu-ui-icon-chart" in icons["YO!Stats"], metrics
 
         first_command = browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-popover .app-menu-command:not([disabled])')
         fast_pointer_actions(browser).move_to_element(first_command).perform()
@@ -12517,6 +12584,10 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
              effective_from: '2026-07-09', source_kind: 'seed', source_url: 'https://example.com/pricing',
              catalog_revision: 3, tokens: 1000, micro_usd: 0, api_list_micro_usd: 600000, priced_atoms: 1,
            }];
+          evidence.push(
+            {...evidence[0], key: 'fedcba9876543210fedcba99', dimension: 'output', direction: 'output', tokens: 0, api_list_micro_usd: 0, priced_atoms: 0},
+            {...evidence[0], key: 'fedcba9876543210fedcba9a', dimension: 'output', direction: 'output', source_url: 'https://example.com/other-pricing', tokens: 0, api_list_micro_usd: 0, priced_atoms: 0},
+          );
           window.__fixtureStatsCostReport = {
                schema_version: 4, total_micro_usd: 4750000, total_api_list_micro_usd: 5350000, total_tokens: 1300,
                dimensions: {...dimensions, cache_write_5m: anthropicDimensions.cache_write_5m, cache_write_1h: anthropicDimensions.cache_write_1h},
@@ -12584,6 +12655,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
                 } : null;
               })(),
               modelFormulae: [...report.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-formula')].map(node => node.textContent.trim()),
+              modelPricingLinks: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-meta a')].map(node => node.href),
               pricingText: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.textContent || '',
               pricingTitle: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.title || '',
                pricingBefore: (() => { const node = renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'); return node ? getComputedStyle(node, '::before').content : ''; })(),
@@ -12649,6 +12721,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
     assert result["legend"]["anthropicCells"][2].startswith("100 · $0.7500"), result
     assert result["legend"]["anthropicCells"][3].startswith("200 · $4.00"), result
     assert result["legend"]["modelFormulae"] == ["1.0k x $6.00/1M = $0.00"], result
+    assert result["legend"]["modelPricingLinks"] == ["https://example.com/pricing", "https://example.com/other-pricing"], result
     assert result["legend"]["pricingText"] == "", result
     assert result["legend"]["pricingTitle"] == "", result
     assert result["legend"]["pricingBefore"] in ("", "none") and result["legend"]["pricingAfter"] in ("", "none"), result
@@ -13267,7 +13340,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
             return document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="blue"]') !== null
               && document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active') !== null
               && document.querySelector('#panel-__finder__ .file-explorer-root-mode-toggle[aria-pressed="true"]') !== null
-              && document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]') !== null
+              && document.querySelector('input[data-setting-path="appearance.inactive_pane_dim_opacity"]') !== null
               && document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]') !== null
             """
         )
@@ -13352,7 +13425,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         const {probePaint} = window.__yomuxTestHelpers;
         const tabStyle = getComputedStyle(document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active'));
         const panelStyle = getComputedStyle(document.querySelector('#panel-1'));
-        const prefsRange = document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]');
+        const prefsRange = document.querySelector('input[data-setting-path="appearance.inactive_pane_dim_opacity"]');
         const ringRange = document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]');
         const radio = document.querySelector('input[data-setting-path="appearance.date_time_hour_cycle"]');
         const prefsScroll = document.querySelector('.preferences-scroll');
@@ -14753,8 +14826,15 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
           const panel = panelNodes.get(item);
           const scroller = panel._cmView.scrollDOM;
           scroller.scrollTop = Math.min(9000, scroller.scrollHeight - scroller.clientHeight - 10);
-          await frame();
-          await frame();
+          // CodeMirror measures line heights after the jump and can move scrollTop while it does.
+          // Record the position once three frames in a row agree.
+          let settled = 0, last = scroller.scrollTop;
+          for (let index = 0; index < 120 && settled < 3; index++) {
+            await frame();
+            settled = scroller.scrollTop === last ? settled + 1 : 0;
+            last = scroller.scrollTop;
+          }
+          if (settled < 3) return {error: 'editor scroll did not settle', scrollTop: scroller.scrollTop};
           return {
             item,
             savedTop: scroller.scrollTop,
@@ -16119,7 +16199,7 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     load_pc_controls_fixture(browser, tmp_path)
     assert browser.execute_script("return getComputedStyle(document.getElementById('hidden-pane-zoom')).display") == "none"
     assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize'), '::after').display") == "none"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::after').display") != "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('frame-minimize'), '::after').display") == "none"
     assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::after').display") != "none"
     assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::after').display") != "none"
     assert browser.execute_script("return document.getElementById('editor-close').getBoundingClientRect().width") <= 24
@@ -16189,12 +16269,12 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
         """
         document.body.classList.add('theme-light');
         const actionsStyle = getComputedStyle(document.getElementById('pane-actions'));
-        const closeStyle = getComputedStyle(document.getElementById('finder-close'));
+        const close = document.getElementById('editor-close');
         return {
           actionsColor: actionsStyle.color,
           actionsBg: actionsStyle.backgroundColor,
-          closeColor: closeStyle.color,
-          closeBg: closeStyle.backgroundColor,
+          closeColor: getComputedStyle(close).color,
+          closeBg: getComputedStyle(close.closest('.pane-tab')).backgroundColor,
           infoLabelColor: getComputedStyle(document.querySelector('#info-tab .pane-tab-info-label')).color,
           infoTabBg: getComputedStyle(document.getElementById('info-tab')).backgroundColor,
         };
@@ -16202,7 +16282,6 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     )
     assert light_control["actionsColor"] == ui_pin_rgb("paneTabTextLight")
     assert light_control["actionsColor"] != light_control["actionsBg"]
-    assert light_control["closeColor"] == ui_pin_rgb("paneTabTextLight")
     assert light_control["closeColor"] != light_control["closeBg"]
     # the YO!info tab label is legible in light mode (color contrasts with the tab bg,
     # not white-on-white) now that it uses the themed .session-button-dir treatment.
@@ -16225,8 +16304,8 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     fast_pointer_actions(browser).move_to_element(browser.find_element("id", "pane-zoom")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom')).backgroundColor") != "rgba(0, 0, 0, 0)"
 
-    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "finder-close")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close')).opacity") == "1"
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "frame-minimize")).perform()
+    assert browser.execute_script("return getComputedStyle(document.getElementById('frame-minimize')).opacity") == "1"
 
     fast_pointer_actions(browser).move_to_element(browser.find_element("id", "editor-close")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close')).opacity") == "1"
@@ -16265,7 +16344,6 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
           diffWeight: getComputedStyle(diff).fontWeight,
           branchFont: getComputedStyle(branch).fontFamily,
           diffDisplay: getComputedStyle(diff).display,
-          diffJustify: getComputedStyle(diff).justifyContent,
           addText: add.textContent,
           removeText: remove.textContent,
           addColor: getComputedStyle(add).color,
@@ -16285,7 +16363,6 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert repo_row_metrics["diffWeight"] == "800"
     assert "mono" in repo_row_metrics["branchFont"].lower()
     assert repo_row_metrics["diffDisplay"] == "flex"
-    assert repo_row_metrics["diffJustify"] == "flex-end"
     assert repo_row_metrics["addText"] == "+5"
     assert repo_row_metrics["removeText"] == "-3"
     assert repo_row_metrics["addColor"] != repo_row_metrics["removeColor"]
@@ -16550,7 +16627,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
         const wrapStyle = getComputedStyle(document.querySelector('.file-editor-wrap-panel'));
         const findStyle = getComputedStyle(document.querySelector('.file-editor-find-panel'));
         const previewStyle = getComputedStyle(document.querySelector('[data-editor-mode="preview"]'));
-        const closeStyle = getComputedStyle(document.querySelector('.file-editor-panel .pane-close'));
+        const minimizeStyle = getComputedStyle(document.querySelector('.file-editor-panel .pane-minimize'));
         const searchCloseStyle = getComputedStyle(document.querySelector('.cm-dialog-close'));
         const syntaxProbe = Array.from(document.querySelectorAll('#light-syntax-probe span')).map(node => {
           const style = getComputedStyle(node);
@@ -16639,7 +16716,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           wrapBorderColor: wrapStyle.borderTopColor,
           findBg: findStyle.backgroundColor,
           previewBg: previewStyle.backgroundColor,
-          closeBg: closeStyle.backgroundColor,
+          minimizeBg: minimizeStyle.backgroundColor,
           searchCloseColor: searchCloseStyle.color,
           searchCloseBg: searchCloseStyle.backgroundColor,
           syntaxColorCount: new Set(syntaxProbe.map(item => item.color)).size,
@@ -16714,8 +16791,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["findBg"] != "rgba(0, 0, 0, 0)"
     assert metrics["previewBg"] != "rgba(0, 0, 0, 0)"
     assert metrics["wrapBg"] != metrics["findBg"]
-    assert metrics["closeBg"] != metrics["editorBg"]
-    assert metrics["closeBg"] != "rgb(255, 235, 233)"
+    assert metrics["minimizeBg"] != metrics["editorBg"]
     assert metrics["searchCloseColor"] != "rgb(255, 255, 255)"
     assert metrics["searchCloseColor"] != metrics["searchCloseBg"]
     assert metrics["syntaxColorCount"] >= 6

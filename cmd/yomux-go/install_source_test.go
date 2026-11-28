@@ -218,3 +218,47 @@ func TestNativeRepositoryPathsIgnoreAmbientGitConfiguration(t *testing.T) {
 		t.Fatalf("source checkout = %q, %v; want %q", resolved, err, root)
 	}
 }
+
+func TestPageVersionFallsBackToReachableReleaseTag(t *testing.T) {
+	root := t.TempDir()
+	gitRun(t, root, "init", "--initial-branch=main")
+	commit := func(subject string) {
+		gitRun(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", subject)
+	}
+	check := func(want ...string) {
+		t.Helper()
+		got := (&server{root: root}).pageVersion(context.Background())
+		status := version
+		if len(want) != 0 {
+			status += fmt.Sprintf("(%d)", len(want))
+		}
+		if got.Error != "" || got.Status != status || len(got.Commits) != len(want) {
+			t.Fatalf("version metadata = %+v, want %s with commits %v", got, status, want)
+		}
+		for index, subject := range want {
+			if !strings.HasSuffix(got.Commits[index], " PT "+subject) {
+				t.Fatalf("commit %d = %q, want subject %q", index, got.Commits[index], subject)
+			}
+		}
+	}
+	commit("old release")
+	check()
+	gitRun(t, root, "tag", "v0.0.0")
+	commit("latest release")
+	gitRun(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "tag", "-a", "v0.0.1", "-m", "release")
+	gitRun(t, root, "switch", "-c", "other")
+	commit("other release")
+	gitRun(t, root, "tag", "v0.0.2")
+	gitRun(t, root, "switch", "main")
+	commit("candidate one")
+	gitRun(t, root, "tag", "v0.0.3-rc.1")
+	commit("candidate two")
+	check("candidate two", "candidate one")
+	gitRun(t, root, "tag", "v"+version, "other")
+	check("candidate two", "candidate one")
+	gitRun(t, root, "tag", "-d", "v"+version)
+	gitRun(t, root, "tag", "v"+version)
+	check()
+	commit("after release")
+	check("after release")
+}

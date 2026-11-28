@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestGitCommandEnvironmentPreservesOnlyLockedBundleHelper(t *testing.T) {
@@ -16,7 +18,7 @@ func TestGitCommandEnvironmentPreservesOnlyLockedBundleHelper(t *testing.T) {
 	if err := os.MkdirAll(gitCore, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(gitCore, "git-upload-pack"), []byte("fixture"), 0o700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(gitCore, "git-upload-pack"), []byte("fixture"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("YOMUX_NATIVE_BUNDLE", bundle)

@@ -70,7 +70,7 @@ func TestClassifyAgentStatusRealShapedClaudeCodexOpenCodePanes(t *testing.T) {
 		text string
 		want AgentStatus
 	}{
-		{"claude running", "claude", "Claude Code\n\nWorking...\nEsc to interrupt", AgentStatusRun},
+		{"claude running", "claude", "Claude Code\n\nCooking…\n────────────────\n❯\n────────────────\n⏸ manual mode on · esc to interrupt", AgentStatusRun},
 		{"codex done", "codex", "OpenAI Codex\n\nTask completed successfully.\n› ", AgentStatusTransition},
 		{"claude awaiting", "claude", "Claude Code\n\nAllow this command?\n1. Yes\n2. No\nEnter to select", AgentStatusAsk},
 		{"codex error", "codex", "OpenAI Codex\n\nError: command failed with exit code 1", AgentStatusError},
@@ -207,7 +207,7 @@ func TestClassifyVisibleAgentTextPreservesWorkingWithQueuedCodexFollowupQuestion
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyVisibleAgentText(tc.text)
+			got := classifyVisibleAgentText("codex", tc.text)
 			if got.Status != tc.want || got.QueuedFollowupQuestion != tc.wantQueuedFollowupAsk {
 				t.Fatalf("queued follow-up classification = %+v, want status %q and queued question %t", got, tc.want, tc.wantQueuedFollowupAsk)
 			}
@@ -240,7 +240,7 @@ func TestClassifyVisibleAgentTextUsesCurrentCodexComposerOverStaleCompletion(t *
 
 gpt-5.6-luna high · /workspace · Main`
 
-	got := classifyVisibleAgentText(text)
+	got := classifyVisibleAgentText("codex", text)
 	if got.Status != AgentStatusIdle {
 		t.Fatalf("status = %+v, want idle for the current composer", got)
 	}
@@ -252,7 +252,7 @@ func TestClassifyVisibleAgentTextRecognizesCurrentCodexWorkingCounter(t *testing
 ◦ Working (27s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
 › Ask Codex to do anything`
 
-	got := classifyVisibleAgentText(text)
+	got := classifyVisibleAgentText("codex", text)
 	if got.Status != AgentStatusRun {
 		t.Fatalf("status = %+v, want run for the current working counter", got)
 	}
@@ -309,7 +309,7 @@ func TestClassifyVisibleAgentTextIgnoresStaleAutoApproveDiscussionBeforeWorkingC
 ◦ Working (26m 16s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
 › Ask Codex to do anything`
 
-	got := classifyVisibleAgentText(text)
+	got := classifyVisibleAgentText("codex", text)
 	if got.Status != AgentStatusRun {
 		t.Fatalf("status = %+v, want run when stale auto-approve prose precedes the current working counter", got)
 	}
@@ -325,7 +325,7 @@ SyntaxError: unterminated triple-quoted string literal
 ◦ Working (20m 46s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
 › Ask Codex to do anything`
 
-	got := classifyVisibleAgentText(text)
+	got := classifyVisibleAgentText("codex", text)
 	if got.Status != AgentStatusRun {
 		t.Fatalf("status = %+v, want run for a current working footer after stale tool error", got)
 	}
@@ -337,7 +337,7 @@ func TestClassifyVisibleAgentTextIgnoresStaleCompletionBeforeWorkingFooter(t *te
 ◦ Working (28m 12s • esc to interrupt) · 2 background terminals running · /ps to view · /stop to close
 › Ask Codex to do anything`
 
-	got := classifyVisibleAgentText(text)
+	got := classifyVisibleAgentText("codex", text)
 	if got.Status != AgentStatusRun {
 		t.Fatalf("status = %+v, want run when stale completion precedes the current working footer", got)
 	}
@@ -1391,7 +1391,7 @@ func TestCurrentQuestionControlsIgnoreQuotedAndStaleQuestions(t *testing.T) {
 		{"Which implementation should I use?\n• Working (12s • esc to interrupt)\n› Ask Codex to do anything", AgentStatusRun},
 	} {
 		for _, text := range []string{item.text, item.text + strings.Repeat("\n", 40)} {
-			if got := classifyVisibleAgentText(text); got.Status != item.want {
+			if got := classifyVisibleAgentText("codex", text); got.Status != item.want {
 				t.Fatalf("%q: got %s want %s", text, got.Status, item.want)
 			}
 		}
@@ -1429,7 +1429,7 @@ func TestComposerQuestionIgnoresURLQueryDelimiters(t *testing.T) {
 		"https://example.com/path/\nContinue?\n› Ask Codex to do anything",
 		"Should I open https://example.com/search?q=terminal ?\n› Ask Codex to do anything",
 	} {
-		if got := classifyVisibleAgentText(text); got.Status != AgentStatusAsk {
+		if got := classifyVisibleAgentText("codex", text); got.Status != AgentStatusAsk {
 			t.Fatalf("genuine question %q classified as %+v", text, got)
 		}
 	}
@@ -1448,7 +1448,7 @@ func TestAgentAttentionKindSeparatesQuestionsFromApprovals(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := classifyVisibleAgentText(test.text)
+			got := classifyVisibleAgentText("codex", test.text)
 			if got.Status != AgentStatusAsk || got.AttentionKind != test.want {
 				t.Fatalf("classification = %+v, want ask/%s", got, test.want)
 			}

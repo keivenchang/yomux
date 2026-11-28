@@ -520,10 +520,10 @@ func TestNativeExecutableFileProofChecksDigestAndProcessStart(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			directory := t.TempDir()
 			selected, running := filepath.Join(directory, "selected"), filepath.Join(directory, "running")
-			if err := os.WriteFile(selected, []byte("candidate"), 0o700); err != nil {
+			if err := testsupport.WriteExecutable(selected, []byte("candidate"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(running, []byte(scenario.runningData), 0o700); err != nil {
+			if err := testsupport.WriteExecutable(running, []byte(scenario.runningData), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Chtimes(running, scenario.modified, scenario.modified); err != nil {

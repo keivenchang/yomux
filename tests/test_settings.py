@@ -145,7 +145,7 @@ def test_pane_spacing_default_is_3px():
     # must match this so a fresh profile and a reset-to-defaults both render a 3px gap + 3px ring).
     assert default_settings()["appearance"]["pane_spacing"] == 3
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
-    assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
+    assert default_settings()["appearance"]["inactive_pane_dim_opacity"] == 12
     assert "red_reminder_ms" not in default_settings()["appearance"]
     assert default_settings()["performance"]["agent_status_pulse_period_ms"] == 1550
     assert default_settings()["performance"]["workflow_transition_glow_seconds"] == 60
@@ -327,7 +327,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
             "general": {"default_layout": "bad", "reload_on_update": "bad"},
-            "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "popular-ide-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "separator_color": "bogus-separator", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
+            "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "popular-ide-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "separator_color": "bogus-separator", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_dim_opacity": 500},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "updates": {"notify_level": "bogus"},
@@ -360,7 +360,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["tab_width"] == 120
     assert settings["appearance"]["pane_spacing"] == 20
     assert settings["appearance"]["pane_ring_opacity"] == 5
-    assert settings["appearance"]["inactive_pane_opacity"] == 100
+    assert settings["appearance"]["inactive_pane_dim_opacity"] == 100
     assert settings["file_explorer"]["root_mode"] == "sync"
     assert settings["file_explorer"]["image_open_mode"] == "same-tab"
     assert settings["file_explorer"]["image_preview_max_px"] == 1200
@@ -767,12 +767,15 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     clamped_ring = save_settings({"appearance": {"pane_ring_opacity": 1}}, path)
     assert "appearance.pane_ring_opacity" in clamped_ring["coerced"]
     assert clamped_ring["settings"]["appearance"]["pane_ring_opacity"] == 5
-    opacity = save_settings({"appearance": {"inactive_pane_opacity": 0}}, path)
+    legacy_opacity = save_settings({"appearance": {"inactive_pane_opacity": 83}}, path)
+    assert "inactive_pane_opacity" not in legacy_opacity["settings"]["appearance"]
+    assert legacy_opacity["settings"]["appearance"]["inactive_pane_dim_opacity"] == 12
+    opacity = save_settings({"appearance": {"inactive_pane_dim_opacity": 0}}, path)
     assert opacity["coerced"] == []
-    assert opacity["settings"]["appearance"]["inactive_pane_opacity"] == 0
-    clamped_opacity = save_settings({"appearance": {"inactive_pane_opacity": 500}}, path)
-    assert "appearance.inactive_pane_opacity" in clamped_opacity["coerced"]
-    assert clamped_opacity["settings"]["appearance"]["inactive_pane_opacity"] == 100
+    assert opacity["settings"]["appearance"]["inactive_pane_dim_opacity"] == 0
+    clamped_opacity = save_settings({"appearance": {"inactive_pane_dim_opacity": 500}}, path)
+    assert "appearance.inactive_pane_dim_opacity" in clamped_opacity["coerced"]
+    assert clamped_opacity["settings"]["appearance"]["inactive_pane_dim_opacity"] == 100
 
 
 def test_save_settings_derives_smaller_finder_size_when_font_sizes_are_synced(tmp_path):

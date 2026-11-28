@@ -44,7 +44,8 @@ main {
   display: inline-grid;
   min-width: 140px;
 }
-.locale-toggle {
+.locale-toggle,
+.setup-copy-path {
   font: inherit;
   color: var(--text);
   background: var(--bg);
@@ -53,6 +54,13 @@ main {
   padding: 3px 6px;
   cursor: pointer;
   text-align: start;
+}
+.setup-copy-path:hover {
+  border-color: var(--accent);
+}
+.setup-path code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .locale-toggle::after {
   content: "⌄";

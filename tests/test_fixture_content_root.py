@@ -33,7 +33,7 @@ def test_frozen_diff_fixtures_preserve_historical_bytes_without_git(monkeypatch,
 
     monkeypatch.setattr(subprocess, "check_output", refuse_git)
     expected = {
-        "05f22a8646:TODO.md": "9c70ce51cf7d2f32e9a899c44d279ee989f6a4aff217566003446c8ef7cae9f4",
+        "05f22a8646:TODO.md": "f943291f062bc1db8e3d22584ced8ffdb0cb9685731f13f6c418ed1a13c09271",
         "521bbfd:static_src/js/yolomux/40_file_explorer_files.js": "08c94b14805180fe5a2ddf079a8df3473f0d5c19587880230916440527d668e8",
         "6a967aaa70:static_src/js/yolomux/40_file_explorer_files.js": "ece03ebc37dea4917d19e7e2b9e99a8cf7dd8c41c04f96e03ce9bde10fd7d22b",
     }

@@ -214,6 +214,7 @@ var routePolicies = []RoutePolicy{
 	{"POST", "/api/settings", "admin", "core.settings.v1", false},
 	{"*", "/api/settings", "readonly", "core.settings.v1", false},
 	{"GET", "/api/update-status", "readonly", "core.updates.v1", false},
+	{"POST", "/api/update-status", "admin", "core.updates.v1", false},
 	{"POST", "/api/self-update", "admin", "core.updates.v1", false},
 	{"GET", "/api/self-update/status", "admin", "core.updates.v1", false},
 	{"*", "/api/watched-prs", "readonly", "core.integrations.v1", false},

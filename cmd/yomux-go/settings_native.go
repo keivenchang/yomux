@@ -239,7 +239,7 @@ func recordSettingsProfiles(previous, current map[string]any, effectiveAt float6
 	}
 }
 
-func (schema nativeSettingsSchema) sanitize(raw any, coerced *[]string) map[string]any {
+func (schema nativeSettingsSchema) sanitize(raw any, coerced *[]string) (map[string]any, error) {
 	defaults := settingsObject(schema["DEFAULT_SETTINGS"])
 	source := settingsObject(raw)
 	result := settingsObject(cloneSettingsValue(defaults))
@@ -396,7 +396,11 @@ func (schema nativeSettingsSchema) sanitize(raw any, coerced *[]string) map[stri
 		}
 	}
 	for _, retired := range settingsList(schema["RETIRED_HOVER_TIMING_KEYS"]) {
-		if _, exists := settingsObject(source["performance"])[retired.(string)]; exists {
+		retiredKey, ok := retired.(string)
+		if !ok {
+			return nil, fmt.Errorf("settings schema retired hover key %v is not a string", retired)
+		}
+		if _, exists := settingsObject(source["performance"])[retiredKey]; exists {
 			for _, key := range []string{"popover_show_delay_ms", "popover_hide_delay_ms"} {
 				settingsObject(result["performance"])[key] = settingsObject(defaults["performance"])[key]
 			}
@@ -405,10 +409,27 @@ func (schema nativeSettingsSchema) sanitize(raw any, coerced *[]string) map[stri
 	}
 	appearance := settingsObject(result["appearance"])
 	setPairedEditorPreviewFontSize(appearance, appearance["editor_font_size"])
-	return result
+	tabber := settingsObject(result["tabber"])
+	modelName, ok := tabber["codex_model"].(string)
+	if !ok {
+		return nil, fmt.Errorf("settings tabber.codex_model is %T, not a string", tabber["codex_model"])
+	}
+	model := settingsObject(settingsObject(schema["YOAGENT_CODEX_MODEL_CATALOG"])[modelName])
+	efforts, fallback := settingsList(model["effort_options"]), model["default_effort"]
+	if model == nil {
+		efforts = settingsList(schema.entry("SETTING_CHOICES", "yoagent.claude_effort"))
+		fallback = settingsObject(defaults["yoagent"])["claude_effort"]
+	}
+	if !slices.Contains(efforts, tabber["codex_effort"]) {
+		tabber["codex_effort"] = fallback
+		if coerced != nil && !slices.Contains(*coerced, "tabber.codex_effort") {
+			*coerced = append(*coerced, "tabber.codex_effort")
+		}
+	}
+	return result, nil
 }
 
-func (schema nativeSettingsSchema) merge(current map[string]any, patch any, coerced *[]string) map[string]any {
+func (schema nativeSettingsSchema) merge(current map[string]any, patch any, coerced *[]string) (map[string]any, error) {
 	merged := settingsObject(cloneSettingsValue(current))
 	for section, raw := range settingsObject(patch) {
 		values := settingsObject(merged[section])
@@ -424,30 +445,39 @@ func (schema nativeSettingsSchema) merge(current map[string]any, patch any, coer
 			}
 		}
 	}
-	merged = schema.sanitize(merged, coerced)
+	merged, err := schema.sanitize(merged, coerced)
+	if err != nil {
+		return nil, err
+	}
 	appearance := settingsObject(merged["appearance"])
 	patchAppearance := settingsObject(settingsObject(patch)["appearance"])
 	if _, exists := patchAppearance["editor_font_size"]; exists {
 		pairedSize := appearance["editor_font_size"]
 		setPairedEditorPreviewFontSize(appearance, pairedSize)
 	} else if size, exists := patchAppearance["preview_font_size"]; exists {
-		candidate := schema.sanitize(map[string]any{"appearance": map[string]any{
+		candidate, err := schema.sanitize(map[string]any{"appearance": map[string]any{
 			"editor_font_size":  size,
 			"preview_font_size": size,
 		}}, nil)
+		if err != nil {
+			return nil, err
+		}
 		pairedSize := settingsObject(candidate["appearance"])["editor_font_size"]
 		setPairedEditorPreviewFontSize(appearance, pairedSize)
 	}
 	_, syncPresent := patchAppearance["sync_font_sizes"]
 	_, sizePresent := patchAppearance["global_font_size"]
 	if appearance["sync_font_sizes"] == true && (syncPresent || sizePresent) {
-		size := appearance["global_font_size"].(float64)
+		size, ok := appearance["global_font_size"].(float64)
+		if !ok {
+			return nil, fmt.Errorf("settings appearance.global_font_size is %T, not a number", appearance["global_font_size"])
+		}
 		for _, key := range []string{"ui_font_size", "terminal_font_size", "editor_font_size", "preview_font_size"} {
 			appearance[key] = size
 		}
 		appearance["file_explorer_font_size"] = math.Max(1, size-math.Max(1, math.RoundToEven(size*0.12)))
 	}
-	return merged
+	return merged, nil
 }
 
 func settingUnits(key string) string {
@@ -521,8 +551,11 @@ func (schema nativeSettingsSchema) catalog(current map[string]any) map[string]an
 			}
 			label := strings.ReplaceAll(key, "_", " ")
 			label = strings.ToUpper(label[:1]) + label[1:]
-			if path == "uploads.max_bytes" {
+			switch path {
+			case "uploads.max_bytes":
 				label = "File transfer size cap"
+			case "tabber.codex_model":
+				label = "Description model"
 			}
 			gui, _ := schema.entry("SETTING_GUI_SECTIONS", path).(string)
 			guiLocale, _ := schema.entry("SETTING_GUI_SECTION_LOCALE_KEYS", gui).(string)
@@ -542,13 +575,19 @@ func (schema nativeSettingsSchema) catalog(current map[string]any) map[string]an
 			labels, metadata := map[string]any{}, map[string]any{}
 			if key == "codex_model" && (section == "yoagent" || section == "summary" || section == "tabber") {
 				for id, rawSpec := range settingsObject(schema["YOAGENT_CODEX_MODEL_CATALOG"]) {
+					if section == "tabber" && !slices.Contains(choices, any(id)) {
+						continue
+					}
 					spec := settingsObject(rawSpec)
 					labels[id] = spec["display_name"]
 					metadata[id] = spec
 				}
 			}
-			if key == "claude_model" && section == "yoagent" {
+			if path == "yoagent.claude_model" || path == "tabber.codex_model" {
 				for id, rawSpec := range settingsObject(schema["YOAGENT_CLAUDE_MODEL_CATALOG"]) {
+					if !slices.Contains(choices, any(id)) {
+						continue
+					}
 					spec := settingsObject(rawSpec)
 					labels[id] = spec["display_name"]
 				}
@@ -681,7 +720,11 @@ func (schema nativeSettingsSchema) write(path string, current map[string]any) er
 func (schema nativeSettingsSchema) read(path string) (map[string]any, map[string]any, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := schema.write(path, schema.sanitize(nil, nil)); err != nil {
+		defaults, sanitizeErr := schema.sanitize(nil, nil)
+		if sanitizeErr != nil {
+			return nil, nil, sanitizeErr
+		}
+		if err := schema.write(path, defaults); err != nil {
 			return nil, nil, err
 		}
 		file, err = os.Open(path)
@@ -705,7 +748,10 @@ func (schema nativeSettingsSchema) read(path string) (map[string]any, map[string
 	// Normalize numeric types without JSON encoding: YAML permits non-finite
 	// numbers, which validation clamps, and unknown keys must remain ignorable.
 	raw := settingsObject(normalizeSettingsYAML(decoded))
-	current := schema.sanitize(raw, nil)
+	current, err := schema.sanitize(raw, nil)
+	if err != nil {
+		return nil, nil, err
+	}
 	previous := settingsObject(cloneSettingsValue(current))
 	for _, provider := range []string{"openai", "anthropic"} {
 		history := settingsProfileHistory(settingsObject(previous["cost"])["_"+provider+"_pricing_profile_history"])
@@ -766,9 +812,13 @@ func (s *server) nativeSettingsPayload(ctx context.Context, patch any, save bool
 	current, raw, err := schema.read(path)
 	coerced := []string{}
 	if err == nil && save {
-		next := schema.merge(current, patch, &coerced)
-		recordSettingsProfiles(current, next, float64(time.Now().UnixNano())/1e9)
-		if err = schema.write(path, next); err == nil {
+		var next map[string]any
+		next, err = schema.merge(current, patch, &coerced)
+		if err == nil {
+			recordSettingsProfiles(current, next, float64(time.Now().UnixNano())/1e9)
+			err = schema.write(path, next)
+		}
+		if err == nil {
 			current, raw, err = schema.read(path)
 		}
 	}

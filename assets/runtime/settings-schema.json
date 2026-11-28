@@ -31,7 +31,7 @@
       "tab_width": 172,
       "pane_spacing": 3,
       "pane_ring_opacity": 75,
-      "inactive_pane_opacity": 60,
+      "inactive_pane_dim_opacity": 12,
       "active_color": "green",
       "separator_color": "theme",
       "max_tabs_per_pane": 12
@@ -49,6 +49,7 @@
       "popover_hide_delay_ms": 120,
       "remote_resize_delay_ms": 220,
       "session_files_max_workers": 2,
+      "static_cache_mb": 64,
       "auto_approve_interval_seconds": 0.5
     },
     "notifications": {
@@ -282,7 +283,7 @@
       5,
       100
     ],
-    "appearance.inactive_pane_opacity": [
+    "appearance.inactive_pane_dim_opacity": [
       0,
       100
     ],
@@ -337,6 +338,10 @@
     "performance.session_files_max_workers": [
       1,
       8
+    ],
+    "performance.static_cache_mb": [
+      0,
+      1024
     ],
     "performance.auto_approve_interval_seconds": [
       0.1,
@@ -521,6 +526,7 @@
       "dark",
       "dracula",
       "github-light",
+      "github-light-cream",
       "monokai",
       "nord",
       "one-dark",
@@ -528,6 +534,7 @@
       "popular-ide-dark-plus",
       "popular-ide-light-plus",
       "solarized-light",
+      "solarized-light-paper",
       "yomux-light"
     ],
     "appearance.editor_dark_color_scheme": [
@@ -540,9 +547,11 @@
     ],
     "appearance.editor_light_color_scheme": [
       "github-light",
+      "github-light-cream",
       "one-light",
       "popular-ide-light-plus",
       "solarized-light",
+      "solarized-light-paper",
       "yomux-light"
     ],
     "appearance.editor_cursor_style": [
@@ -649,11 +658,14 @@
       "pane"
     ],
     "tabber.codex_model": [
-      "gpt-5.6-sol",
       "gpt-6-astra",
       "gpt-6-sol",
       "gpt-6-luna",
-      "gpt-6.1-sol"
+      "gpt-6.1-sol",
+      "claude-fable-5-1",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5"
     ],
     "tabber.codex_effort": [
       "high",
@@ -818,7 +830,10 @@
       "gpt-6-astra",
       "gpt-6-sol",
       "gpt-6-luna",
-      "gpt-5.6-sol"
+      "claude-fable-5-1",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5"
     ],
     "tabber.codex_effort": [
       "low",
@@ -879,7 +894,7 @@
     "appearance.tab_width": "Pixels, 120-420. Drives the pane tab width CSS variable.",
     "appearance.pane_spacing": "Pixels, 0-20. Gap between panes; at 0 they touch and the active outline covers the divider. The active outline thickens as spacing grows.",
     "appearance.pane_ring_opacity": "Percent, 5-100. Opacity of the green/red pane ring drawn over the content edge.",
-    "appearance.inactive_pane_opacity": "Percent, 0-100. Strength of inactive pane gray-out.",
+    "appearance.inactive_pane_dim_opacity": "Percent, 0-100. Strength of inactive pane dimming.",
     "appearance.max_tabs_per_pane": "Caps open tabs per pane (2-30); the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept).",
     "performance.latency_refresh_ms": "Client-side browser-to-server health ping interval. Stored as milliseconds, shown as seconds in Preferences, 1-30.",
     "performance.event_log_refresh_ms": "Client-side refresh interval for open YOLO/event-log panes. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
@@ -892,6 +907,7 @@
     "performance.popover_show_delay_ms": "Milliseconds, 0-3000. Shared delay before every hover surface opens.",
     "performance.popover_hide_delay_ms": "Milliseconds, 0-1000. Shared delay before every hover surface closes or follows another target.",
     "performance.remote_resize_delay_ms": "Stored as milliseconds, shown as milliseconds in Preferences, 50-2000. Debounce for tmux remote resize.",
+    "performance.static_cache_mb": "Megabytes, 0-1024. Memory shared by gzip-compressed app files and compiled TeX and Office previews, least recently used first out. App files fill it at startup so the first page load is already fast; a reload of an unchanged preview reuses its PDF. 0 compresses every request and recompiles every preview.",
     "performance.session_files_max_workers": "Workers, 1-8. Maximum concurrent cold session-files rebuilds; two is the measured default that avoids transcript, Git, and disk contention.",
     "performance.auto_approve_interval_seconds": "Seconds, 0.1-4. Fast poll interval for working or changing YOLO panes; quiet panes back off to 4 seconds.",
     "notifications.toast_duration_ms": "Milliseconds, 1000-60000. How long in-page notification popups stay visible.",
@@ -943,7 +959,7 @@
     "editor.cursor_blink_delay_ms": "Milliseconds between cursor blink phases for TextEditor, ViewEditor, and cursor examples. 0 keeps the cursor static. Default 600.",
     "general.enable_experimental_features": "Show YO!chat, YO!agent, and YO!info in File and Tabs.",
     "tabber.automatic_descriptions": "Generate short descriptions from changed recent transcripts. Nonempty manual descriptions are protected; clearing one restores automatic naming.",
-    "tabber.codex_model": "Codex model for automatic Tabber descriptions.",
+    "tabber.codex_model": "Codex or Claude model for automatic Tabber descriptions.",
     "tabber.codex_effort": "Reasoning effort for automatic Tabber descriptions.",
     "tabber.description_interval_minutes": "Minimum minutes between automatic description attempts for one physical tmux window."
   },
@@ -960,7 +976,7 @@
     "appearance.active_color": "Colors",
     "appearance.separator_color": "Colors",
     "appearance.pane_ring_opacity": "Colors",
-    "appearance.inactive_pane_opacity": "Colors",
+    "appearance.inactive_pane_dim_opacity": "Colors",
     "appearance.ui_font_size": "Sizes",
     "appearance.global_font_size": "Sizes",
     "appearance.sync_font_sizes": "Sizes",
@@ -1025,6 +1041,7 @@
     "performance.popover_hide_delay_ms": "Performance",
     "performance.remote_resize_delay_ms": "Performance",
     "performance.session_files_max_workers": "Performance",
+    "performance.static_cache_mb": "Performance",
     "stats.prune_at_local_time": "Performance",
     "github.watched_prs": "GitHub",
     "performance.auto_approve_interval_seconds": "YOLO",
@@ -1067,6 +1084,10 @@
     "Experimental": "pref.section.experimental"
   },
   "SETTING_LOCALE_KEY_OVERRIDES": {
+    "appearance.inactive_pane_dim_opacity": {
+      "description": "pref.appearance.inactive_pane_opacity.help",
+      "label": "pref.appearance.inactive_pane_opacity.label"
+    },
     "appearance.preview_font_size": {
       "label": "common.previewFontSize"
     },
@@ -1131,6 +1152,9 @@
     },
     "appearance.editor_cursor_color": {
       "laser-lime": "neon-green"
+    },
+    "tabber.codex_model": {
+      "gpt-5.6-sol": "gpt-6-luna"
     }
   },
   "IMAGE_DROP_ACTION_ORDER_SPECS": [

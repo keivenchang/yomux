@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -181,18 +182,14 @@ func TestAttributionIndexParityRestartAndAppend(t *testing.T) {
 	if err != nil || !complete {
 		t.Fatal(complete, err)
 	}
-	got, err := index.query(ctx, nil, []string{home}, 24)
+	agents := []SessionFileAgent{{Kind: "codex", CWD: home, Transcript: path}}
+	got, _, err := index.query(ctx, agents, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected, _ := scanSessionTranscriptContext(ctx, path, SessionFileAgent{Kind: "codex", CWD: home}, time.Now().Add(-24*time.Hour))
-	if len(expected) == 0 || len(got) != len(expected) {
-		t.Fatalf("parity counts: indexed %d legacy %d", len(got), len(expected))
-	}
-	for path, a := range expected {
-		if got[path] == nil || got[path].status != a.status {
-			t.Fatalf("parity at %q", path)
-		}
+	// Only Git path operations attribute files; "touch" is not a tracked mutation.
+	if len(got) != 1 || got[filepath.Join(home, "two.py")] == nil || got[filepath.Join(home, "two.py")].status != "M" {
+		t.Fatalf("indexed attributions = %v, want only %s", attributionPaths(got), filepath.Join(home, "two.py"))
 	}
 	if err = index.Close(); err != nil {
 		t.Fatal(err)
@@ -214,7 +211,7 @@ func TestAttributionIndexParityRestartAndAppend(t *testing.T) {
 	if err != nil || !complete || n != 1 {
 		t.Fatal(n, complete, err)
 	}
-	got, err = index.query(ctx, nil, []string{home}, 24)
+	got, _, err = index.query(ctx, agents, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,9 +273,11 @@ func TestAttributionIndexMtimeDeletionRecoveryAndProvenance(t *testing.T) {
 	if _, _, _, err = index.index(ctx, source, 4<<20, 4096); err != nil {
 		t.Fatal(err)
 	}
-	got, err := index.query(ctx, nil, []string{root}, 24)
-	if err != nil || len(got) != 0 {
-		t.Fatal(len(got), err)
+	agents := []SessionFileAgent{{Kind: "codex", CWD: root, Transcript: path}}
+	// Outside the window, the live agent's own last activity is still shown and marked stretched.
+	got, window, err := index.query(ctx, agents, 24)
+	if err != nil || len(got) != 1 || !window.stretched || window.lastActivity != old.Unix() {
+		t.Fatal("stale live transcript was not stretched to its last activity", len(got), window, err)
 	}
 	now := time.Now()
 	if err = os.Chtimes(path, now, now); err != nil {
@@ -287,9 +286,9 @@ func TestAttributionIndexMtimeDeletionRecoveryAndProvenance(t *testing.T) {
 	if _, _, _, err = index.index(ctx, source, 4<<20, 4096); err != nil {
 		t.Fatal(err)
 	}
-	got, err = index.query(ctx, nil, []string{root}, 24)
-	if err != nil || len(got) != 1 {
-		t.Fatal("mtime refresh missing", len(got), err)
+	got, window, err = index.query(ctx, agents, 24)
+	if err != nil || len(got) != 1 || window.stretched {
+		t.Fatal("mtime refresh missing", len(got), window, err)
 	}
 	if err = os.Remove(path); err != nil {
 		t.Fatal(err)
@@ -297,9 +296,9 @@ func TestAttributionIndexMtimeDeletionRecoveryAndProvenance(t *testing.T) {
 	if _, _, _, err = index.index(ctx, source, 4<<20, 4096); err == nil {
 		t.Fatal("deleted source accepted")
 	}
-	got, err = index.query(ctx, nil, []string{root}, 24)
-	if err != nil || len(got) != 0 {
-		t.Fatal("deleted source still attributed", len(got), err)
+	got, window, err = index.query(ctx, agents, 24)
+	if err != nil || len(got) != 0 || !window.partial {
+		t.Fatal("deleted live source must remain partial", len(got), window, err)
 	}
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
@@ -307,7 +306,7 @@ func TestAttributionIndexMtimeDeletionRecoveryAndProvenance(t *testing.T) {
 	if _, _, _, err = index.index(ctx, source, 4<<20, 4096); err != nil {
 		t.Fatal(err)
 	}
-	got, err = index.query(ctx, nil, []string{root}, 24)
+	got, _, err = index.query(ctx, agents, 24)
 	if err != nil || len(got) != 1 {
 		t.Fatal("recovery missing", len(got), err)
 	}
@@ -321,9 +320,9 @@ func TestAttributionIndexMtimeDeletionRecoveryAndProvenance(t *testing.T) {
 	if _, err = index.db.Exec("DELETE FROM attribution_sources WHERE path=?", path); err != nil {
 		t.Fatal(err)
 	}
-	got, err = index.query(ctx, nil, []string{root}, 24)
+	got, _, err = index.query(ctx, agents, 24)
 	if err != nil || len(got) != 0 {
-		t.Fatal("non-archive live source leaked into history", len(got), err)
+		t.Fatal("another indexed transcript leaked into this session", len(got), err)
 	}
 	index.setSourceError("transient", context.DeadlineExceeded)
 	index.setSourceError("transient", nil)
@@ -348,12 +347,12 @@ func TestAttributionErrorSummaryIsStableAcrossUnrelatedProgress(t *testing.T) {
 	}
 }
 
-func TestDifferPreparedHomeOutsideGitStreamsHistoricalRepositories(t *testing.T) {
+func TestDifferStreamsRepositoriesTouchedByLiveAgentsOutsideGit(t *testing.T) {
 	ctx := context.Background()
 	repo1, _ := newCommittedTestRepo(t)
 	repo2, _ := newCommittedTestRepo(t)
-	// Both repositories share the fixture test root; their immediate parent is
-	// outside Git, matching a shell in home with no saved Differ view.
+	// Both agents start in a directory outside Git; only their recorded workdirs
+	// identify the repositories they changed.
 	for _, repo := range []string{repo1, repo2} {
 		if err := os.WriteFile(filepath.Join(repo, "note.txt"), []byte("changed\n"), 0600); err != nil {
 			t.Fatal(err)
@@ -366,8 +365,10 @@ func TestDifferPreparedHomeOutsideGitStreamsHistoricalRepositories(t *testing.T)
 		t.Fatal(err)
 	}
 	defer index.Close()
+	agents := make([]SessionFileAgent, 0, 2)
 	for n, repo := range []string{repo1, repo2} {
 		path := filepath.Join(archive, fmt.Sprintf("rollout-%d.jsonl", n))
+		agents = append(agents, SessionFileAgent{Kind: "codex", CWD: home, Transcript: path})
 		record := map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call", "name": "exec_command", "arguments": map[string]any{"cmd": "git add note.txt", "workdir": repo}}}
 		data, err := json.Marshal(record)
 		if err != nil {
@@ -389,7 +390,7 @@ func TestDifferPreparedHomeOutsideGitStreamsHistoricalRepositories(t *testing.T)
 	started := time.Now()
 	first := time.Duration(0)
 	emitted := map[string]bool{}
-	payload, finderErr := service.SessionFilesWithAgentsStream(ctx, "1", []string{home}, nil, 24, "HEAD", "current", nil, func(chunk map[string]any) error {
+	payload, finderErr := service.SessionFilesWithAgentsStream(ctx, "1", nil, agents, 24, "HEAD", "current", nil, func(chunk map[string]any) error {
 		if first == 0 {
 			first = time.Since(started)
 		}
@@ -402,7 +403,7 @@ func TestDifferPreparedHomeOutsideGitStreamsHistoricalRepositories(t *testing.T)
 		t.Fatal(finderErr)
 	}
 	if !emitted[repo1] || !emitted[repo2] || len(payload["repos"].([]map[string]any)) != 2 {
-		t.Fatal("home lost a historical repository", emitted)
+		t.Fatal("a live agent's repository was not streamed", emitted)
 	}
 	t.Logf("prepared first repository=%s completion=%s", first, time.Since(started))
 	if len(payload["files"].([]map[string]any)) != 2 {
@@ -492,7 +493,8 @@ func TestAttributionIndexPromotesLiveSourceAndReconcilesDeletedHistory(t *testin
 	if _, _, _, err = index.index(ctx, source, 4<<20, 4096); err != nil {
 		t.Fatal(err)
 	}
-	got, err := index.query(ctx, nil, []string{root}, 24)
+	agents := []SessionFileAgent{{Kind: "codex", CWD: root, Transcript: path}}
+	got, _, err := index.query(ctx, agents, 24)
 	if err != nil || len(got) != 1 {
 		t.Fatal("historical promotion missed", len(got), err)
 	}
@@ -502,7 +504,7 @@ func TestAttributionIndexPromotesLiveSourceAndReconcilesDeletedHistory(t *testin
 	if err = index.reconcilePrepared(ctx); err != nil {
 		t.Fatal(err)
 	}
-	got, err = index.query(ctx, nil, []string{root}, 24)
+	got, _, err = index.query(ctx, agents, 24)
 	if err != nil || len(got) != 0 {
 		t.Fatal("deleted historical source remained visible", len(got), err)
 	}
@@ -656,7 +658,7 @@ func TestAttributionIndexAbsentAndUnsupportedTranscriptsDoNotBlockReadiness(t *t
 			t.Fatal(err)
 		}
 		index.progress = AttributionProgress{State: "ready", Partial: false}
-		if _, err = index.query(context.Background(), []SessionFileAgent{agent}, []string{"/home"}, 24); err != nil {
+		if _, _, err = index.query(context.Background(), []SessionFileAgent{agent}, 24); err != nil {
 			t.Fatal(err)
 		}
 		if index.Progress().Partial || len(index.queue) != 0 {
@@ -848,5 +850,82 @@ func TestAttributionFullFrameTurnsPreserveHistoricalShare(t *testing.T) {
 	}
 	if archiveCount != 1 || live3Count != 0 {
 		t.Fatalf("third full source turn must serve archive: archive=%d newer-live=%d", archiveCount, live3Count)
+	}
+}
+
+func TestAttributionIndexRebuildsRowsWrittenByAnotherParserVersion(t *testing.T) {
+	ctx := context.Background()
+	state := t.TempDir()
+	workdir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(codexCodeModeQuotedWorkdirRecord, "__WORKDIR__", workdir)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source := AttributionSource{Path: path, Kind: "codex"}
+	agents := []SessionFileAgent{{Kind: "codex", CWD: t.TempDir(), Transcript: path}}
+	want := filepath.Join(workdir, "acceptance", "utils", "tests", "test_browser_smoke.py")
+	index, err := OpenAttributionIndex(state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, complete, indexErr := index.index(ctx, source, 8<<20, 4096); indexErr != nil || !complete {
+		t.Fatal(complete, indexErr)
+	}
+	// Simulate a database from the previous parser: its position is at end of file but it holds
+	// none of the operations the current parser derives from the same bytes.
+	for _, statement := range []string{"DELETE FROM attribution_operations", "PRAGMA user_version=1"} {
+		if _, err = index.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = index.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	index, err = OpenAttributionIndex(state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sources int
+	if err = index.db.QueryRow("SELECT count(*) FROM attribution_sources").Scan(&sources); err != nil || sources != 0 {
+		t.Fatal("old-version sources were kept", sources, err)
+	}
+	if _, _, complete, indexErr := index.index(ctx, source, 8<<20, 4096); indexErr != nil || !complete {
+		t.Fatal(complete, indexErr)
+	}
+	got, _, err := index.query(ctx, agents, 24)
+	if err != nil || got[want] == nil {
+		t.Fatalf("rebuilt attributions = %v, err=%v; want %s", attributionPaths(got), err, want)
+	}
+	if err = index.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The current version is kept across restarts.
+	index, err = OpenAttributionIndex(state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = index.db.QueryRow("SELECT count(*) FROM attribution_operations").Scan(&sources); err != nil || sources == 0 {
+		t.Fatal("current-version operations were discarded on restart", sources, err)
+	}
+	if err = index.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAttributionIndexUnresolvedLiveTranscriptIsPartial(t *testing.T) {
+	index, err := OpenAttributionIndex(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	for _, agents := range [][]SessionFileAgent{
+		{{Kind: "codex"}}, {{Kind: "claude"}}, {{Kind: "shell"}},
+	} {
+		_, window, err := index.query(context.Background(), agents, 24)
+		if err != nil || window.partial != (agents[0].Kind != "shell") {
+			t.Fatal(agents, window, err)
+		}
 	}
 }

@@ -86,7 +86,10 @@ def go_test_server_binary(source_root: Path) -> Path:
         if path.is_file():
             digest.update(str(path.relative_to(source_root)).encode())
             digest.update(path.read_bytes())
-    cache = Path(tempfile.gettempdir()) / "yomux-go-test-binaries" / digest.hexdigest()
+    # Test processes each get a private temporary directory. Cache under the shared test-run root so
+    # every worker reuses one build instead of compiling the same server concurrently.
+    cache_parent = Path(product_env("TEST_ROOT", "").strip() or tempfile.gettempdir())
+    cache = cache_parent / "yomux-go-test-binaries" / digest.hexdigest()
     binary = cache / "yomux-go"
     cache.mkdir(parents=True, exist_ok=True)
     with (cache / "build.lock").open("a+b") as lock_file:

@@ -429,7 +429,7 @@ def test_setup_auth_page_recommends_https_only_for_http(monkeypatch):
     assert "--self-signed" not in setup_html
     assert "--host 0.0.0.0" not in setup_html
     edit_label = web.server_string("en", "common.edit")
-    assert setup_html.index(recommendation) < setup_html.index(f"{edit_label} <code>")
+    assert setup_html.index(recommendation) < setup_html.index(f'{edit_label} <code id="setupAuthPath"')
 
 
 def test_setup_screen_names_effective_auth_config_path(monkeypatch, tmp_path):
@@ -438,7 +438,8 @@ def test_setup_screen_names_effective_auth_config_path(monkeypatch, tmp_path):
 
     setup_html = web.setup_auth_html()
 
-    assert str(auth_path) in setup_html
+    assert f'<code id="setupAuthPath" dir="ltr">{auth_path}</code>' in setup_html
+    assert 'id="setupCopyPath" hidden>Copy</button>' in setup_html
     assert "~/.config/yomux/auth.yaml" not in setup_html
 
 
@@ -643,6 +644,10 @@ def test_main_page_bootstrap_defers_preferences_metadata():
     assert "catalog" not in settings_payload
     assert "choices" not in settings_payload
     assert settings_payload["localeKeyOverrides"] == {
+        "appearance.inactive_pane_dim_opacity": {
+            "description": "pref.appearance.inactive_pane_opacity.help",
+            "label": "pref.appearance.inactive_pane_opacity.label",
+        },
         "appearance.preview_font_size": {"label": "common.previewFontSize"},
         "general.language": {"label": "common.language"},
         "github.watched_prs": {"label": "common.watchedPrs"},

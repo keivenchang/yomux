@@ -11,6 +11,41 @@ from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 
 
 @pytest.mark.browser
+def test_pane_spacing_stays_directly_below_pane_ring_opacity(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('pane-outline-preferences')
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    browser.get(server.base_url + '/?sessions=__prefs__')
+    wait = WebDriverWait(browser, 20)
+    wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '[data-setting-path="appearance.pane_spacing"]'))
+    geometry = browser.execute_script("""
+      const ring = document.querySelector('[data-setting-path="appearance.pane_ring_opacity"]');
+      const spacing = document.querySelector('[data-setting-path="appearance.pane_spacing"]');
+      const ringRow = ring.closest('.preferences-setting-row');
+      const spacingRow = spacing.closest('.preferences-setting-row');
+      const container = ring.closest('.preferences-settings');
+      container.hidden = false;
+      function measure(width) {
+        container.style.inlineSize = width;
+        const a = ring.getBoundingClientRect(), b = spacing.getBoundingClientRect();
+        const control = spacing.closest('.preferences-setting-control').getBoundingClientRect();
+        const row = spacingRow.getBoundingClientRect();
+        return {
+          below: b.top >= a.bottom,
+          spacingFits: b.width > 0 && row.left <= control.left && control.right <= row.right,
+        };
+      }
+      return {
+        adjacent: ringRow.nextElementSibling === spacingRow,
+        wide: measure('48rem'),
+        narrow: measure('32rem'),
+      };
+    """)
+    assert geometry['adjacent'], geometry
+    assert geometry['wide']['below'] and geometry['wide']['spacingFits'], geometry
+    assert geometry['narrow']['below'] and geometry['narrow']['spacingFits'], geometry
+
+
+@pytest.mark.browser
 def test_native_preferences_search_matches_translated_terms_and_rejects_unmatched_queries(browser, isolated_dev_server_factory, request):
     server = isolated_dev_server_factory('preferences-search')
     request.addfinalizer(lambda: browser.get('about:blank'))

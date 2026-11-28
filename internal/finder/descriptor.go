@@ -24,6 +24,7 @@ import (
 type descriptorIdentity struct {
 	dev     uint64
 	ino     uint64
+	uid     uint32
 	mode    os.FileMode
 	size    int64
 	mtimeNS int64
@@ -34,6 +35,7 @@ func identityFor(info os.FileInfo) descriptorIdentity {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		identity.dev = uint64(stat.Dev)
 		identity.ino = uint64(stat.Ino)
+		identity.uid = stat.Uid
 	}
 	return identity
 }

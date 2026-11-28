@@ -234,25 +234,6 @@ func sessionFilesRepositoryPaths(values []string) []string {
 	return paths
 }
 
-func sessionFilesStreamRoots(visiblePaths, liveRoots []string) []string {
-	roots := make([]string, 0, min(len(visiblePaths)+len(liveRoots), maxSessionFilesRepositoryPaths))
-	seen := make(map[string]bool, len(visiblePaths)+len(liveRoots))
-	for _, values := range [][]string{visiblePaths, liveRoots} {
-		for _, raw := range values {
-			path := strings.TrimSpace(raw)
-			if path == "" || seen[path] {
-				continue
-			}
-			seen[path] = true
-			roots = append(roots, path)
-			if len(roots) == maxSessionFilesRepositoryPaths {
-				return roots
-			}
-		}
-	}
-	return roots
-}
-
 func sessionFilesPendingEnvelope(session string) map[string]any {
 	return map[string]any{
 		"state": "queued", "request": map[string]any{"id": finderRequestID("session-files-cache")},
@@ -328,21 +309,42 @@ func (s *server) sessionFilesIdentityUnavailableError(session string) *finder.Er
 	return sessionFilesIncarnationChangedError(session)
 }
 
-func (s *server) sessionFilesPaneInputs(session string) ([]string, []finder.SessionFileAgent, *finder.Error) {
+// admitCompleteLiveSessionFilesCache admits a cached view only when it was produced from fully
+// prepared attribution. A view produced while an agent's transcript was still being indexed lacks
+// that agent's repositories; serving it later beside a now-ready preparation status would present
+// the incomplete result as final, so such a record is recomputed instead.
+func (s *server) admitCompleteLiveSessionFilesCache(request sessionFilesRequest, viewID string) sessionFilesCacheAdmission {
+	admission := s.admitLiveSessionFilesCache(request, viewID)
+	if !admission.hit {
+		return admission
+	}
+	if sessionFilesCachedViewPartial(admission.record) {
+		return sessionFilesCacheAdmission{request: admission.request}
+	}
+	return admission
+}
+
+func sessionFilesCachedViewPartial(record sessionFilesCacheRecord) bool {
+	preparation, ok := sessionFilesCachePayload(record)["preparation"].(map[string]any)
+	return ok && preparation["partial"] == true
+}
+
+// sessionFilesPaneInputs returns the session's live agents. Pane directories are not returned as
+// repository roots: every YOmux session starts in its own checkout, so a pane directory says
+// nothing about where the agent worked. It remains only the agent's fallback directory.
+func (s *server) sessionFilesPaneInputs(session string) ([]finder.SessionFileAgent, *finder.Error) {
 	if strings.TrimSpace(session) == "" {
-		return nil, nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_session", MessageKey: "request.error.invalid", Message: "session is required"}
+		return nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_session", MessageKey: "request.error.invalid", Message: "session is required"}
 	}
 	if s.tmuxCommand("has-session", "-t", session).Run() != nil {
-		return nil, nil, &finder.Error{Status: http.StatusNotFound, Code: "unknown_session", MessageKey: "status.sessionEnded", Path: session, Message: "unknown session"}
+		return nil, &finder.Error{Status: http.StatusNotFound, Code: "unknown_session", MessageKey: "status.sessionEnded", Path: session, Message: "unknown session"}
 	}
 	format := "#{pane_current_path}\t#{pane_current_command}\t#{pane_id}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_title}\t#{pane_active}\t#{window_active}"
 	output, err := s.tmuxCommand("list-panes", "-s", "-t", s.exactTarget(session), "-F", format).Output()
 	if err != nil {
-		return nil, nil, &finder.Error{Status: http.StatusServiceUnavailable, Code: "session_roots_unavailable", MessageKey: "common.requestFailed", Path: session, Retryable: true, Message: "session roots unavailable"}
+		return nil, &finder.Error{Status: http.StatusServiceUnavailable, Code: "session_roots_unavailable", MessageKey: "common.requestFailed", Path: session, Retryable: true, Message: "session roots unavailable"}
 	}
-	roots := make([]string, 0)
 	agents := make([]finder.SessionFileAgent, 0)
-	seen := make(map[string]bool)
 	for _, line := range strings.Split(string(output), "\n") {
 		parts := splitTmuxFields(line)
 		root := ""
@@ -367,26 +369,21 @@ func (s *server) sessionFilesPaneInputs(session string) ([]string, []finder.Sess
 		} else {
 			root = strings.TrimSpace(line)
 		}
-		if root == "" || seen[root] {
-			if root == "" {
-				continue
-			}
-		} else {
-			seen[root] = true
-			roots = append(roots, root)
+		if root == "" {
+			continue
 		}
 		panePIDValue, _ := strconv.Atoi(panePID)
 		kind, agentPID, _, _ := s.paneAgentProcess(panePIDValue, command)
 		if kind != "" {
 			windowIndex, _ := strconv.Atoi(window)
 			agent := finder.SessionFileAgent{Kind: kind, CWD: root, PaneTarget: paneTarget, Command: command, PID: agentPID, Window: window, WindowIndex: windowIndex, Pane: pane, Active: active, WindowActive: windowActive}
-			if sessionID, transcript, cwd := agentTranscriptWithTitle(kind, agentPID, root, title); sessionID != "" || transcript != "" {
+			if sessionID, transcript, cwd := s.agentTranscriptWithTitle(kind, agentPID, root, title); sessionID != "" || transcript != "" {
 				agent.SessionID, agent.Transcript, agent.CWD = sessionID, transcript, cwd
 			}
 			agents = append(agents, agent)
 		}
 	}
-	return roots, agents, nil
+	return agents, nil
 }
 
 func (s *server) aggregateSessionFiles(ctx context.Context, sessions []string, request sessionFilesRequest) (map[string]any, *finder.Error) {
@@ -437,7 +434,7 @@ func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if request.session != "" {
-		admission := s.admitLiveSessionFilesCache(request, viewID)
+		admission := s.admitCompleteLiveSessionFilesCache(request, viewID)
 		request = admission.request
 		if admission.hit {
 			finderHTTPJSON(w, finderRequestIDForHTTP(), s.sessionFilesPayloadWithCache(admission.record, descriptor, viewID, true, admission.stale, admission.refreshing, time.Now()), nil)
@@ -593,7 +590,7 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cacheStarted := time.Now()
-	admission := s.admitLiveSessionFilesCache(request, viewID)
+	admission := s.admitCompleteLiveSessionFilesCache(request, viewID)
 	cacheLookupMs := time.Since(cacheStarted).Milliseconds()
 	request = admission.request
 	if admission.hit {
@@ -610,7 +607,8 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 		_ = writeEvent("done", map[string]any{
 			"session": request.session, "loaded": true, "errors": []any{}, "warnings": payload["warnings"],
 			"from_ref": payload["from_ref"], "to_ref": payload["to_ref"],
-			"preparation": s.finder.AttributionPreparation(),
+			"stretched": payload["stretched"], "last_activity": payload["last_activity"],
+			"preparation": payload["preparation"],
 			"cache":       sessionFilesStreamCacheMetadata(admission.record, descriptor, viewID, admission.stale, admission.refreshing, time.Now()),
 		})
 		return
@@ -659,6 +657,7 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 	_ = writeEvent("done", map[string]any{
 		"session": request.session, "loaded": true, "errors": payload["errors"], "warnings": payload["warnings"],
 		"from_ref": payload["from_ref"], "to_ref": payload["to_ref"],
+		"stretched": payload["stretched"], "last_activity": payload["last_activity"],
 		"repo_paths":  sessionFilesPayloadRepositoryPaths(payload),
 		"preparation": payload["preparation"], "phases": payload["phases"],
 		"cache": sessionFilesCacheMetadata(sessionFilesCacheRecord{StoredAt: time.Now().UnixNano()}, descriptor, viewID, false, false, time.Now()),
@@ -705,7 +704,7 @@ func (s *server) sessionFilesBatch(w http.ResponseWriter, r *http.Request) {
 			descriptor := sessionFilesRequestDescriptor(itemRequest)
 			viewID := sessionFilesCacheViewID(descriptor)
 			if !itemRequest.freshGit && !itemRequest.force {
-				admission := s.admitLiveSessionFilesCache(itemRequest, viewID)
+				admission := s.admitCompleteLiveSessionFilesCache(itemRequest, viewID)
 				itemRequest = admission.request
 				if admission.hit {
 					return s.sessionFilesPayloadWithCache(admission.record, descriptor, viewID, true, admission.stale, admission.refreshing, time.Now()), http.StatusOK

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="320" viewBox="0 0 720 320" role="img" aria-labelledby="title desc">
+  <title id="title">Split view keeps source and page lined up</title>
+  <desc id="desc">A Markdown file with an image in Split view. The source on the left is plain text; the page on the right shows the picture and scrolls so its caret line meets the source caret line. Typing a new list item in the rendered page on the right also writes it into the Markdown source on the left, and the two carets stay on the same line.</desc>
+  <style>
+    svg { --cycle: 10s; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .mono { font-family: ui-monospace, monospace; }
+    .typed { clip-path: inset(-4px 100% -4px 0); }
+    .caret-left, .caret-right { transform: translateX(0); }
+    @media (prefers-reduced-motion: no-preference) {
+      .typed { animation: type var(--cycle) steps(13, end) infinite; }
+      .caret-left { animation: caret-left var(--cycle) steps(13, end) infinite; }
+      .caret-right { animation: caret-right var(--cycle) steps(13, end) infinite; }
+      .blink { animation: blink 1.2s step-end infinite; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .typed { clip-path: none; }
+      .caret-left { transform: translateX(104px); }
+      .caret-right { transform: translateX(88px); }
+    }
+    /* Typing runs 1-6s, then the finished line holds until the loop restarts. */
+    @keyframes type {
+      0%, 10% { clip-path: inset(-4px 100% -4px 0); }
+      60%, 100% { clip-path: inset(-4px 0 -4px 0); }
+    }
+    @keyframes caret-left { 0%, 10% { transform: translateX(0); } 60%, 100% { transform: translateX(104px); } }
+    @keyframes caret-right { 0%, 10% { transform: translateX(0); } 60%, 100% { transform: translateX(88px); } }
+    @keyframes blink { 50% { opacity: 0; } }
+  </style>
+  <rect width="720" height="320" rx="12" fill="#11161d"/>
+  <!-- Source -->
+  <rect x="12" y="12" width="348" height="270" rx="8" fill="#1b222d"/>
+  <rect x="352" y="12" width="8" height="270" fill="#1b222d"/>
+  <text x="28" y="38" font-size="12" font-weight="700" fill="#aab7ca">notes.md · source</text>
+  <g class="mono" font-size="13">
+    <text x="28" y="72" fill="#9db7f9"># Release notes</text>
+    <text x="28" y="98" fill="#cad6e6">![Login page](img/login.png)</text>
+    <text x="28" y="126" fill="#cad6e6">- Fix the login redirect</text>
+    <text x="28" y="150" fill="#cad6e6">- Add dark mode</text>
+    <text x="28" y="174" fill="#cad6e6">- </text>
+    <text x="44" y="174" fill="#edf1f7" class="typed">Faster search</text>
+  </g>
+  <g class="caret-left"><rect class="blink" x="44" y="161" width="2" height="17" fill="#a8e312"/></g>
+  <!-- Rendered page -->
+  <rect x="360" y="12" width="348" height="270" rx="8" fill="#f4f6fa"/>
+  <rect x="360" y="12" width="8" height="270" fill="#f4f6fa"/>
+  <line x1="360" y1="12" x2="360" y2="282" stroke="#3a4759"/>
+  <text x="380" y="38" font-size="12" font-weight="700" fill="#5b6778">notes.md · ViewEdit</text>
+  <defs><clipPath id="page-view"><rect x="364" y="48" width="344" height="234"/></clipPath></defs>
+  <!-- The page keeps its own spacing. Split scrolls it so its caret line meets the source caret line. -->
+  <g clip-path="url(#page-view)"><g transform="translate(0 -60)">
+  <text x="380" y="74" font-size="22" font-weight="700" fill="#1b222d">Release notes</text>
+  <!-- A mock screenshot stands in for img/login.png. -->
+  <g>
+    <rect x="380" y="88" width="168" height="74" rx="5" fill="#dde4ee" stroke="#c3ccd9"/>
+    <rect x="380" y="88" width="168" height="12" rx="5" fill="#c3ccd9"/>
+    <circle cx="388" cy="94" r="2" fill="#f1a582"/><circle cx="395" cy="94" r="2" fill="#f2ce7e"/><circle cx="402" cy="94" r="2" fill="#a8e312"/>
+    <rect x="424" y="110" width="80" height="8" rx="2" fill="#9eb3cd"/>
+    <rect x="424" y="124" width="80" height="10" rx="2" fill="#ffffff" stroke="#c3ccd9"/>
+    <rect x="424" y="140" width="80" height="12" rx="3" fill="#3d7a00"/>
+    <text x="464" y="149" font-size="8" fill="#ffffff" text-anchor="middle">Log in</text>
+  </g>
+  <g font-size="14" fill="#1b222d">
+    <circle cx="388" cy="181" r="2.5"/><text x="398" y="186">Fix the login redirect</text>
+    <circle cx="388" cy="205" r="2.5"/><text x="398" y="210">Add dark mode</text>
+    <circle cx="388" cy="229" r="2.5"/><text x="398" y="234" class="typed">Faster search</text>
+  </g>
+  <g class="caret-right"><rect class="blink" x="398" y="220" width="2" height="18" fill="#3d7a00"/></g>
+  </g></g>
+  <!-- Only the caret line is lined up. -->
+  <path d="M340 169 H378" stroke="#a8e312" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <text x="360" y="304" font-size="12" fill="#8998ad" text-anchor="middle">Type on either side; the page scrolls so both carets stay on the same line.</text>
+</svg>

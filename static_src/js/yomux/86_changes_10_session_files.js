@@ -77,6 +77,8 @@ function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
     from_ref: payload.from_ref || defaults.from_ref || diffRefFrom,
     to_ref: payload.to_ref || defaults.to_ref || diffRefTo,
     refreshing: payload.refreshing === true,
+    stretched: payload.stretched === true,
+    last_activity: payload.stretched === true ? Number(payload.last_activity) || 0 : 0,
     loaded: defaults.loaded === false ? false : true,
   };
 }
@@ -154,12 +156,12 @@ function switchFileExplorerChangesSession(session) {
     setSessionFilesPayloadForDestination('differ', pendingPayload);
     fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
-  setSessionFilesLoadingForDestination('differ', !cachedPayloadIsLoaded);
+  setSessionFilesLoadingForDestination('differ', false);
+  // The server can return its cached rows immediately and refresh stale entries in the background,
+  // even when this browser has no local copy. Forcing a miss here bypassed that cache and delayed
+  // the first directory until a fresh repository scan produced its first stream chunk.
+  fetchSessionFiles({destination: 'differ', session, silent: true, background: cachedPayloadIsLoaded});
   renderFileExplorerChangesPanel(panelNodes.get(differItemId));
-  // A cached session switch already has visible last-known-good rows. Let the server decide
-  // whether its entry is stale and coalesce one background refresh; forcing here used to bypass
-  // that parent and submit a full session-files job for every tab switch.
-  fetchSessionFiles({destination: 'differ', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
 }
 
 function switchFileExplorerFinderSession(session) {
@@ -337,6 +339,7 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     warnings: Array.isArray(payload?.warnings) ? payload.warnings : [],
     cache_request_descriptor: String(payload?.cache?.request_descriptor || ''),
     preparation: payload?.preparation || {},
+    stretched: payload?.stretched === true ? Number(payload.last_activity) || 0 : false,
     pending_key: String(payload?.pending_key || ''),
     pending_epoch: payload?.pending_epoch ?? null,
     pending_operation_id: String(payload?.pending_operation_id || ''),
@@ -1461,7 +1464,11 @@ function changesSummaryHtml(payload, files, session, loading, loaded, counts = n
   const repos = tPlural('changes.repoCount', repoCount);
   const count = tPlural('changes.fileCount', fileCount);
   const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
-  const freshness = preparation?.partial === true ? t('changes.indexingHistory') : payload?.cache?.stale === true ? t('changes.savedResults') : '';
+  const status = preparation?.partial === true ? t('changes.indexingHistory') : payload?.cache?.stale === true ? t('changes.savedResults') : '';
+  // A stretched result is the agent's last activity, older than the usual window. Say how old.
+  const lastActivity = payload?.stretched === true && Number(payload.last_activity) > 0
+    ? t('changes.lastActivity', {rel: relativeTimeFormat(Math.max(0, Math.round(Date.now() / 1000 - Number(payload.last_activity))))}) : '';
+  const freshness = [status, lastActivity].filter(Boolean).join(' · ');
   return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}${freshness ? ` · ${esc(freshness)}` : ''}${preparation?.error ? `: ${esc(preparation.error)}` : ''}</span>`;
 }
 

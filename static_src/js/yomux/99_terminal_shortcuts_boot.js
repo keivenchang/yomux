@@ -76,7 +76,7 @@ function globalShortcutTargetAllowsAppAction(target, {includeActiveElement = tru
   ].filter(Boolean);
   if (!nodes.length) return true;
   const blocked = ['.xterm', '.terminal-pane', '.cm-editor', 'input', 'textarea', 'select', '[contenteditable="true"]'];
-  return !nodes.some(node => blocked.some(selector => node.closest?.(selector)));
+  return !nodes.some(node => node.isContentEditable || blocked.some(selector => node.closest?.(selector)));
 }
 
 function globalShortcutTargetAllowsPlatformAction(target) {

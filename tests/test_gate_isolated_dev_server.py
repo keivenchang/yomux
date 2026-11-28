@@ -42,6 +42,7 @@ from tests import isolated_dev_server as server_fixture
 from tools import verify_go_agent_status_live as verifier
 from tools import go_binary
 from tools.instance_isolation import synthetic_test_environment
+from tools.product_environment import product_env_names
 
 
 pytestmark = pytest.mark.socket
@@ -102,7 +103,9 @@ def test_live_collector_verifier_uses_complete_native_fixture_builder(tmp_path, 
 def test_fixture_binary_cache_tracks_build_identity(tmp_path, monkeypatch, changed_input):
     monkeypatch.delenv("YOMUX_GO_BINARY", raising=False)
     monkeypatch.delenv("YOLOMUX_GO_BINARY", raising=False)
-    monkeypatch.setattr(go_binary.tempfile, "gettempdir", lambda: str(tmp_path / "cache"))
+    # The cache lives under the shared test-run root. Point it at this test's private directory.
+    for name in product_env_names("TEST_ROOT"):
+        monkeypatch.setenv(name, str(tmp_path / "cache"))
     (tmp_path / "version.yaml").write_text('version: "1.2.3"\n', encoding="utf-8")
     embedded = tmp_path / "cmd/yomux-go/pages/main.gohtml"
     embedded.parent.mkdir(parents=True)

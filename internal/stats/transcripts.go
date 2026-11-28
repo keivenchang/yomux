@@ -772,7 +772,10 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 		after.Offset += int64(len(line))
 		after.PendingLine = nil
 		result.RecordsParsed++
-		if complete && !transcriptLineMayContainUsage(source.Provider, trimmed) {
+		if !transcriptLineMayContainUsage(source.Provider, trimmed) {
+			// Validate without decoding: most lines take this path. Preserve the
+			// sequence of valid objects, including a JSON number outside float64
+			// range that the usage decoder cannot represent.
 			if len(trimmed) > 0 && trimmed[0] == '{' && json.Valid(trimmed) {
 				switch source.Provider {
 				case "claude":
@@ -783,8 +786,8 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 			}
 			continue
 		}
-		var record map[string]any
-		if err := json.Unmarshal(trimmed, &record); err != nil {
+		record := options.Ingestion.Decode(line)
+		if record == nil {
 			continue
 		}
 		if source.Provider == "codex" {
@@ -1347,12 +1350,8 @@ func rebuildLegacyClaudeMessageOrder(file io.ReaderAt, state *TranscriptScannerS
 			return fmt.Errorf("transcript record exceeds %d-byte parser limit", transcriptMaxPendingLineBytes)
 		}
 		result.RecordsParsed++
-		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
-			return nil
-		}
-		var record map[string]any
-		if err := json.Unmarshal(trimmed, &record); err != nil || record == nil {
+		record := options.Ingestion.Decode(line)
+		if record == nil {
 			return nil
 		}
 		sequence := state.ClaudeMessageOrderRebuildSequence

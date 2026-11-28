@@ -13,7 +13,7 @@
   {{localePicker "setup-locale"}}
   <h1>{{t "setup.setUp"}} {{brand "brand-title setup-brand setup-brand-waiting" "span"}}</h1>
   {{.SecurityHTML}}
-  <p>{{t "common.edit"}} <code>{{.AuthPath}}</code></p>
+  <p class="setup-path">{{t "common.edit"}} <code id="setupAuthPath" dir="ltr">{{.AuthPath}}</code> <button type="button" class="setup-copy-path" id="setupCopyPath" hidden>{{t "common.copy"}}</button> <span id="setupCopyStatus" role="status"></span></p>
   {{if .StarterAuthConfig}}<pre># Uncomment the admin account already in auth.yaml.
 # Its generated password is already in the file.
 # Save the file to enable login.</pre>{{else}}<p>Add an admin account to this existing configuration, or replace its placeholder credentials. Use a unique password.</p>

@@ -418,6 +418,7 @@ func runNativeAgent(ctx context.Context, root string, settings map[string]any, b
 	}
 	intentSchema := settingsObject(settings["_yoagent_model_intent_schema"])
 	structuredIntent := intentSchema != nil
+	descriptionOnly := settings["_description_data_only"] == true
 	schemaPath := ""
 	if structuredIntent {
 		schemaPath, err = writeNativeAgentSchema(intentSchema)
@@ -438,7 +439,7 @@ func runNativeAgent(ctx context.Context, root string, settings map[string]any, b
 			args = append(args, "resume")
 		}
 		args = append(args, "--json", "--ignore-rules")
-		if settings["_description_data_only"] == true {
+		if descriptionOnly {
 			args = append(args, "--ignore-user-config", "--ephemeral", "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "apps", "--disable", "multi_agent", "-c", `web_search="disabled"`)
 		}
 		if model := nativeAgentStringSetting(settings, "codex_model", ""); model != "" {
@@ -458,7 +459,9 @@ func runNativeAgent(ctx context.Context, root string, settings map[string]any, b
 		}
 	case "claude":
 		args = []string{"--print", "--input-format", "text", "--output-format", "stream-json", "--include-partial-messages", "--verbose"}
-		if !structuredIntent {
+		if descriptionOnly {
+			args = append(args, "--safe-mode", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--settings", `{"disableAllHooks":true}`)
+		} else if !structuredIntent {
 			args = append(args, "--permission-mode", "plan", "--tools", "Read,Grep,Glob")
 		}
 		if sessionID != "" {
@@ -489,7 +492,12 @@ func runNativeAgent(ctx context.Context, root string, settings map[string]any, b
 	command.Cancel = func() error { return stopNativeAgentProcess(command) }
 	command.Dir = root
 	command.Stdin = strings.NewReader(prompt)
-	environment, err := nativeRuntimeEnvironment(nil)
+	var environment []string
+	if backend == "codex" && descriptionOnly {
+		environment, err = nativeCodexEnvironment()
+	} else {
+		environment, err = nativeRuntimeEnvironment(nil)
+	}
 	if err != nil {
 		return nil, "", fmt.Errorf("prepare YO!agent environment: %w", err)
 	}
@@ -544,7 +552,7 @@ func runNativeAgent(ctx context.Context, root string, settings map[string]any, b
 	if capturedSessionID == "" && sessionID != "" {
 		capturedSessionID = sessionID
 	}
-	if structuredIntent || settings["_description_data_only"] == true {
+	if structuredIntent || descriptionOnly {
 		return map[string]any{"backend": backend, "transport": transport, "persistent": false, "resumed": false}, answer.String(), nil
 	}
 	return map[string]any{"backend": backend, "transport": transport, "persistent": true, "resumed": resume, "session_id": capturedSessionID}, answer.String(), nil

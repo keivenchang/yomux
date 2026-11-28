@@ -253,6 +253,11 @@ func TestTabberAutomaticDescriptionsCoalesceAndManualWins(t *testing.T) {
 	id := tmux("display-message", "-p", "-t", "=auto:0", "#{window_id}")
 	s := nativeSettingsFixtureServer(t)
 	other := nativeSettingsFixtureServer(t)
+	if _, err := s.nativeSettingsPayload(context.Background(), map[string]any{
+		"tabber": map[string]any{"codex_model": "claude-sonnet-5-5", "codex_effort": "high"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(t.TempDir(), "transcript.jsonl")
 	tmux("set-option", "-w", "-t", id, "@yomux_description_source", tabberDescriptionSource("codex", path, ""))
 	activeTimestamp := time.Now().UTC().Format(time.RFC3339Nano)
@@ -261,7 +266,8 @@ func TestTabberAutomaticDescriptionsCoalesceAndManualWins(t *testing.T) {
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	s.tabberDescriptionRun = func(ctx context.Context, root string, config map[string]any, backend, session string, resume bool, prompt string, emit func(string) error) (map[string]any, string, error) {
-		if config["codex_model"] != "gpt-6-luna" || config["codex_effort"] != "low" || config["_description_data_only"] != true || !strings.Contains(prompt, "untrusted data") {
+		if backend != "claude" || config["claude_model"] != "claude-sonnet-5-5" || config["claude_effort"] != "high" ||
+			config["_description_data_only"] != true || !strings.Contains(prompt, "untrusted data") {
 			return nil, "", errors.New("invalid description request")
 		}
 		close(entered)
@@ -502,7 +508,7 @@ func TestTabberDescriptionReconcilesPhysicalWindowWithoutBrowser(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	activity := agentConversationActivityTS(map[string]any{"kind": "opencode", "transcript": database, "session_id": "ses-open"})
+	activity := (&server{}).agentConversationActivityTS(map[string]any{"kind": "opencode", "transcript": database, "session_id": "ses-open"})
 	if activity <= 0 || time.Since(time.Unix(int64(activity), 0)) > tabberDescriptionRecentActivityWindow {
 		t.Fatalf("fixture conversation is not recent enough for inference: %v", activity)
 	}

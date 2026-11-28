@@ -23,7 +23,8 @@ Open these files directly in YOmux Preview to verify the rendered paths. Example
 | `pdf` | `24-small.pdf` | Original one-page PDF under 10 KiB for direct viewing |
 | `office` | `25-document.docx` | Multi-page document with a heading, table, and small images, converted locally with LibreOffice |
 | `office` | `26-slides.pptx` | Two static slide pages with distinct titles, converted locally with LibreOffice |
-| `mixed` | `03-mixed.md` | Combined Markdown, local SVG, tasks, table, Mermaid, links, code, and sanitizer checks |
+| `mixed` | `03-md-mixed.md` | Editable Markdown with tasks, a table, local SVGs, Mermaid, math, links, and code |
+| `html-in-markdown` | `04-md-rich.md` | Editable Markdown with embedded HTML formatting, collapsible sections, and sized images |
 | `TeX` | `30-tex/` | Numbered TeX source, Markdown math, and HTML math examples |
 
 Supporting SVG files live in `31-assets/`. PlantUML and unsupported or broken-by-design media placeholders are omitted because they do not demonstrate a useful rendered preview.

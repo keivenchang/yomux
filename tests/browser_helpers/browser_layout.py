@@ -1384,9 +1384,12 @@ def pc_controls_fixture_html():
           <span class="pane-tab-core"><span class="session-button-name">1</span></span>
           <span id="tab-minimize" class="pane-tab-close pc-window-control pc-minimize"></span>
         </button>
+        <button type="button" class="pane-tab active">
+          <span class="pane-tab-core"><span class="session-button-name">Editor</span></span>
+          <span id="editor-close" class="pane-tab-close pc-window-control pc-close"></span>
+        </button>
         <div class="tabs pane-frame-controls">
-          <button id="finder-close" class="tab pane-close pc-window-control pc-close"></button>
-          <button id="editor-close" class="tab pane-close pc-window-control pc-close"></button>
+          <button id="frame-minimize" class="tab pane-minimize pc-window-control pc-minimize"></button>
         </div>
         <section class="preferences-section collapsed">
           <button type="button" class="preferences-section-toggle">Appearance</button>
@@ -1516,7 +1519,6 @@ def codemirror_editor_controls_fixture_html():
               <div class="tabs pane-frame-controls file-editor-frame-controls">
                 <button class="tab pane-minimize pc-window-control pc-minimize"></button>
                 <button class="tab pane-expand pc-window-control pc-zoom"></button>
-                <button type="button" class="tab pane-close pc-window-control pc-close"></button>
               </div>
             </div>
             <div class="pane-tabs" role="tablist">{tabs}</div>
@@ -3488,7 +3490,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
               <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" aria-pressed="true">Sync</button>
               <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/">
               <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy"></button>
-              <button type="button" id="fileExplorerClose" class="tab pane-close pc-window-control pc-close"></button>
             </div>
             <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
           </div>

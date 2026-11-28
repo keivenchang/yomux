@@ -16,6 +16,15 @@ import (
 	"github.com/keivenchang/yomux/internal/productenv"
 )
 
+// WriteExecutable writes a program that a test will run. It holds syscall.ForkLock while the
+// file is open, so a process started by a parallel test cannot inherit the write descriptor;
+// otherwise running the program can fail with "text file busy".
+func WriteExecutable(path string, data []byte, perm os.FileMode) error {
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	return os.WriteFile(path, data, perm)
+}
+
 // GoHelperProcessRaceOptions keeps race reporting enabled while removing the
 // runtime's exit grace: fixture parents explicitly join their owned children.
 func GoHelperProcessRaceOptions(options string) string {

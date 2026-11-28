@@ -70,7 +70,7 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'arrow-up', label: '↑', ariaLabel: 'Up arrow'},
   {action: 'arrow-right', label: '→', ariaLabel: 'Right arrow'},
   {action: 'enter', label: '↵', ariaLabel: 'Enter', data: '\r'},
-  {action: 'more', label: '⋯', ariaLabel: 'More terminal keys', more: true},
+  {action: 'more', label: '⋯', ariaLabel: 'More keys', more: true},
 ]);
 const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   // These mirror browser/app actions that a phone has no physical Command key for. They are
@@ -98,6 +98,11 @@ const terminalMobileAccessorySideActions = terminalRuntimeFacade('mobile-accesso
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = terminalRuntimeFacade('mobile-accessory-actions').dpad;
+const htmlEditorMobileKeys = Object.freeze({
+  escape: 'Escape', tab: 'Tab', backspace: 'Backspace', delete: 'Delete',
+  'arrow-left': 'ArrowLeft', 'arrow-right': 'ArrowRight', 'arrow-up': 'ArrowUp', 'arrow-down': 'ArrowDown',
+  enter: 'Enter', home: 'Home', end: 'End',
+});
 
 function terminalMobileAccessoryState(session, options = {}) {
   const key = String(session || '');
@@ -372,15 +377,18 @@ function terminalMobileAccessoryLauncherDragPosition(press, event) {
 }
 
 function terminalMobileAccessoryHtml(session) {
-  if (!isTmuxSession(session) || !terminalMobileAccessoryEnabled()) return '';
+  const editor = isFileEditorItem(session);
+  if ((!editor && !isTmuxSession(session)) || !terminalMobileAccessoryEnabled()) return '';
   const state = terminalMobileAccessoryState(session, {create: true});
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
-  const primaryKeys = terminalMobileAccessoryPrimaryActions.map(key).join('');
+  const primaryKeys = (editor ? ['backspace', 'more'] : terminalMobileAccessoryPrimaryActions).map(key).join('');
   const cornerKey = key(terminalMobileAccessoryCornerAction);
-  const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
-  const moreKeys = terminalMobileAccessoryMoreActions.map(key).join('');
-  const interruptKey = key('interrupt');
-  const commandKey = key('cmd');
+  const sideKeys = (editor ? ['tab', 'shift'] : terminalMobileAccessorySideActions).map(key).join('');
+  const moreKeys = (editor ? ['home', 'end', 'delete'] : terminalMobileAccessoryMoreActions).map(key).join('');
+  const navigationKeys = editor ? terminalMobileAccessoryDpadActions.filter(action =>
+    htmlEditorMobileKeys[action] || action === 'copy' || action === 'command-v') : terminalMobileAccessoryDpadActions;
+  const interruptKey = editor ? '' : key('interrupt');
+  const commandKey = editor ? '' : key('cmd');
   const moreKey = key('more');
   return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}"${state.open ? ' hidden' : ''}${terminalMobileAccessoryPositionStyle(state)}>⌨</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
@@ -391,7 +399,7 @@ function terminalMobileAccessoryHtml(session) {
         <div class="mobile-terminal-key-side">${sideKeys}</div>
         <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div></div>
         <div class="mobile-terminal-key-dpad">
-          ${terminalMobileAccessoryDpadActions.map(key).join('')}
+          ${navigationKeys.map(key).join('')}
           ${commandKey}
           ${interruptKey}
         </div>
@@ -412,6 +420,10 @@ function terminalMobileAccessorySurfaces(session) {
   };
 }
 
+function terminalMobileAccessoryPane(element) {
+  return element?.closest?.('.tab-pane, .file-editor-panel') || null;
+}
+
 function syncTerminalMobileAccessoryState(session) {
   const state = terminalMobileAccessoryState(session);
   const {bars, launchers} = terminalMobileAccessorySurfaces(session);
@@ -421,8 +433,8 @@ function syncTerminalMobileAccessoryState(session) {
   // measurement; the final pass returns all rendered surfaces to one XOR visibility state.
   for (const launcher of launchers) launcher.hidden = false;
   for (const bar of bars) {
-    const pane = bar.closest?.('.tab-pane') || null;
-    const launcher = launchers.find(item => item.closest?.('.tab-pane') === pane) || launchers[0] || null;
+    const pane = terminalMobileAccessoryPane(bar);
+    const launcher = launchers.find(item => terminalMobileAccessoryPane(item) === pane) || launchers[0] || null;
     terminalMobileAccessoryObservePane(session, pane);
     if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
     for (const modifier of terminalMobileAccessoryModifierActions) {
@@ -477,7 +489,7 @@ function syncTerminalMobileAccessoryState(session) {
     launcher.style.transform = position.transform;
     launcher.hidden = open;
   }
-  scheduleFit(session);
+  if (!isFileEditorItem(session)) scheduleFit(session);
   return true;
 }
 
@@ -490,6 +502,7 @@ function toggleTerminalMobileAccessoryState(session, key) {
     state.palettePlacement = null;
     state.more = false;
     state.open = true;
+    if (isFileEditorItem(session)) focusHtmlEditorMobileAccessory(session);
   } else {
     state[key] = !state[key];
   }
@@ -555,6 +568,11 @@ function beginTerminalMobileAccessoryKeyPress(session, action, event, button) {
   const key = String(session || '');
   const existing = terminalMobileAccessoryKeyPresses.get(key);
   if (existing) endTerminalMobileAccessoryKeyPress(key, event, button);
+  const state = terminalMobileAccessoryState(key);
+  const cursor = terminalMobileAccessoryCursorData(key, action);
+  const editorShift = isFileEditorItem(key) ? state?.shift === true : undefined;
+  const heldData = cursor && terminalMobileAccessoryModifierActive(state)
+    ? terminalMobileAccessoryModifiedData(cursor, state) : '';
   const press = {action, pointerId: event.pointerId, delayTimer: null, repeatTimer: null};
   terminalMobileAccessoryKeyPresses.set(key, press);
   button?.setPointerCapture?.(event.pointerId);
@@ -565,7 +583,9 @@ function beginTerminalMobileAccessoryKeyPress(session, action, event, button) {
     if (terminalMobileAccessoryKeyPresses.get(key) !== press) return;
     const repeat = () => {
       if (terminalMobileAccessoryKeyPresses.get(key) !== press) return;
-      sendTerminalMobileAccessoryInput(key, action);
+      if (editorShift !== undefined) sendHtmlEditorMobileAccessoryInput(key, action, editorShift);
+      else if (heldData) sendTerminalMobileAccessoryData(key, heldData, {bypassMobileAccessoryModifiers: true});
+      else sendTerminalMobileAccessoryInput(key, action);
       press.repeatTimer = window.setTimeout(repeat, terminalMobileAccessoryRepeatIntervalMs);
     };
     press.repeatTimer = window.setTimeout(repeat, terminalMobileAccessoryRepeatIntervalMs);
@@ -598,7 +618,7 @@ function consumeTerminalMobileAccessoryKeyClick(session, action) {
 
 function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  const pane = button?.closest?.('.tab-pane');
+  const pane = terminalMobileAccessoryPane(button);
   if (!state || event.button > 0 || !button || !pane) return false;
   // A real drag commonly produces no synthetic click. In that case the previous drag's click
   // suppression must not eat this new intentional tap; suppression is only for the immediate
@@ -630,6 +650,7 @@ function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
     state.open = true;
     state.more = true;
     state.palettePlacement = null;
+    if (isFileEditorItem(session)) focusHtmlEditorMobileAccessory(session);
     syncTerminalMobileAccessoryState(session);
   }, terminalMobileAccessoryLongPressMs);
   return true;
@@ -679,7 +700,7 @@ function consumeTerminalMobileAccessoryLauncherClick(session) {
 
 function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  const pane = bar?.closest?.('.tab-pane');
+  const pane = terminalMobileAccessoryPane(bar);
   if (!state || event.button > 0 || !bar || !pane || state.open !== true) return false;
   const grabber = event.target?.closest?.('.mobile-terminal-key-grabber');
   if (!grabber || !bar.contains(grabber)) return false;
@@ -784,19 +805,29 @@ function terminalMobileAccessoryControlText(text) {
   return text;
 }
 
-function terminalDataWithMobileAccessoryModifiers(session, data) {
-  const state = terminalMobileAccessoryState(session);
-  const text = String(data || '');
-  if (!state || !text || !terminalMobileAccessoryModifierActive(state)) return text;
+function terminalMobileAccessoryModifiedData(text, state) {
   const ctrl = state.ctrl === true;
   const shift = state.shift === true;
   const meta = state.alt === true || state.cmd === true;
-  terminalMobileAccessoryClearModifiers(state, {session});
-  syncTerminalMobileAccessoryState(session);
+  const modifiers = 1 + Number(shift) + (meta ? 2 : 0) + (ctrl ? 4 : 0);
+  const cursor = /^\x1b(?:\[|O)([A-DHF])$/.exec(text);
+  if (cursor) return `\x1b[1;${modifiers}${cursor[1]}`;
+  // DEL alone loses Shift. tmux recognizes the CSI-u encoding as S-BSpace.
+  if (shift && text === '\x7f') return `\x1b[127;${modifiers}u`;
   let value = text;
   if (shift) value = terminalMobileAccessoryShiftText(value);
   if (ctrl) value = terminalMobileAccessoryControlText(value);
   return meta ? `\x1b${value}` : value;
+}
+
+function terminalDataWithMobileAccessoryModifiers(session, data) {
+  const state = terminalMobileAccessoryState(session);
+  const text = String(data || '');
+  if (!state || !text || !terminalMobileAccessoryModifierActive(state)) return text;
+  const value = terminalMobileAccessoryModifiedData(text, state);
+  terminalMobileAccessoryClearModifiers(state, {session});
+  syncTerminalMobileAccessoryState(session);
+  return value;
 }
 
 async function pasteTerminalMobileAccessoryClipboard(session) {
@@ -841,7 +872,24 @@ async function pasteTerminalMobileAccessoryClipboard(session) {
   }
 }
 
+function sendTerminalMobileAccessoryData(session, data, options = {}) {
+  if (!data) return false;
+  noteTerminalExplicitInput(session);
+  const sent = handleTerminalData(session, data, {...options, mobileAccessory: true});
+  if (!sent) statusErr(terminalNotConnectedHtml(session));
+  return sent;
+}
+
 function sendTerminalMobileAccessoryInput(session, action) {
+  if (isFileEditorItem(session) && action !== 'open' && action !== 'close' && action !== 'more' && action !== 'shift') {
+    const state = terminalMobileAccessoryState(session);
+    const handled = sendHtmlEditorMobileAccessoryInput(session, action, state?.shift === true);
+    if (handled && terminalMobileAccessoryModifierActive(state)) {
+      terminalMobileAccessoryClearModifiers(state, {session});
+      syncTerminalMobileAccessoryState(session);
+    }
+    return handled;
+  }
   if (action === 'copy') {
     const item = terminals.get(session);
     const term = item?.term || null;
@@ -868,22 +916,14 @@ function sendTerminalMobileAccessoryInput(session, action) {
     // The palette represents physical PgUp/PgDn. In an alternate-screen TUI the router leaves
     // those keys to the app, so send their normal xterm byte rather than stealing its paging.
     const data = action === 'tmux-scroll-up' ? '\x1b[5~' : '\x1b[6~';
-    noteTerminalExplicitInput(session);
-    if (handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true})) return true;
-    statusErr(terminalNotConnectedHtml(session));
-    return false;
+    return sendTerminalMobileAccessoryData(session, data, {bypassMobileAccessoryModifiers: true});
   }
   if (action === 'close') return dismissTerminalMobileAccessory(session);
   if (terminalMobileAccessoryModifierActions.includes(action) || action === 'more' || action === 'open') {
     toggleTerminalMobileAccessoryState(session, action);
     return true;
   }
-  const data = terminalMobileAccessoryData(session, action);
-  if (!data) return false;
-  noteTerminalExplicitInput(session);
-  const sent = handleTerminalData(session, data, {mobileAccessory: true});
-  if (!sent) statusErr(terminalNotConnectedHtml(session));
-  return sent;
+  return sendTerminalMobileAccessoryData(session, terminalMobileAccessoryData(session, action));
 }
 
 function tmuxStatusModeForSession(session) {
@@ -3240,8 +3280,9 @@ function rawInfoBranchRows() {
   return branchesNewestCommitFirst([...rowsByKey.values()]);
 }
 
-function bindPanelControls(panel, session) {
+function bindMobileAccessoryControls(panel, session) {
   delegate(panel, 'pointerdown', '[data-terminal-mobile-toggle]', (event, button) => {
+    if (isFileEditorItem(session)) event.preventDefault();
     beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'pointermove', '[data-terminal-mobile-toggle]', (event, button) => {
@@ -3268,6 +3309,7 @@ function bindPanelControls(panel, session) {
     event.stopPropagation();
     sendTerminalMobileAccessoryInput(button.dataset.terminalMobileClose || session, 'close');
   });
+  if (isFileEditorItem(session)) delegate(panel, 'pointerdown', '[data-terminal-mobile-close]', event => event.preventDefault());
   delegate(panel, 'pointerdown', '[data-terminal-mobile-keybar]', (event, bar) => {
     beginTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
   });
@@ -3300,6 +3342,10 @@ function bindPanelControls(panel, session) {
     if (consumeTerminalMobileAccessoryKeyClick(targetSession, action)) return;
     sendTerminalMobileAccessoryInput(targetSession, action);
   });
+}
+
+function bindPanelControls(panel, session) {
+  bindMobileAccessoryControls(panel, session);
   delegate(panel, 'click', '[data-tmux-status-toggle]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
@@ -4922,6 +4968,8 @@ function consumeTerminalControlMessage(session, data) {
     return true;
   }
   if (message?.type === 'application-scroll-error') {
+    recordJsDebugEvent('terminal', {category: 'terminal', ok: false,
+      message: `Wheel scroll rejected for ${session}: ${message.detail || message.reason}`});
     statusErr(esc(t('common.requestFailed')));
     return true;
   }
@@ -6095,6 +6143,8 @@ const selfUpdateReloadState = {
   pending: false,
   target: '',
   oldInstanceId: '',
+  jobId: '',
+  generation: 0,
   attempts: 0,
   timer: null,
   deferredToastShown: false,
@@ -6112,7 +6162,7 @@ function dismissToastNode(node) {
 function dismissUpdateAvailableToasts(ownerToast = null) {
   const toasts = new Set();
   if (ownerToast) toasts.add(ownerToast);
-  for (const node of document.querySelectorAll?.('.toast-update') || []) {
+  for (const node of document.querySelectorAll?.('.toast-update-available') || []) {
     toasts.add(node);
   }
   for (const node of toasts) dismissToastNode(node);
@@ -6200,11 +6250,21 @@ function scheduleSelfUpdateReloadPoll(delayMs = selfUpdateReloadPollMs) {
 
 async function pollSelfUpdateReload() {
   if (!selfUpdateReloadState.pending) return false;
+  const generation = selfUpdateReloadState.generation;
+  const current = () => selfUpdateReloadState.pending && generation === selfUpdateReloadState.generation;
+  let complete = false;
   selfUpdateReloadState.attempts += 1;
   try {
     const job = await apiFetchJson(`/api/self-update/status?check=${Date.now()}`, {cache: 'no-store'});
-    if (job?.job?.state === 'failed') {
+    if (!current()) return false;
+    const matching = job?.job?.id === selfUpdateReloadState.jobId && Boolean(selfUpdateReloadState.jobId);
+    complete = matching && job.job.state === 'complete' && job.job.target_version === selfUpdateReloadState.target;
+    if (matching && ['preparing', 'activating', 'restarting'].includes(job.job.state)) {
+      emitNotification('update', {title: t('update.installing'), lines: [job.job.progress], coalesceKey: 'self-update-result'});
+    }
+    if (matching && job.job.state === 'failed') {
       selfUpdateReloadState.pending = false;
+      selfUpdateReloadState.jobId = '';
       emitNotification('update', {
         title: t('update.failed'),
         lines: [userMessageText(job.job, t('update.seeServerLogs'))],
@@ -6215,9 +6275,11 @@ async function pollSelfUpdateReload() {
   } catch (_error) {
     // Keep checking the server while its update job is becoming available.
   }
+  if (!current()) return false;
   try {
     const ping = await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
-    if (!ping?.version || (selfUpdateReloadState.target && ping.version !== selfUpdateReloadState.target) || !ping.instance_id || ping.instance_id === selfUpdateReloadState.oldInstanceId) {
+    if (!current()) return false;
+    if (!complete || !ping?.version || (selfUpdateReloadState.target && ping.version !== selfUpdateReloadState.target) || !ping.instance_id || ping.instance_id === selfUpdateReloadState.oldInstanceId) {
       // The previous listener may still answer after a failed restart. Keep the
       // bounded timeout path below active for reachable but stale instances too.
     } else {
@@ -6226,16 +6288,19 @@ async function pollSelfUpdateReload() {
   } catch (_error) {
     // The old process may already be gone. Keep polling until the replacement server answers.
   }
+  if (!current()) return false;
   if (selfUpdateReloadState.attempts >= selfUpdateReloadMaxAttempts) {
     selfUpdateReloadState.pending = false;
-    emitNotification('update', {title: t('update.softwareTitle'), lines: [t('update.restartTimeout')], coalesceKey: 'self-update-timeout'});
+    emitNotification('update', {title: t('update.softwareTitle'), lines: [t('update.restartTimeout')], actions: [updateActionButton(t('update.checkRestart'), () => startSelfUpdateReloadPolling(selfUpdateReloadState.target, selfUpdateReloadState.oldInstanceId, selfUpdateReloadState.jobId))], coalesceKey: 'self-update-timeout'});
     return false;
   }
   scheduleSelfUpdateReloadPoll();
   return false;
 }
 
-function startSelfUpdateReloadPolling(target = '', oldInstanceId = '') {
+function startSelfUpdateReloadPolling(target = '', oldInstanceId = '', jobId = '') {
+  selfUpdateReloadState.generation = (selfUpdateReloadState.generation || 0) + 1;
+  selfUpdateReloadState.jobId = String(jobId);
   markSelfUpdateReloadPending(target);
   selfUpdateReloadState.oldInstanceId = String(oldInstanceId || '');
   scheduleSelfUpdateReloadPoll(0);
@@ -7565,5 +7630,6 @@ async function boot() {
   installDevAutoReload();
   document.querySelector('[data-update-badge]')?.addEventListener('click', triggerSelfUpdate);
   checkForUpdateOnce();
+  scheduleEditorBundlePreload();
   schedulePageLoadProfileCompletion();
 }

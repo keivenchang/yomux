@@ -2266,9 +2266,14 @@ function openFileStatus(state) {
   if (state.externalError) return {message: `${t('dialog.unableLoadDisk')}: ${fileErrorText(state.externalError, 'editor.refreshFailed')}`, level: 'warn'};
   if (state.kind === 'text' && !fileEditorStateWritable(state)) return {message: state.writeReason || 'File is read-only', level: 'warn'};
   if (state.externalChanged) return {message: state.dirty ? t('dialog.staleStatus') : t('dialog.externalTitle'), level: 'warn'};
+  if (state._shareActive && state._sharePaused) return {message: `Shared saving paused: ${state._sharePaused}`, level: 'error'};
   if (state.dirty) return {message: t('state.modified'), level: ''};
   if (state.diffUnavailable) return {message: t('editor.diffUnavailable', {error: state.diffError || t('common.unknown')}), level: 'warn'};
   if (state.kind === 'text') {
+    if (state.lastSaveStatus && state.lastSaveStatus.content === state.original) {
+      const {key, params} = state.lastSaveStatus;
+      return {message: t(key, params), level: 'ok'};
+    }
     const count = String(state.original ?? '').length;
     return {message: tPlural('editor.status.characters', count), level: ''};
   }
@@ -2301,6 +2306,7 @@ function syncOpenFileContentFromPanel(path, panel) {
   if (fileEditorPanelMode(panel) === 'diff') return false;
   const state = fileState.get(path);
   if (!fileEditorStateWritable(state) || state.kind !== 'text' || !panel) return false;
+  if (state._shareActive) return flushCodeMirrorSource(panel, path);
   flushCodeMirrorSource(panel, path);
   const cmContent = codeMirrorPanelContent(panel);
   if (cmContent === null) return false;
@@ -3695,7 +3701,8 @@ async function loadOpenFileStateFromDisk(path, entry = null, onApplied = null, o
 
 function fileEditorPathHasFocus(path) {
   const active = document.activeElement;
-  if (!active) return false;
+  // A background browser window keeps its activeElement. Only the focused window is editing.
+  if (!active || !document.hasFocus()) return false;
   return fileEditorPanelsForPath(path).some(panel => panel?.contains?.(active));
 }
 
@@ -3843,14 +3850,13 @@ async function refreshOpenFilesIfChanged(options = {}) {
     .map(path => String(path || ''))
     .filter(Boolean));
   const refreshes = [];
+  const watchedFiles = new Set(visibleFileEditorWatchFiles());
   for (const [path, state] of Array.from(fileState.entries())) {
     const requested = requestedPaths.has(path);
     if (requestedPaths.size && !requested) continue;
     if (!state || state.loading) continue;
-    // Poll on-disk staleness only for the file editor that is the visible/active tab; a file sitting in a
-    // background tab does not need ~1/sec polling (it is re-checked when activated). Dirty files are always
-    // polled — external-change conflict detection and autosave must never be skipped just because hidden.
-    if (!requested && !state.dirty && !fileEditorTabItemsForPath(path).some(item => itemIsActivePaneTab(item))) continue;
+    // Dirty editors still need conflict detection when their consumers are hidden.
+    if (!requested && !state.dirty && !watchedFiles.has(path)) continue;
     const relocationRevision = Number(state.relocationRevision || 0);
     refreshes.push((async () => {
       const fetched = await fetchFileEntryStatus(path, {fresh: requested && options.fresh === true});
@@ -3872,7 +3878,12 @@ function watchedFileExplorerDirectories() {
 }
 
 function visibleFileEditorWatchFiles() {
-  return Array.from(new Set(activePaneItems()
+  // YO!share displays background tabs as eligible files and needs their on-disk status.
+  const items = itemIsActivePaneTab(shareItemId)
+    ? [...activePaneItems(), ...layoutItems.filter(item => !isHistoricalFileEditorItem(item)
+      && openFileStateHasLoadedEditorPayload(fileState.get(fileItemPath(item))))]
+    : activePaneItems();
+  return Array.from(new Set(items
     .filter(isFileEditorItem)
     .map(item => fileItemPath(item))
     .filter(path => path && path.startsWith('/'))))
@@ -4380,6 +4391,9 @@ function codeMirrorApiIsUsable(api) {
     && api?.EditorView?.theme
     && api?.EditorView?.editable?.of
     && (api?.EditorView?.lineWrapping || api?.EditorView?.contentAttributes?.of)
+    && typeof api.layer === 'function'
+    && typeof api.RectangleMarker?.forRange === 'function'
+    && typeof api.EditorSelection?.range === 'function'
     && api?.keymap?.of
     && api?.drawSelection
     && api?.highlightActiveLine
@@ -4389,22 +4403,93 @@ function codeMirrorApiIsUsable(api) {
   );
 }
 
+// A slow link can need minutes for an editor bundle, so only a download that stops moving fails.
+const lazyScriptStallMs = 20_000;
+
+// XMLHttpRequest reports each received chunk, which is the progress signal the stall timer needs.
+function downloadLazyScript(url) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    let stall = 0;
+    const armStall = () => {
+      clearTimeout(stall);
+      stall = setTimeout(() => {
+        request.abort();
+        reject(new Error(`no data for ${lazyScriptStallMs / 1000}s`));
+      }, lazyScriptStallMs);
+    };
+    request.open('GET', url);
+    request.responseType = 'text';
+    request.onprogress = armStall;
+    request.onload = () => {
+      clearTimeout(stall);
+      if (request.status >= 200 && request.status < 300) resolve(request.responseText);
+      else reject(new Error(`HTTP ${request.status}`));
+    };
+    request.onerror = () => {
+      clearTimeout(stall);
+      reject(new Error('network error'));
+    };
+    armStall();
+    request.send();
+  });
+}
+
+// Run a downloaded bundle through a script element, so load and error events keep their meaning.
+async function loadLazyScript(url) {
+  const source = await downloadLazyScript(url);
+  const blobUrl = URL.createObjectURL(new Blob([`${source}\n//# sourceURL=${new URL(url, location.href).href}\n`], {type: 'text/javascript'}));
+  try {
+    await new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.dataset.bundleUrl = url;
+      script.src = blobUrl;
+      script.onload = resolve;
+      script.onerror = () => {
+        script.remove();
+        reject(new Error(`Unable to run ${url}`));
+      };
+      document.head.appendChild(script);
+    });
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
 function loadCodeMirrorBundleScript(options = {}) {
   if (!options.force && codeMirrorApiIsUsable(window.YOmuxCodeMirror)) return Promise.resolve(window.YOmuxCodeMirror);
-  if (options.force) codeMirrorBundlePromise = null;
-  if (!codeMirrorBundlePromise) {
-    codeMirrorBundlePromise = new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      const assetUrl = bootstrap.codeMirrorAssetUrl || '/static/codemirror.js';
-      const separator = assetUrl.includes('?') ? '&' : '?';
-      script.src = options.force ? `${assetUrl}${separator}retry=${Date.now()}` : assetUrl;
-      script.async = true;
-      script.onload = () => resolve(window.YOmuxCodeMirror || null);
-      script.onerror = () => reject(new Error(t('editor.codemirrorBundleLoadFailed', {url: script.src})));
-      document.head.appendChild(script);
+  if (options.force || !codeMirrorBundlePromise) {
+    const assetUrl = bootstrap.codeMirrorAssetUrl || '/static/codemirror.js';
+    const separator = assetUrl.includes('?') ? '&' : '?';
+    const url = options.force ? `${assetUrl}${separator}retry=${Date.now()}` : assetUrl;
+    codeMirrorBundlePromise = loadLazyScript(url).then(
+      () => window.YOmuxCodeMirror || null,
+      error => { throw new Error(`${t('editor.codemirrorBundleLoadFailed', {url})} (${error.message})`, {cause: error}); },
+    );
+    const attempt = codeMirrorBundlePromise;
+    void attempt.catch(() => {
+      if (codeMirrorBundlePromise === attempt) codeMirrorBundlePromise = null;
     });
   }
   return codeMirrorBundlePromise;
+}
+
+// Download both editors while the page is idle, so the first ViewEdit does not wait on a slow link.
+// A failed preload is only logged: opening an editor starts its own download.
+let editorBundlePreloadPromise = null;
+function scheduleEditorBundlePreload() {
+  const preload = async () => {
+    for (const [name, load] of [['CodeMirror', loadCodeMirrorApi], ['ProseMirror', loadProseMirrorApi]]) {
+      try {
+        await load();
+      } catch (error) {
+        recordJsDebugEvent('editor', {category: 'editor', ok: false, message: `${name} preload failed: ${error.message}`});
+      }
+    }
+  };
+  const start = () => { editorBundlePreloadPromise = preload(); };
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(start, {timeout: 5000});
+  else setTimeout(start, 1000);
 }
 
 async function loadCodeMirrorApi() {
@@ -5214,10 +5299,10 @@ function openCodeMirrorFindForView(api, view) {
   return api.openSearchPanel(view);
 }
 
-function updateCodeMirrorCursorStatus(panel) {
+function updateCodeMirrorCursorStatus(panel, updateCount = true) {
   const view = panel?._cmView;
   const status = panel?.querySelector?.('.file-editor-cursor-status');
-  updateFileEditorCountStatus(panel);
+  if (updateCount) updateFileEditorCountStatus(panel);
   if (!status) return;
   if (!view) {
     status.textContent = '';

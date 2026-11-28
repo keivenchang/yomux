@@ -18,15 +18,16 @@ import (
 
 func TestApplicationScrollLiteralPaneInput(t *testing.T) {
 	for _, variant := range []struct {
-		name, direction     string
-		page, split, global bool
-		pageRepeat          int
+		name, direction             string
+		page, split, global, legacy bool
+		pageRepeat                  int
 	}{
-		{"wheel-up", "up", false, false, false, 1}, {"wheel-down", "down", false, false, false, 1},
-		{"page-up", "up", true, false, false, 1}, {"page-down", "down", true, false, false, 1},
-		{"batched-page-up", "up", true, false, false, 2},
-		{"split-local-up", "up", false, true, false, 1}, {"split-local-down", "down", false, true, false, 1},
-		{"split-global-up", "up", false, true, true, 1}, {"split-global-down", "down", false, true, true, 1},
+		{"wheel-up", "up", false, false, false, false, 1}, {"wheel-down", "down", false, false, false, false, 1},
+		{"legacy-wheel-up", "up", false, false, false, true, 1}, {"legacy-wheel-down", "down", false, false, false, true, 1},
+		{"page-up", "up", true, false, false, false, 1}, {"page-down", "down", true, false, false, false, 1},
+		{"batched-page-up", "up", true, false, false, false, 2},
+		{"split-local-up", "up", false, true, false, false, 1}, {"split-local-down", "down", false, true, false, false, 1},
+		{"split-global-up", "up", false, true, true, false, 1}, {"split-global-down", "down", false, true, true, false, 1},
 	} {
 		t.Run(variant.name, func(t *testing.T) {
 			runtime, err := os.MkdirTemp("/tmp", "app-scroll-")
@@ -50,6 +51,13 @@ func TestApplicationScrollLiteralPaneInput(t *testing.T) {
 			if variant.direction == "down" {
 				expected = strings.Repeat("\x1b[<65;17;9M", 2)
 			}
+			if variant.legacy {
+				// Without SGR the report is ESC [ M plus button, column, and row bytes offset by 32.
+				expected = strings.Repeat("\x1b[M`1)", 2)
+				if variant.direction == "down" {
+					expected = strings.Repeat("\x1b[Ma1)", 2)
+				}
+			}
 			if variant.page {
 				expected = strings.Repeat("\x1b[5~", variant.pageRepeat)
 				if variant.direction == "down" {
@@ -58,7 +66,12 @@ func TestApplicationScrollLiteralPaneInput(t *testing.T) {
 			}
 			ready := filepath.Join(runtime, "ready")
 			received := filepath.Join(runtime, "received")
-			script := fmt.Sprintf("import os,tty; from pathlib import Path; tty.setraw(0); Path(%q).touch(); data=b''\nwhile len(data)<%d: data+=os.read(0,%d-len(data))\noutput=Path(%q); temporary=output.with_suffix('.tmp'); temporary.write_bytes(data); temporary.replace(output)\n", ready, len(expected), len(expected), received)
+			// Request mouse reports the way Claude does: SGR unless this variant covers the original encoding.
+			modes := `\x1b[?1000h\x1b[?1006h`
+			if variant.legacy {
+				modes = `\x1b[?1000h`
+			}
+			script := fmt.Sprintf("import os,tty; from pathlib import Path; tty.setraw(0); os.write(1, b'%s'); Path(%q).touch(); data=b''\nwhile len(data)<%d: data+=os.read(0,%d-len(data))\noutput=Path(%q); temporary=output.with_suffix('.tmp'); temporary.write_bytes(data); temporary.replace(output)\n", modes, ready, len(expected), len(expected), received)
 			scriptPath := filepath.Join(runtime, "receiver.py")
 			if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
 				t.Fatal(err)
@@ -86,14 +99,26 @@ func TestApplicationScrollLiteralPaneInput(t *testing.T) {
 			}
 			waitFile(ready)
 			pane := run("display-message", "-p", "-t", "=fixture:", "#{pane_id}")
+			// tmux applies the requested mouse modes asynchronously after the receiver writes them.
+			wantSGR := "1"
+			if variant.legacy {
+				wantSGR = "0"
+			}
+			for deadline := time.Now().Add(5 * time.Second); run("display-message", "-p", "-t", pane, "#{mouse_standard_flag} #{mouse_sgr_flag}") != "1 "+wantSGR; {
+				if time.Now().After(deadline) {
+					t.Fatal("receiver mouse modes were not applied")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			run("new-session", "-d", "-s", "foreign")
 			foreign := run("display-message", "-p", "-t", "=foreign:", "#{pane_id}")
 			for _, row := range []struct {
 				pane, direction    string
 				count, column, row int
 			}{
+				// Positions past the pane edge are clamped into the pane rather than rejected.
 				{foreign, "up", 1, 1, 1}, {pane, "left", 1, 1, 1}, {pane, "up", 0, 1, 1}, {pane, "up", 13, 1, 1},
-				{pane, "up", 1, 0, 1}, {pane, "up", 1, 121, 1}, {pane, "up", 1, 1, 41}, {"=fixture:", "up", 1, 1, 1},
+				{pane, "up", 1, 0, 1}, {pane, "up", 1, 501, 1}, {pane, "up", 1, 1, 301}, {"=fixture:", "up", 1, 1, 1},
 			} {
 				if err := s.applicationScroll(context.Background(), "fixture", row.pane, row.direction, row.count, row.column, row.row, false, false); err == nil {
 					t.Fatalf("accepted invalid scroll %+v", row)

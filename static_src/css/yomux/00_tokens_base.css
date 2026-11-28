@@ -216,10 +216,9 @@
   --transcript-summary-accent: #f472b6;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
-  --inactive-pane-opacity-scale: 1;
-  --inactive-pane-overlay-rgb: 178 190 210;
-  --inactive-pane-overlay-alpha: 0.18;
-  --inactive-pane-overlay: rgb(var(--inactive-pane-overlay-rgb) / calc(var(--inactive-pane-overlay-alpha) * var(--inactive-pane-opacity-scale)));
+  --inactive-pane-opacity-scale: 0.12;
+  --inactive-pane-overlay-rgb: 0 0 0;
+  --inactive-pane-opacity-gain: 0.8;
   --inactive-tab-bg: #293240;
   --inactive-tab-border: #667286;
   --pane-inactive-tab-bg: var(--active-tab-muted-bg);
@@ -395,6 +394,8 @@
   --z-file-editor-layer: var(--z-layer-editor);
   --z-file-editor-find-overlay: calc(var(--z-file-editor-layer) + 1);
   --z-file-editor-preview-layer: var(--z-layer-preview);
+  --z-html-preview-staged: 0;
+  --z-html-preview-current: var(--z-layer-raised);
   --z-tabs-row: var(--z-layer-preview);
   --z-sticky-pane-head: var(--z-layer-sticky);
   --z-editor-wrap-marker: var(--z-layer-marker);
@@ -525,7 +526,7 @@
   --lt-line: #d0d7de;
   --lt-editor-bg: var(--paint-white);
   --lt-editor-gutter-bg: var(--lt-panel);
-  --lt-editor-preview-bg: #fff6df;
+  --lt-editor-preview-bg: var(--light-readable-bg);
   --document-preview-bg: var(--paint-white);
   --image-preview-checker-bg: #151a22;
   --image-preview-checker-bg-light: #e9edf2;
@@ -1159,10 +1160,9 @@ body.theme-light {
   --danger-action-light-border: #ef4444;
   --inactive-gray: rgba(91, 101, 115, 0.42);
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
-  /* #254/#259 follow-up: keep the neutral gray dim, but back off the light-mode alpha so inactive panes
-     are only a touch quieter than focused panes. Dark-mode token (top of file) is left as-is. */
-  --inactive-pane-overlay-rgb: 90 96 105;
-  --inactive-pane-overlay-alpha: 0.09;
+  --inactive-pane-overlay-rgb: 165 165 165;
+  /* Lift the light-mode low end: slider 12% maps to 18% alpha, and 100% still maps to 50%. */
+  --inactive-pane-opacity: calc(4.125 * var(--inactive-pane-opacity-strength) / (1 + 6.25 * var(--inactive-pane-opacity-strength)));
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-border: var(--pane-tab-control-border);
   --shadow-popover: 0 18px 50px rgba(15, 23, 42, 0.24);
@@ -1476,7 +1476,8 @@ body.editor-theme-light {
 .finder-move-dialog .file-editor-dialog-body,
 .file-get-info dd,
 .tex-preview-progress-output,
-.tex-preview-instructions {
+.tex-preview-instructions,
+[data-html-viewedit-problems] pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1821,6 +1822,10 @@ html {
   height: 100%;
 }
 body {
+  /* Map slider 100% to the previous 50% before applying the theme's curve. */
+  --inactive-pane-opacity-strength: calc(var(--inactive-pane-opacity-scale) / 2);
+  --inactive-pane-opacity: calc(var(--inactive-pane-opacity-strength) + var(--inactive-pane-opacity-gain) * var(--inactive-pane-opacity-strength) * (1 - var(--inactive-pane-opacity-strength)));
+  --inactive-pane-overlay: rgb(var(--inactive-pane-overlay-rgb) / var(--inactive-pane-opacity));
   margin: 0;
   height: 100vh;
   min-height: 100vh;

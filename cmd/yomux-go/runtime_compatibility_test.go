@@ -8,12 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestInotifyWarningSurvivesUnavailableCompatibilityTools(t *testing.T) {
@@ -24,7 +25,7 @@ func TestInotifyWarningSurvivesUnavailableCompatibilityTools(t *testing.T) {
 		tools := t.TempDir()
 		t.Setenv("PATH", tools)
 		if availableLibc {
-			if err := os.WriteFile(filepath.Join(tools, "getconf"), []byte("#!/bin/sh\nprintf 'glibc 2.40\\n'\n"), 0o700); err != nil {
+			if err := testsupport.WriteExecutable(filepath.Join(tools, "getconf"), []byte("#!/bin/sh\nprintf 'glibc 2.40\\n'\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}

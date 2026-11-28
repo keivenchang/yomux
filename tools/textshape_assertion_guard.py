@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # guard rejects stale entries, so this is an audit trail rather than a blanket
 # opt-out for a file or class of tests.
 TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
+    "tests/test_check_runner.py:test_go_module_closure_declares_go_sources_and_tool_imports_separately": "The Go module closure runner must not rebuild its source root from TEST_SRCDIR; Bazel stages the closure inputs as runfiles, so the script text is the only place that retired lookup could return, checked beside the declared runtime and input targets.",
     "tests/test_browser_editor_lifecycle.py:test_recent_changes_keeps_source_editor_and_unsaved_draft": "The live review must preserve the external disk bytes while retaining the native browser draft and when Start new review captures a fresh baseline without saving.",
     "tests/test_browser_editor_lifecycle.py:test_editor_display_toggle_preserves_pending_native_buffer": "A real editor display toggle must preserve the original disk bytes while the same test checks the pending native document, dirty state and editor identity.",
     "tests/test_browser_editor_lifecycle.py:test_new_file_action_preserves_existing_bytes": "The real New File action must preserve an existing file's exact disk bytes while refusing its replacement and creating a distinct empty file.",
@@ -104,7 +105,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "88933f82690faa0c8f2b5a82b43126280fcd51a44196da60b34b6466fbc36746"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "bbbc450e0d0a518e74b2209fbb98b755e9f945f3f8c666c874e55195876ae301"
 
 
 @dataclass(frozen=True, slots=True)

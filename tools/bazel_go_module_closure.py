@@ -10,10 +10,6 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).absolute().parents[1]
-if os.environ.get("TEST_SRCDIR") and len(sys.argv) > 1:
-    candidate = Path(os.environ["TEST_SRCDIR"]) / sys.argv[1]
-    if candidate.is_dir():
-        ROOT = candidate
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

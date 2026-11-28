@@ -16,6 +16,36 @@ if (setupSecurity && location.protocol === 'https:') {
   setupSecurity.hidden = true;
 }
 
+const setupAuthPath = document.getElementById('setupAuthPath');
+const setupCopyPath = document.getElementById('setupCopyPath');
+const setupCopyStatus = document.getElementById('setupCopyStatus');
+
+if (setupAuthPath && setupCopyPath && setupCopyStatus) {
+  setupCopyPath.hidden = false;
+  setupCopyPath.addEventListener('click', async () => {
+    setupCopyStatus.textContent = '';
+    try {
+      await navigator.clipboard.writeText(setupAuthPath.textContent);
+      setupCopyStatus.textContent = SETUP_STRINGS.copiedPath;
+    } catch {
+      // Clipboard API can reject on a self-signed HTTPS page. Select only the path for copy.
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(setupAuthPath);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      let copied;
+      try {
+        copied = document.execCommand('copy');
+      } catch {
+        copied = false;
+      }
+      if (copied) selection.removeAllRanges();
+      setupCopyStatus.textContent = copied ? SETUP_STRINGS.copiedPath : SETUP_STRINGS.clipboardUnavailable;
+    }
+  });
+}
+
 function setWaitingStatus(text) {
   if (!setupStatus) return;
   const label = String(text || SETUP_STRINGS.waiting).replace(/[.…]+$/, '');

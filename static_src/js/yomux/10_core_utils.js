@@ -4470,7 +4470,7 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
   } else {
     setExplicitPaneFocusItem(item);
   }
-  if (isFileEditorItem(item) || gitDiffItemPath(item)) {
+  if (options.recordActivity !== false && (isFileEditorItem(item) || gitDiffItemPath(item))) {
     if (typeof noteTabberItemActivity === 'function') noteTabberItemActivity(item);
   }
   if (isFileEditorItem(item)) {
@@ -5016,6 +5016,12 @@ function previewScrollTraceElementForTarget(target) {
 }
 
 function previewScrollTraceRecordForTarget(target) {
+  const editor = target?.closest?.('.cm-scroller');
+  const editorPanel = editor?.closest('.file-editor-panel');
+  if (editorPanel && htmlSplitPreviewFrame(editorPanel) && editor === fileEditorPanelScroller(editorPanel)) {
+    return {element: editor, traceElement: editor, details: {previewSurface: 'html-source'},
+      isOwnedScroll: () => fileEditorReflectedScrollMatches(editorPanel, 'editor')};
+  }
   const element = previewScrollTraceElementForTarget(target);
   if (!element) return null;
   const panel = element.closest?.('.file-editor-panel');
@@ -5227,7 +5233,8 @@ function previewEmbeddedScrollElement(frame) {
 
 function previewEmbeddedScrollPosition(container) {
   const frame = container?.querySelector?.('.file-editor-html-preview');
-  const element = previewEmbeddedScrollElement(frame);
+  const element = frame?._htmlPreviewDocument && frame.contentDocument === frame._htmlPreviewDocument
+    ? previewEmbeddedScrollElement(frame) : null;
   return element ? ownedElementScrollPosition(element) : (container?._previewEmbeddedScrollPosition || null);
 }
 
@@ -5239,6 +5246,11 @@ function installPreviewEmbeddedScrollOwnershipCapture(frame, container) {
     element: container,
     traceElement,
     embeddedContainer: container,
+    isOwnedScroll: () => {
+      const panel = container.closest?.('.file-editor-panel');
+      return panel && fileEditorSourceElement(panel, 'preview') === traceElement
+        && fileEditorReflectedScrollMatches(panel, 'preview');
+    },
     details: {previewSurface: 'html', embedded: true},
   });
   bindPreviewScrollOwnershipCapture(ownerDocument, resolveRecord);
@@ -6851,6 +6863,12 @@ function writeClipboardItemWithFeedback(data, options = {}) {
   return copyOperationWithFeedback(writeClipboardItem(data), options);
 }
 
+function beginDeferredTextCopy(getText) {
+  if (globalThis.isSecureContext === false || !globalThis.navigator?.clipboard?.write || !globalThis.ClipboardItem) return null;
+  const blob = getText().then(text => new Blob([text], {type: 'text/plain'}));
+  return writeClipboardItem({'text/plain': blob}).then(() => true, () => false);
+}
+
 function writeClipboardItem(data) {
   // Observe every promised blob even if native write rejects before consuming the item.
   const blobs = Promise.all(Object.values(data));
@@ -7543,7 +7561,7 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   appendContextMenuButton(menu, openLabel, action('open-url', openHandler), closeMenu);
   appendContextMenuButton(menu, localizedLabel('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (typeof options.modifyUrl === 'function') {
-    appendContextMenuButton(menu, localizedLabel('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.modifyUrl', 'Edit URL'), action('modify-url', options.modifyUrl), closeMenu);
   }
   if (typeof options.removeUrl === 'function') {
     appendContextMenuButton(menu, localizedLabel('contextmenu.removeUrl', 'Remove URL'), action('remove-url', options.removeUrl), closeMenu);
@@ -7584,32 +7602,40 @@ async function copyMarkdownPreviewImageToClipboard(image, button) {
   }, {button, statusText: t('status.copiedImage', {name: image?.alt || 'image'})});
 }
 
+function appendImageContextMenuItems(menu, image, closeMenu) {
+  appendContextMenuButton(menu, t('contextmenu.copyImage'), button => copyMarkdownPreviewImageToClipboard(image, button), closeMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyUrl'), button => copyTextWithFeedback(image?.dataset?.originalSrc || image?.currentSrc || image?.src || '', {button}), closeMenu);
+}
+
 function showImageContextMenu(image, x, y) {
   closeTerminalContextMenu();
   closeFileContextMenu();
   closeSessionContextMenu();
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu markdown-preview-context-menu';
-  appendContextMenuButton(menu, t('contextmenu.copyImage'), button => copyMarkdownPreviewImageToClipboard(image, button), () => linkContextMenu.close());
-  appendContextMenuButton(menu, t('contextmenu.copyUrl'), button => copyTextWithFeedback(image?.dataset?.originalSrc || image?.currentSrc || image?.src || '', {button}), () => linkContextMenu.close());
+  appendImageContextMenuItems(menu, image, () => linkContextMenu.close());
   linkContextMenu.open(menu, x, y);
 }
 
 // right-click menu for links in AI/markdown content — Open URL / Copy URL. Bound on the
 // YO!agent body and markdown previews via installLinkContextMenu(container).
 function showLinkContextMenu(anchor, x, y, container = null) {
+  const href = anchor?.href || '';
+  if (!href) return;
+  const authoredHref = anchor.getAttribute?.('href') || href;
+  const options = markdownPreviewLinkContextMenuOptions(container?.dataset?.mdPath || '', authoredHref);
+  openLinkContextMenu(href, x, y, options);
+}
+
+function openLinkContextMenu(href, x, y, options = {}) {
   closeTerminalContextMenu();
   closeFileContextMenu();
   closeSessionContextMenu();
   closeOtherSessionPopovers(null);
-  const href = anchor?.href || '';
-  if (!href) return;
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu link-context-menu';
   menu.setAttribute('role', 'menu');
-  const authoredHref = anchor.getAttribute?.('href') || href;
-  const markdownOptions = markdownPreviewLinkContextMenuOptions(container?.dataset?.mdPath || '', authoredHref);
-  appendUrlContextMenuItems(menu, href, closeLinkContextMenu, markdownOptions);
+  appendUrlContextMenuItems(menu, href, closeLinkContextMenu, options);
   linkContextMenu.open(menu, x, y);
 }
 
@@ -8497,7 +8523,7 @@ function appendTabActionCommands(menu, item, options = {}) {
   if (isFileEditorItem(item) || gitDiffItemPath(item) || item === differItemId) {
     appendContextMenuButton(
       menu,
-      item === differItemId ? t('common.close') : paneFrameCloseLabel(item),
+      item === differItemId ? t('common.close') : paneTabCloseLabel(item),
       () => closeLayoutTabItem(item),
       closeSessionContextMenu,
       {iconHtml: fileContextMenuIcon('close')},

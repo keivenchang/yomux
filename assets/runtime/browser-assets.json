@@ -293,8 +293,8 @@
     {
       "directory": "codemirror",
       "output": "static/codemirror.js",
-      "sha256": "eba75df5643fce2442cbd5296033519cf676a390dce4e702b631947d69068f29",
-      "input_sha256": "4951c6684935bc0d1565e16c06285d5ab575c88de003bb239245656742a8acb8"
+      "sha256": "9cad36b2abaf2da90e10185252ec8d0df2d726ecfbd8a6ea42df26547798ef5c",
+      "input_sha256": "810fab6328b4db2f11fd24f3ba9e89b7f4b19cb463c40b9a106587d89bd18c5a"
     },
     {
       "directory": "prosemirror",

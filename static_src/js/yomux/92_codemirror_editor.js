@@ -19,6 +19,12 @@ function destroyCodeMirrorPanel(panel, {invalidateEnsure = true} = {}) {
     panel._cmView = null;
   }
   if (panel) {
+    delete panel._htmlSharePeers;
+    delete panel._htmlShareSelection;
+    clearTimeout(panel._cmSplitPreviewTimer);
+    panel._cmSplitPreviewTimer = null;
+    panel._cmSplitPreviewDraft = null;
+    panel._cmSplitPreviewFinishedAt = null;
     panel._cmReviewCompartment = null;
     panel._cmReviewOriginal = null;
     panel._cmApi = null;
@@ -36,32 +42,165 @@ function destroyCodeMirrorPanel(panel, {invalidateEnsure = true} = {}) {
 }
 
 function destroyFileEditorPanel(panel) {
+  removeHtmlEditorMobileAccessory(panel);
   const preview = panel?.querySelector?.('.file-editor-preview-pane-panel');
   if (preview) releasePreviewSurfaceResources(preview);
   destroyCodeMirrorPanel(panel);
   destroyProseMirrorPanel(panel);
 }
 
+function removeHtmlEditorMobileAccessory(panel) {
+  const surface = panel?._htmlEditorMobileAccessory;
+  if (!surface) return;
+  const item = fileEditorPanelItem(panel);
+  const state = terminalMobileAccessoryState(item);
+  const press = terminalMobileAccessoryKeyPresses.get(item);
+  clearTimeout(state?.launcherPress?.timer);
+  clearTimeout(press?.delayTimer);
+  clearTimeout(press?.repeatTimer);
+  terminalMobileAccessoryKeyPresses.delete(item);
+  terminalMobileAccessorySuppressedClicks.delete(item);
+  terminalMobileAccessoryStates.delete(item);
+  terminalMobileAccessoryObservePane(item, null);
+  surface.remove();
+  delete panel._htmlEditorMobileAccessory;
+}
+
+function syncHtmlEditorMobileAccessory(panel, state) {
+  const item = fileEditorPanelItem(panel), path = fileEditorPanelPath(panel);
+  if (state?.kind !== 'text' || state.loading || fileEditorPanelMode(panel) === 'diff' || previewKindForPath(path) !== 'html' ||
+      !fileEditorStateWritable(state) || !terminalMobileAccessoryEnabled()) {
+    removeHtmlEditorMobileAccessory(panel);
+    return;
+  }
+  if (panel._htmlEditorMobileAccessory) return;
+  const surface = document.createElement('div');
+  surface.className = 'html-editor-mobile-keyboard';
+  surface.innerHTML = terminalMobileAccessoryHtml(item);
+  bindMobileAccessoryControls(surface, item);
+  panel.append(surface);
+  panel._htmlEditorMobileAccessory = surface;
+}
+
+function fileEditorMobileClipboard(action, text, paste) {
+  if (action === 'copy') {
+    if (text) void copyTextWithFeedback(text);
+    return true;
+  }
+  if (action !== 'command-v') return false;
+  navigator.clipboard?.readText?.().then(text => {
+    if (text) paste(text);
+  }).catch(error => statusErr(userMessageText(error, t('common.requestFailed'))));
+  return true;
+}
+
+function focusHtmlEditorMobileAccessory(item) {
+  const panel = panelNodes.get(item);
+  if (!panel?._htmlEditorMobileAccessory || panel._cmView?.hasFocus) return;
+  if (fileEditorPanelMode(panel) === 'edit') panel._cmView?.focus();
+  else fileEditorPanelPreviewPane(panel)?.querySelector('.file-editor-html-preview')?._focusHtmlViewEditMobile?.();
+}
+
+function sendHtmlEditorMobileAccessoryInput(item, action, shiftKey) {
+  const panel = panelNodes.get(item);
+  if (!panel?.isConnected || !panel._htmlEditorMobileAccessory || !fileEditorStateWritable(fileEditorPanelState(panel))) return false;
+  const mode = fileEditorPanelMode(panel);
+  const key = htmlEditorMobileKeys[action];
+  if (mode === 'split' || mode === 'preview') {
+    const frame = fileEditorPanelPreviewPane(panel)?.querySelector('.file-editor-html-preview');
+    if (frame?._htmlViewEditMobileKey?.(action, key, shiftKey)) return true;
+  }
+  const view = panel._cmView;
+  if (!view?.hasFocus || (mode !== 'split' && mode !== 'edit')) return false;
+  const {state} = view;
+  if (fileEditorMobileClipboard(action, state.sliceDoc(state.selection.main.from, state.selection.main.to), text => {
+    if (panel._cmView === view && view.hasFocus && view.state.doc === state.doc &&
+        view.state.selection.eq(state.selection) && fileEditorStateWritable(fileEditorPanelState(panel))) {
+      view.dispatch({...view.state.replaceSelection(text), userEvent: 'input.paste', scrollIntoView: true});
+    }
+  })) return true;
+  if (!key) return false;
+  view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey, bubbles: true, cancelable: true}));
+  return true;
+}
+
 function codeMirrorPanelContent(panel) {
   return panel?._cmView?.state?.doc?.toString?.() ?? null;
+}
+
+function codeMirrorSplitPreviewDelay(doc) {
+  if (doc.length <= 12 * 1024 && doc.lines <= 400) return 0;
+  if (doc.length <= 64 * 1024 && doc.lines <= 1600) return 60;
+  if (doc.length <= 384 * 1024 && doc.lines <= 4500) return 125;
+  if (doc.length <= 768 * 1024 && doc.lines <= 12000) return 250;
+  return 400;
+}
+
+function codeMirrorSplitPreviewText(panel, path, state) {
+  if (panel._cmPath !== path) return state.content;
+  // HTML ViewEdit maps the new iframe to the source editor before deferred serialization.
+  if (panel._cmView && previewKindForPath(path) === 'html' && fileEditorStateWritable(state)) {
+    return panel._cmView.state.doc.toString();
+  }
+  const draft = panel._cmSplitPreviewDraft;
+  return draft && draft.state === state && draft.baseline === state.content
+    ? draft.text : state.content;
+}
+
+function scheduleCodeMirrorSplitPreview(panel, path) {
+  const view = panel._cmView;
+  const kind = previewKindForPath(path);
+  const mode = fileEditorPanelMode(panel);
+  if (!view || panel._cmPath !== path || (kind !== 'markdown' && kind !== 'html') ||
+      (mode !== 'split' && !(kind === 'html' && mode === 'preview')) || !fileEditorPanelPreviewPane(panel)) return false;
+  if (panel._cmSplitPreviewTimer != null || panel._cmSplitPreviewDraft?.doc === view.state.doc) return true;
+  // Coalesce rapid input before asking the browser to navigate another sandboxed iframe.
+  const delay = Math.max(kind === 'html' ? 50 : 0, codeMirrorSplitPreviewDelay(view.state.doc));
+  const remaining = panel._cmSplitPreviewFinishedAt == null ? 0 : panel._cmSplitPreviewFinishedAt + delay - performance.now();
+  const refresh = () => {
+    panel._cmSplitPreviewTimer = null;
+    const pane = fileEditorPanelPreviewPane(panel);
+    if (!pane || panel.isConnected === false || panel._cmView !== view || panel._cmPath !== path ||
+        fileEditorPanelMode(panel) !== mode ||
+        panel._pmDocumentChanged || panel._pmError) return;
+    if (view.composing || previewScrollUserOwnsElementNow(pane)) {
+      panel._cmSplitPreviewTimer = setTimeout(refresh, Math.max(50, delay));
+      return;
+    }
+    const state = fileEditorPanelState(panel);
+    if (state?.kind !== 'text') return;
+    const doc = view.state.doc;
+    const text = doc.toString();
+    const applied = panel._pmView
+      ? syncProseMirrorPanelSource(panel, path, state, {previewText: text})
+      : renderFileEditorPreviewSurface(panel, pane, path, text, {context: mode, state});
+    panel._cmSplitPreviewFinishedAt = performance.now();
+    if (applied !== false) panel._cmSplitPreviewDraft = {doc, text, state, baseline: state.content};
+  };
+  panel._cmSplitPreviewTimer = setTimeout(refresh, remaining > 0 ? remaining : delay);
+  return true;
 }
 
 function commitCodeMirrorSource(panel, path) {
   if (!panel?._cmView || panel._cmPath !== path || panel._cmSyncing) return false;
   const state = fileEditorPanelState(panel);
   if (!state || state.historical === true) return false;
-  const next = panel._cmView.state.doc.toString();
   if (state._shareActive) { shareHostLocalChanged(panel, path); return true; }
-  if (next === state.content) return true;
-  handleFileEditorContentChanged(panel, path, next, {syntax: false, sourceSurface: 'text-editor'});
+  const next = panel._cmView.state.doc.toString();
+  const preview = previewKindForPath(path) === 'html' && scheduleCodeMirrorSplitPreview(panel, path)
+    ? fileEditorPanelPreviewPane(panel) : null;
+  if (next === state.content) {
+    if (panel._cmSplitPreviewDraft && panel._cmSplitPreviewDraft.text !== next) {
+      panel._cmSplitPreviewDraft = null;
+      if (panel._pmView && !panel._pmDocumentChanged) syncProseMirrorPanelSource(panel, path, state);
+    }
+    return true;
+  }
+  handleFileEditorContentChanged(panel, path, next, {syntax: false, sourceSurface: 'text-editor', skipPreviewPanel: preview});
   return true;
 }
 
 function scheduleCodeMirrorSource(panel, path) {
-  if (fileEditorPanelState(panel)?._shareActive) {
-    shareHostLocalChanged(panel, path);
-    return;
-  }
   if (panel._cmSerializeTimer) clearTimeout(panel._cmSerializeTimer);
   const generation = Number(panel._cmSerializeGeneration || 0) + 1;
   panel._cmSerializeGeneration = generation;
@@ -127,18 +266,6 @@ function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
 function captureCodeMirrorPanelViewState(panel, path) {
   const item = fileEditorPanelItem(panel) || fileEditorItemFor(path);
   if (item) captureFileEditorPanelViewState(item, panel);
-}
-
-function codeMirrorWorkingUpdateExtension(api, panel, path) {
-  return api.EditorView.updateListener.of(update => {
-    if (update.docChanged || update.selectionSet) {
-      updateCodeMirrorCursorStatus(panel);
-      captureCodeMirrorPanelViewState(panel, path);
-    }
-    if (update.docChanged) {
-      if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
-    }
-  });
 }
 
 function codeMirrorSplitSyncExtension(api, panel, path) {
@@ -286,6 +413,16 @@ function updateCodeMirrorViewPreservingState(view, update, options = {}) {
   return true;
 }
 
+// Replaces only the differing middle, so carets, scroll, and preview offsets outside it survive.
+function codeMirrorTextReplacement(doc, next) {
+  const current = doc.toString(), shorter = Math.min(current.length, next.length);
+  let from = 0, suffix = 0;
+  while (from < shorter && current.charCodeAt(from) === next.charCodeAt(from)) from++;
+  while (suffix < shorter - from &&
+      current.charCodeAt(current.length - 1 - suffix) === next.charCodeAt(next.length - 1 - suffix)) suffix++;
+  return {from, to: current.length - suffix, insert: next.slice(from, next.length - suffix)};
+}
+
 function syncCodeMirrorDocument(view, text, options = {}) {
   if (!view) return;
   const next = String(text || '');
@@ -301,7 +438,7 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   try {
     updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
       view.dispatch({
-        changes: {from: 0, to: view.state.doc.length, insert: next},
+        changes: codeMirrorTextReplacement(view.state.doc, next),
         ...(preservedSelection ? {selection: preservedSelection} : {}),
         ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
       });
@@ -378,7 +515,6 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     codeMirrorBlameCompartmentExtensions(api,panel,path),
     codeMirrorFileAccessExtensions(api, panel, path),
     codeMirrorThemedExtensions(api, panel, path),
-    codeMirrorWorkingUpdateExtension(api, panel, path),
     codeMirrorSplitSyncExtension(api, panel, path),
   ];
 }
@@ -394,6 +530,8 @@ function codeMirrorFileAccessExtensions(api, panel, path, options = {}) {
 }
 
 function refreshFileEditorWriteAccess(panel, state) {
+  syncHtmlEditorMobileAccessory(panel, state);
+  syncHtmlViewEditStatus(fileEditorPanelPreviewPane(panel));
   const writable = fileEditorStateWritable(state);
   panel.classList.toggle('file-editor-readonly', !writable);
   const cmWritable = writable && panel._cmAccessReadOnly !== true;
@@ -1109,10 +1247,10 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         mapMarkdownTypingPair(panel, transaction);
         panel._cmView.update([transaction]);
         refreshMarkdownFormattingToolbar(panel);
-        if (transaction.docChanged || transaction.selectionSet) {
-          updateCodeMirrorCursorStatus(panel);
+        if (transaction.docChanged || transaction.selection) {
+          updateCodeMirrorCursorStatus(panel, transaction.docChanged);
           captureCodeMirrorPanelViewState(panel, path);
-          if (transaction.selectionSet && !transaction.docChanged && typeof selectMarkdownPreviewSourceRange === 'function') {
+          if (transaction.selection && !transaction.docChanged && typeof selectMarkdownPreviewSourceRange === 'function') {
             const selection = transaction.newSelection.main;
             const line = transaction.newDoc.lineAt(selection.from);
             const text = transaction.newDoc.sliceString(selection.from, selection.to);
@@ -1154,7 +1292,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   if (options.forceMode !== 'edit' && editorViewModeFor(path, item) === 'diff') return ensureCodeMirrorDiffPanel(panel, item, path, state);
   const generation = (panel._cmGeneration || 0) + 1;
   panel._cmGeneration = generation;
-  container.hidden = false;
+  container.hidden = options.hidden === true;
   container.classList.remove('file-editor-diff-codemirror');
   const currentText = String(state.content || '');
   const signature = codeMirrorConfigSignature(path, {mode: 'edit'});
@@ -1175,34 +1313,63 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
         parent: container,
         dispatch(transaction) {
           mapMarkdownTypingPair(panel, transaction);
+          if (transaction.docChanged && panel._htmlSharePeers) mapSharedHtmlPresence(panel, transaction);
+          if (transaction.docChanged) mapHtmlPreviewSources(panel, transaction);
           panel._cmView.update([transaction]);
-          refreshMarkdownFormattingToolbar(panel);
-          if (transaction.docChanged || transaction.selectionSet) {
-            updateCodeMirrorCursorStatus(panel);
+          if (transaction.docChanged) htmlEditorPreviewFrame(panel)?._htmlRebaseActiveText?.(transaction);
+          const editorChanged = transaction.docChanged || transaction.selection;
+          if (editorChanged) scheduleSplitEditorCaret(panel, Boolean(transaction.selection && !transaction.docChanged));
+          const currentState = fileEditorPanelState(panel);
+          const changed = transaction.docChanged && !panel._cmSyncing;
+          const localPreview = changed && scheduleCodeMirrorSplitPreview(panel, path);
+          if (currentState?._shareActive && transaction.docChanged) {
+            if (changed && !panel._pmApplyingSharedEdit && panel._pmView?.hasFocus()) {
+              syncProseMirrorPanelSource(panel, path, currentState);
+            }
+            if (changed) markSharedEditorPending(panel, currentState);
+            scheduleSharedEditorPresentation(panel, path, currentState, changed && !localPreview,
+              !panel._cmSyncing && !transaction.annotation(api.Transaction.remote));
+            return;
+          }
+          if (editorChanged || transaction.reconfigured) refreshMarkdownFormattingToolbar(panel);
+          if (editorChanged) {
+            updateCodeMirrorCursorStatus(panel, transaction.docChanged);
             captureCodeMirrorPanelViewState(panel, path);
           }
-          if (transaction.docChanged) {
-            if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
-          }
+          if (changed) scheduleCodeMirrorSource(panel, path);
         },
       });
       panel._cmPath = path;
       panel._cmSignature = signature;
       panel._cmMode = 'edit';
       panel._cmPlainFallback = Boolean(createdState.plain);
+      panel._cmView.contentDOM.addEventListener('focus', () => {
+        panel._shareCaretSurface = 'text';
+        delete panel._htmlShareSelection;
+        scheduleSplitEditorCaret(panel);
+      });
+      panel._cmView.contentDOM.addEventListener('blur', () => scheduleSplitEditorCaret(panel));
+      panel._cmView.contentDOM.addEventListener('click', event => {
+        if (!event.ctrlKey && !event.metaKey) scheduleSplitEditorCaret(panel, true);
+      });
       panel._cmView.scrollDOM?.addEventListener('scroll', () => {
         scheduleFileEditorSplitScrollSync(panel, 'editor');
         scheduleFileEditorPanelViewStateCapture(item, panel);
       });
       trackCodeMirrorViews(panel, api, [panel._cmView]);
+      scheduleSplitEditorCaret(panel);
       updateCodeMirrorCursorStatus(panel);
       if (createdState.plain) {
         setFileEditorPanelStatus(panel, t('editor.codemirrorPlainText'), 'warn');
       }
     } else if (!state._shareActive && panel._cmView.state.doc.toString() !== currentText && !state.dirty && !panel._cmSerializeTimer) {
-      panel._cmView.dispatch({
-        changes: {from: 0, to: panel._cmView.state.doc.length, insert: currentText},
-      });
+      const changes = codeMirrorTextReplacement(panel._cmView.state.doc, currentText);
+      // A redraw overwrote TextEdit from the saved copy. Typing can be lost here, so keep evidence.
+      recordJsDebugEvent('editor', {category: 'editor', ok: false, message: `TextEdit replaced from saved copy ${JSON.stringify({
+        path, focused: panel._cmView.hasFocus, docLength: panel._cmView.state.doc.length, savedLength: currentText.length,
+        from: changes.from, to: changes.to, inserted: changes.insert.length,
+      })}`});
+      panel._cmView.dispatch({changes});
       updateCodeMirrorCursorStatus(panel);
     }
     syncCodeMirrorRecentReview(panel, state);
@@ -1475,8 +1642,60 @@ function resetImagePreviewPane(parts) {
   parts.imagePane.replaceChildren();
 }
 
+// A busy server can time out the editor bundle. Retry on a backoff instead of waiting for a reload.
+const htmlViewEditLoadRetryDelaysMs = [3000, 10000, 30000];
+
+function scheduleHtmlViewEditLoadRetry(panel, pane, attempt) {
+  if (!attempt.failed) {
+    delete pane._htmlViewEditLoadRetries;
+    return;
+  }
+  const retries = Number(pane._htmlViewEditLoadRetries || 0);
+  if (retries >= htmlViewEditLoadRetryDelaysMs.length) return;
+  const delay = htmlViewEditLoadRetryDelaysMs[retries];
+  pane._htmlViewEditLoadRetries = retries + 1;
+  recordJsDebugEvent('editor', {category: 'editor', ok: false,
+    message: `ViewEdit editor load failed for ${attempt.path}; retry ${retries + 1} in ${delay / 1000}s`});
+  setTimeout(() => {
+    // A newer load, a Retry click, or a closed pane already owns this pane.
+    if (pane._htmlViewEditLoad !== attempt || pane.hidden || !panel.isConnected) return;
+    retryHtmlViewEditLoad(panel, pane);
+  }, delay);
+}
+
+async function renderHtmlViewEditWhenReady(panel, pane, path, state, mode, ensureSource) {
+  const render = current => renderFileEditorPreviewSurface(panel, pane, path,
+    codeMirrorSplitPreviewText(panel, path, current), {context: mode, state: current});
+  const previous = pane._htmlViewEditLoad;
+  if (previous?.path === path && previous.mode === mode && previous.failed) {
+    render(state);
+    syncHtmlViewEditStatus(pane);
+    return false;
+  }
+  const attempt = {path, mode, failed: false};
+  pane._htmlViewEditLoad = attempt;
+  const sourceReady = ensureSource();
+  render(state);
+  syncHtmlViewEditStatus(pane);
+  let loaded = false;
+  try {
+    loaded = await sourceReady;
+    return loaded;
+  } finally {
+    if (pane._htmlViewEditLoad === attempt && !pane.hidden &&
+        fileEditorPanelPath(panel) === path && fileEditorPanelMode(panel) === mode) {
+      attempt.failed = loaded === false;
+      const current = fileEditorPanelState(panel);
+      if (loaded && panel.isConnected && current?.kind === 'text' && !current.loading) render(current);
+      syncHtmlViewEditStatus(pane);
+      scheduleHtmlViewEditLoadRetry(panel, pane, attempt);
+    }
+  }
+}
+
 function renderTextPreviewMode(panel, item, path, state, parts) {
-  if (!(bootstrap.guestWorkspace && state._shareActive)) destroyCodeMirrorPanel(panel);
+  const htmlEditor = previewKindForPath(path) === 'html' && fileEditorStateWritable(state);
+  if (!state._shareActive && !htmlEditor) destroyCodeMirrorPanel(panel);
   if (parts.rawPane) parts.rawPane.hidden = true;
   if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
   panel.classList.remove('syntax-highlighted');
@@ -1484,9 +1703,22 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
     parts.previewPane.hidden = false;
     if (prosemirrorSupportedSource(path, state)) {
       renderProseMirrorPreviewMode(panel, item, path, state, parts);
+      if (state._shareActive) void ensureCodeMirrorPanel(panel, item, path, state, {hidden: true});
     } else {
       destroyProseMirrorPanel(panel);
-      renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state});
+      delete panel._pmRequired;
+      if (htmlEditor) {
+        void renderHtmlViewEditWhenReady(panel, parts.previewPane, path, state, 'preview',
+          () => ensureCodeMirrorPanel(panel, item, path, state, {hidden: true})).catch(error => {
+          if (fileEditorPanelPath(panel) !== path || fileEditorPanelMode(panel) !== 'preview') return;
+          setFileEditorPanelStatus(panel, t('editor.codemirrorUnavailable', {error}), 'error');
+        });
+      } else {
+        renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state});
+        if (state._shareActive && previewKindForPath(path) === 'html') {
+          void ensureCodeMirrorPanel(panel, item, path, state, {hidden: true});
+        }
+      }
     }
   }
 }
@@ -1498,6 +1730,7 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   }
   const rawPane = parts.rawPane;
   const previewPane = parts.previewPane;
+  let sourceReady;
   if (rawPane) rawPane.hidden = true;
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
@@ -1506,12 +1739,18 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
         renderProseMirrorPreviewMode(panel, item, path, state, parts);
       } else {
         destroyProseMirrorPanel(panel);
-        renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split', state});
+        delete panel._pmRequired;
+        if (previewKindForPath(path) === 'html' && fileEditorStateWritable(state)) {
+          sourceReady = renderHtmlViewEditWhenReady(panel, previewPane, path, state, mode,
+            () => ensureCodeMirrorPanel(panel, item, path, state));
+        } else {
+          renderFileEditorPreviewSurface(panel, previewPane, path, codeMirrorSplitPreviewText(panel, path, state), {context: mode, state});
+        }
       }
     }
   }
   panel.classList.remove('syntax-highlighted');
-  ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
+  (sourceReady || ensureCodeMirrorPanel(panel, item, path, state)).then(loaded => {
     if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
   }).catch(error => {
     if (panel.dataset.filePath !== path) return;
@@ -1531,6 +1770,7 @@ function renderTextEditorMode(panel, item, path, state, parts, mode) {
   panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
   if (mode === 'preview') renderTextPreviewMode(panel, item, path, state, parts);
   else renderTextCodeMode(panel, item, path, state, parts, mode);
+  scheduleSplitEditorCaret(panel);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
   focusFileEditorPanelIfReady(panel, item);
@@ -1658,6 +1898,8 @@ function updateFileEditorPanelChrome(panel, path) {
   if (reloadButton) {
     reloadButton.hidden = previewOnly || state?.kind !== 'text';
   }
+  const themeButton = panel.querySelector('.file-editor-theme-panel');
+  if (themeButton) themeButton.hidden = previewKindForPath(path) === 'html';
   const uploadButton = panel.querySelector('.file-editor-upload-panel');
   if (uploadButton) {
     const viewMode = editorViewModeFor(path, item);
@@ -1731,7 +1973,7 @@ function setFileEditorPanelStatus(panel, message, level) {
       status.appendChild(cursorNode);
     }
   }
-  messageNode.textContent = message || '';
+  if (messageNode.textContent !== (message || '')) messageNode.textContent = message || '';
   status.dataset.level = level || '';
   updateCodeMirrorCursorStatus(panel);
 }
@@ -2003,7 +2245,12 @@ function clampScrollTop(element, value) {
 }
 
 const fileEditorSplitScrollFocusRatio = 1 / 4;
+const fileEditorHtmlSplitScrollFocusRatio = 1 / 2;
 const fileEditorSplitScrollAnchorSnapPx = 1;
+
+function fileEditorSplitScrollRatio(previewPane, scroller) {
+  return scroller === previewPane ? fileEditorSplitScrollFocusRatio : fileEditorHtmlSplitScrollFocusRatio;
+}
 
 function editorScrollEdgeTarget(from, to) {
   const maxFrom = Math.max(0, Number(from?.scrollHeight || 0) - Number(from?.clientHeight || 0));
@@ -2015,7 +2262,21 @@ function editorScrollEdgeTarget(from, to) {
   return null;
 }
 
-function previewScrollAnchors(previewPane) {
+function previewScrollAnchors(previewPane, scroller = previewPane) {
+  if (scroller !== previewPane) {
+    const panel = previewPane.closest('.file-editor-panel');
+    const frame = htmlSplitPreviewFrame(panel);
+    const map = frame && htmlSplitSourceMap(panel, frame);
+    const anchors = [];
+    for (const {element, from} of map?.records || []) {
+      if (!previewSourceAnchorIsRendered(element)) continue;
+      const line = panel._cmView.state.doc.lineAt(map.toCurrent(from)).number;
+      const top = scrollTopForPreviewElement(scroller, element);
+      const previous = anchors.at(-1);
+      if (!previous || (line > previous.line && top > previous.top)) anchors.push({line, top});
+    }
+    return anchors;
+  }
   return previewSourceLineAnchors(previewPane)
     .map(item => ({...item, top: scrollTopForPreviewElement(previewPane, item.element)}))
     .sort((a, b) => a.line - b.line || a.top - b.top);
@@ -2028,8 +2289,8 @@ function sourceSpanIsIgnoredComment(previewPane, fromLine, toLine) {
   ));
 }
 
-function semanticSourceLineAnchors(previewPane) {
-  const anchors = previewScrollAnchors(previewPane);
+function semanticSourceLineAnchors(previewPane, scroller) {
+  const anchors = previewScrollAnchors(previewPane, scroller);
   const panel = previewPane?.closest?.('.file-editor-panel');
   const comments = panel?._pmIgnoredCommentRanges || [];
   return anchors.filter(anchor => !comments.some(range => Number(anchor.line) >= Number(range.from) && Number(anchor.line) < Number(range.to)));
@@ -2039,10 +2300,10 @@ function codeMirrorSourceTextBlock(block) {
   return Array.isArray(block?.type) ? block.type.find(part => part.type === 0) || block : block;
 }
 
-function sourcePositionForEditorScroll(cmView) {
+function sourcePositionForEditorScroll(cmView, ratio = fileEditorSplitScrollFocusRatio) {
   if (!cmView?.scrollDOM || !cmView.state?.doc) return null;
   try {
-    const y = Math.max(0, Number(cmView.scrollDOM.scrollTop || 0)) + (Math.max(1, Number(cmView.scrollDOM.clientHeight || 0)) * fileEditorSplitScrollFocusRatio);
+    const y = Math.max(0, Number(cmView.scrollDOM.scrollTop || 0)) + Math.max(1, Number(cmView.scrollDOM.clientHeight || 0)) * ratio;
     const measured = cmView.lineBlockAtHeight(y);
     const sourceLine = cmView.state.doc.lineAt(measured.from);
     const block = codeMirrorSourceTextBlock(cmView.lineBlockAt(sourceLine.from));
@@ -2055,10 +2316,10 @@ function sourcePositionForEditorScroll(cmView) {
   }
 }
 
-function sourcePositionForPreviewScroll(previewPane) {
-  const anchors = semanticSourceLineAnchors(previewPane);
+function sourcePositionForPreviewScroll(previewPane, scroller = previewPane) {
+  const anchors = semanticSourceLineAnchors(previewPane, scroller);
   if (!anchors.length) return null;
-  const y = Math.max(0, Number(previewPane?.scrollTop || 0)) + (Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio);
+  const y = Math.max(0, Number(scroller?.scrollTop || 0)) + Math.max(1, Number(scroller?.clientHeight || 0)) * fileEditorSplitScrollRatio(previewPane, scroller);
   let previous = anchors[0];
   for (const next of anchors.slice(1)) {
     if (next.top > y) {
@@ -2073,12 +2334,12 @@ function sourcePositionForPreviewScroll(previewPane) {
   return {line: previous.line};
 }
 
-function previewScrollTopForSourcePosition(previewPane, position) {
-  const anchors = semanticSourceLineAnchors(previewPane);
+function previewScrollTopForSourcePosition(previewPane, position, scroller = previewPane) {
+  const anchors = semanticSourceLineAnchors(previewPane, scroller);
   if (!anchors.length || !position) return null;
-  const targetOffset = Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio;
+  const targetOffset = Math.max(1, Number(scroller?.clientHeight || 0)) * fileEditorSplitScrollRatio(previewPane, scroller);
   const line = Math.max(1, Number(position.line || 1));
-  if (line <= anchors[0].line) return clampScrollTop(previewPane, anchors[0].top - targetOffset);
+  if (line <= anchors[0].line) return clampScrollTop(scroller, anchors[0].top - targetOffset);
   let previous = anchors[0];
   for (let index = 1; index < anchors.length; index += 1) {
     const next = anchors[index];
@@ -2087,21 +2348,21 @@ function previewScrollTopForSourcePosition(previewPane, position) {
       // pinned to the preceding semantic block until the editor reaches the next rendered block.
       if (sourceSpanIsIgnoredComment(previewPane, previous.line, next.line)) {
         const anchor = line < next.line ? previous : next;
-        return clampScrollTop(previewPane, anchor.top - targetOffset);
+        return clampScrollTop(scroller, anchor.top - targetOffset);
       }
       const span = Math.max(1, next.line - previous.line);
       const fraction = Math.min(1, Math.max(0, (line - previous.line) / span));
-      return clampScrollTop(previewPane, previous.top + ((next.top - previous.top) * fraction) - targetOffset);
+      return clampScrollTop(scroller, previous.top + ((next.top - previous.top) * fraction) - targetOffset);
     }
     previous = next;
   }
   return null;
 }
 
-function editorScrollTopForSourcePosition(cmView, position) {
+function editorScrollTopForSourcePosition(cmView, position, ratio = fileEditorSplitScrollFocusRatio) {
   if (!cmView?.state?.doc || !position) return null;
   try {
-    const targetOffset = Math.max(1, Number(cmView.scrollDOM?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio;
+    const targetOffset = Math.max(1, Number(cmView.scrollDOM?.clientHeight || 0)) * ratio;
     const line = Math.max(1, Math.min(Number(position.line || 1), cmView.state.doc.lines));
     const beforeLine = Math.max(1, Math.min(Math.floor(line), cmView.state.doc.lines));
     const afterLine = Math.max(1, Math.min(Math.ceil(line), cmView.state.doc.lines));
@@ -2132,26 +2393,16 @@ function writeFileEditorSplitScrollIfOwned(deferredOwner, element, coordinates) 
 }
 
 function syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane, deferredOwner = null) {
-  if (!previewPaneNeedsSourceAnchorScroll(previewPane)) return false;
-  const from = source === 'preview' ? previewPane : editorScroller;
-  const to = source === 'preview' ? editorScroller : previewPane;
-  if (!writeFileEditorSplitScrollIfOwned(deferredOwner, to, {left: scrollSyncTargetPosition(from, to, 'left')})) return false;
-  const edgeTarget = editorScrollEdgeTarget(source === 'preview' ? previewPane : editorScroller, source === 'preview' ? editorScroller : previewPane);
-  if (edgeTarget !== null) {
-    return source === 'preview'
-      ? writeFileEditorSplitScrollIfOwned(deferredOwner, editorScroller, {top: edgeTarget})
-      : writeFileEditorSplitScrollIfOwned(deferredOwner, previewPane, {top: edgeTarget});
-  }
-  const position = source === 'preview' ? sourcePositionForPreviewScroll(previewPane) : sourcePositionForEditorScroll(host?._cmView);
-  if (!position) return false;
-  if (source === 'preview') {
-    const target = editorScrollTopForSourcePosition(host?._cmView, position);
-    if (target === null) return false;
-    return writeFileEditorSplitScrollIfOwned(deferredOwner, editorScroller, {top: target});
-  }
-  const target = previewScrollTopForSourcePosition(previewPane, position);
+  const previewScroller = fileEditorSourceElement(host, 'preview');
+  if (previewScroller === previewPane && !previewPaneNeedsSourceAnchorScroll(previewPane)) return false;
+  const from = source === 'preview' ? previewScroller : editorScroller;
+  const to = source === 'preview' ? editorScroller : previewScroller;
+  const ratio = fileEditorSplitScrollRatio(previewPane, previewScroller);
+  const target = editorScrollEdgeTarget(from, to) ?? (source === 'preview'
+    ? editorScrollTopForSourcePosition(host._cmView, sourcePositionForPreviewScroll(previewPane, previewScroller), ratio)
+    : previewScrollTopForSourcePosition(previewPane, sourcePositionForEditorScroll(host._cmView, ratio), previewScroller));
   if (target === null) return false;
-  return writeFileEditorSplitScrollIfOwned(deferredOwner, previewPane, {top: target});
+  return writeFileEditorSplitScrollIfOwned(deferredOwner, to, {top: target, left: scrollSyncTargetPosition(from, to, 'left')});
 }
 
 function nowMs() {
@@ -2273,6 +2524,29 @@ function setFileEditorScrollSyncGuard(...panels) {
   setFileEditorScrollSyncGuardForSource('', ...panels);
 }
 
+function revealSplitEditorSourceSelection(panel, from, to) {
+  const view = panel._cmView;
+  if (!view || fileEditorPanelMode(panel) !== 'split') return;
+  setFileEditorScrollSyncGuardForSource('preview', panel);
+  const effect = panel._cmApi.EditorView.scrollIntoView(from);
+  view.dispatch({selection: {anchor: from, head: to}, effects: effect});
+}
+
+// Scrolls the rendered side of a split so its caret, now `top` pixels below the top of its
+// viewport, sits at `targetTop`, level with the TextEdit caret.
+function revealSplitCaret(panel, scroller, top, targetTop) {
+  if (!scroller) return false;
+  const generation = Number(panel._splitScrollGeneration || 0);
+  // A caret move can also scroll TextEdit. This exact source viewport already has a target.
+  rememberFileEditorReflectedScroll(panel, 'editor', 'caret', generation);
+  const target = clampScrollTop(scroller, scroller.scrollTop + top - targetTop);
+  if (Math.abs(scroller.scrollTop - target) < 1) return false;
+  setFileEditorScrollSyncGuardForSource('editor', panel);
+  writeOwnedElementScroll(scroller, {top: target}, 'split-caret');
+  rememberFileEditorReflectedScroll(panel, 'preview', 'editor', generation);
+  return true;
+}
+
 function elementCanScroll(element) {
   return Boolean(element && Math.max(0, element.scrollHeight - element.clientHeight) > 1);
 }
@@ -2308,7 +2582,8 @@ function fileEditorPanelPreviewPane(panel) {
 
 function fileEditorSourceElement(panel, source) {
   if (fileEditorPanelMode(panel) === 'diff') return null;
-  return source === 'preview' ? fileEditorPanelPreviewPane(panel) : fileEditorPanelScroller(panel);
+  if (source !== 'preview') return fileEditorPanelScroller(panel);
+  return previewEmbeddedScrollElement(htmlSplitPreviewFrame(panel)) || fileEditorPanelPreviewPane(panel);
 }
 
 function fileEditorSourceCanDrive(panel, source) {
@@ -2364,9 +2639,10 @@ function syncFileEditorInPaneSplitScroll(host, source, generation, deferredOwner
   // The TeX PDF scrolls inside PDF.js and has its own source map.
   if (previewPane.querySelector?.('[data-tex-preview]')) return false;
   if (!fileEditorSourceCanDrive(host, source)) return false;
-  const from = source === 'preview' ? previewPane : editorScroller;
-  const to = source === 'preview' ? editorScroller : previewPane;
-  const previewDrivesBottom = source === 'preview' && fileEditorScrollAtBottom(previewPane);
+  const previewScroller = fileEditorSourceElement(host, 'preview');
+  const from = source === 'preview' ? previewScroller : editorScroller;
+  const to = source === 'preview' ? editorScroller : previewScroller;
+  const previewDrivesBottom = source === 'preview' && fileEditorScrollAtBottom(previewScroller);
   setFileEditorScrollSyncGuardForSource(source, host);
   const synced = syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane, deferredOwner)
     || syncScrollPositionByRatio(from, to, 'preview-split-reflection', {}, deferredOwner);
@@ -2376,8 +2652,11 @@ function syncFileEditorInPaneSplitScroll(host, source, generation, deferredOwner
   return true;
 }
 
-function syncFileEditorSplitScroll(host, source, generation = Number(host?._splitScrollGeneration || 0), deferredOwner = null) {
-  if (!host || fileEditorScrollSyncBlocked(host, source)) return;
+function syncFileEditorSplitScroll(host, source, generation = Number(host?._splitScrollGeneration || 0), deferredOwner = null, observedPreviewScroll = false) {
+  if (!host) return;
+  // Native input in either HTML pane can supersede a previous reflection.
+  if (fileEditorScrollSyncBlocked(host, source) && !(htmlSplitPreviewFrame(host)
+      && (observedPreviewScroll || previewScrollUserOwnsElementNow(fileEditorSourceElement(host, source))))) return;
   const canDrive = fileEditorSourceCanDrive(host, source);
   if (!canDrive) return;
   syncFileEditorInPaneSplitScroll(host, source, generation, deferredOwner);
@@ -2393,21 +2672,26 @@ function scheduleFileEditorSplitScrollSync(host, source, options = {}) {
   host._splitScrollBottomConvergence = null;
   host._splitScrollPendingGeneration = generation;
   host._splitScrollPendingSource = source;
+  host._splitScrollPendingObservedPreview = options.observedPreviewScroll === true;
   host._splitScrollDeferredOwner = createPassiveDeferredElementScrollOwner(
     fileEditorPanelScroller(host),
-    fileEditorPanelPreviewPane(host),
+    fileEditorSourceElement(host, 'preview'),
   );
   if (host._splitScrollFrame) return true;
   const run = () => {
     host._splitScrollFrame = 0;
     const pendingSource = host._splitScrollPendingSource || source;
     const pendingGeneration = Number(host._splitScrollPendingGeneration || generation);
+    const pendingObservedPreview = host._splitScrollPendingObservedPreview;
     const deferredOwner = host._splitScrollDeferredOwner;
     host._splitScrollPendingSource = '';
     host._splitScrollPendingGeneration = 0;
+    host._splitScrollPendingObservedPreview = false;
     host._splitScrollDeferredOwner = null;
     if (pendingGeneration !== Number(host._splitScrollGeneration || 0)) return;
-    syncFileEditorSplitScroll(host, pendingSource, pendingGeneration, deferredOwner);
+    if (pendingSource === 'editor' && host._splitScrollReflections?.editor?.ownerSource === 'caret' &&
+        fileEditorReflectedScrollMatches(host, 'editor')) return;
+    syncFileEditorSplitScroll(host, pendingSource, pendingGeneration, deferredOwner, pendingObservedPreview);
   };
   if (typeof requestAnimationFrame === 'function') host._splitScrollFrame = requestAnimationFrame(run);
   else host._splitScrollFrame = setTimeout(run, 0);
@@ -2417,7 +2701,7 @@ function scheduleFileEditorSplitScrollSync(host, source, options = {}) {
 const fileEditorPreviewLayoutScrollSyncMs = 400;
 
 function fileEditorPreviewScrollSyncSource(panel) {
-  const previewPane = fileEditorPanelPreviewPane(panel);
+  const previewPane = fileEditorSourceElement(panel, 'preview');
   // Current native input outranks layout refits. Historical invalidation generations must not
   // turn a later details-collapse clamp into a new Preview gesture.
   if (previewScrollUserOwnsElementNow(previewPane)) return 'preview';
@@ -2617,6 +2901,8 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
       expiresAt: Date.now() + 5000,
     });
     state.original = savedContent;
+    state.lastSaveStatus = {content: savedContent, key: options.autosave ? 'editor.autoSaved' : 'editor.saved',
+      params: {size: formatFileSize(payload.size)}};
     state.diskMtimeExact = payload.mtime_ns_exact;
     state.dirty = state.content !== savedContent;
     if (state.dirty) delete state.lastCleanAt;
@@ -2629,9 +2915,7 @@ async function performFileEditorSave(path, panel, options = {}, expectedState = 
     }
     for (const openPanel of fileEditorPanelsForPath(currentStatePath)) {
       updateFileEditorPanelChrome(openPanel, currentStatePath);
-      const status = state.dirty
-        ? openFileStatus(state)
-        : {message: t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), level: 'ok'};
+      const status = openFileStatus(state);
       setFileEditorPanelStatus(openPanel, status.message, status.level);
     }
     renderSessionButtons();

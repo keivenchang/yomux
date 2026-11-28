@@ -74,13 +74,60 @@ func TestNativeSettingsMatchesRetainedContract(t *testing.T) {
 	}
 	for index, example := range fixture.Cases {
 		coerced := []string{}
-		actual := schema.sanitize(example.Input, &coerced)
+		actual, err := schema.sanitize(example.Input, &coerced)
+		if err != nil {
+			t.Fatalf("case %d: %v", index, err)
+		}
 		sort.Strings(coerced)
 		if !reflect.DeepEqual(actual, example.Sanitized) {
 			t.Errorf("case %d normalization mismatch: input=%v", index, example.Input)
 		}
 		if !reflect.DeepEqual(coerced, example.Coerced) {
 			t.Errorf("case %d coerced = %v; want %v", index, coerced, example.Coerced)
+		}
+	}
+}
+
+func TestNativeSettingsNormalizesClaudeDescriptionEffort(t *testing.T) {
+	s := nativeSettingsFixtureServer(t)
+	schema, err := s.nativeSettingsSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ input, want string }{{"high", "high"}, {"ultra", "low"}} {
+		coerced := []string{}
+		loaded, err := schema.sanitize(map[string]any{
+			"tabber": map[string]any{"codex_model": "claude-haiku-5-5", "codex_effort": test.input},
+		}, &coerced)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tabber := settingsObject(loaded["tabber"])
+		if tabber["codex_model"] != "claude-haiku-5-5" || tabber["codex_effort"] != test.want ||
+			(len(coerced) == 1 && coerced[0] == "tabber.codex_effort") != (test.input != test.want) {
+			t.Errorf("effort %q: settings=%v coerced=%v; want Claude with effort %q", test.input, tabber, coerced, test.want)
+		}
+	}
+}
+
+func TestNativeSettingsSanitizeReportsMalformedSchemaTypes(t *testing.T) {
+	s := nativeSettingsFixtureServer(t)
+	schema, err := s.nativeSettingsSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, corrupt := range map[string]func(nativeSettingsSchema){
+		"codex_model": func(broken nativeSettingsSchema) {
+			settingsObject(settingsObject(broken["DEFAULT_SETTINGS"])["tabber"])["codex_model"] = float64(5)
+		},
+		"retired hover key": func(broken nativeSettingsSchema) {
+			broken["RETIRED_HOVER_TIMING_KEYS"] = []any{float64(1)}
+		},
+	} {
+		broken := nativeSettingsSchema(settingsObject(cloneSettingsValue(map[string]any(schema))))
+		corrupt(broken)
+		if _, err := broken.sanitize(nil, nil); err == nil {
+			t.Errorf("%s: malformed schema sanitized without an error", name)
 		}
 	}
 }
@@ -96,7 +143,10 @@ func TestNativeSettingsEditorAndPreviewFontsStayPaired(t *testing.T) {
 	legacyAppearance := settingsObject(settingsObject(legacy)["appearance"])
 	legacyAppearance["editor_font_size"] = float64(18)
 	legacyAppearance["preview_font_size"] = float64(19)
-	loaded := schema.sanitize(settingsObject(legacy), nil)
+	loaded, err := schema.sanitize(settingsObject(legacy), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := settingsObject(loaded["appearance"])["preview_font_size"]; got != float64(18) {
 		t.Fatalf("loaded preview font size = %v; want editor size 18", got)
 	}
@@ -110,7 +160,10 @@ func TestNativeSettingsEditorAndPreviewFontsStayPaired(t *testing.T) {
 		{name: "preview_clamped", patch: map[string]any{"appearance": map[string]any{"preview_font_size": float64(40)}}, want: 28},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			merged := schema.merge(settingsObject(defaults), test.patch, nil)
+			merged, err := schema.merge(settingsObject(defaults), test.patch, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			appearance := settingsObject(merged["appearance"])
 			if appearance["editor_font_size"] != test.want || appearance["preview_font_size"] != test.want {
 				t.Fatalf("paired font sizes = editor %v, preview %v; want %v", appearance["editor_font_size"], appearance["preview_font_size"], test.want)

@@ -1,9 +1,13 @@
 import pytest
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
 from tests.browser_helpers.native_keyboard import native_editor_modifier, native_logical_key
+from tests.browser_helpers.editor_mount import mount_split_file
 
 
 def setup_formatting_editor(browser, tmp_path):
@@ -29,10 +33,633 @@ def setup_formatting_editor(browser, tmp_path):
     assert result is True, result
 
 
+def mount_markdown_split(browser, tmp_path, markdown, *, math=False, before_mount=None):
+    def prepare(driver):
+        if before_mount:
+            before_mount(driver)
+        if math:
+            assert driver.execute_async_script("""
+              const done = arguments[0], script = document.createElement('script');
+              script.src = '/static/vendor/katex/katex.min.js';
+              script.onload = () => done(typeof katex.render === 'function');
+              script.onerror = () => done(false);
+              document.head.append(script);
+              const css = document.createElement('link');
+              css.rel = 'stylesheet';
+              css.href = '/static/vendor/katex/katex.min.css';
+              document.head.append(css);
+            """)
+    return mount_split_file(browser, tmp_path, markdown, '/home/test/markdown-split.md', 'markdown', before_mount=prepare)
+
+
+def test_markdown_viewedit_task_checkbox_aligns_with_text_and_follows_editability(browser, tmp_path):
+    source = '- [ ] Toggle this task in ViewEdit.\n- [x] Open the sample in YOmux.\n'
+    item = mount_markdown_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 6)
+    state = wait.until(lambda driver: driver.execute_script("""
+      const view = panelNodes.get(arguments[0])?._pmView;
+      const input = view?.dom.querySelector('input[type=checkbox]');
+      const label = input?.parentElement.querySelector('p');
+      if (!view?.editable || !label?.textContent) return false;
+      const text = document.createTreeWalker(label, NodeFilter.SHOW_TEXT).nextNode();
+      const range = document.createRange();
+      range.setStart(text, 0);
+      range.setEnd(text, 1);
+      const glyph = range.getBoundingClientRect(), box = input.getBoundingClientRect();
+      return {inline: box.right <= glyph.left && box.top < glyph.bottom && box.bottom > glyph.top,
+        noBullet: getComputedStyle(input.parentElement).listStyleType === 'none', enabled: !input.disabled};
+    """, item))
+    assert state == {'inline': True, 'noBullet': True, 'enabled': True}, state
+
+    browser.execute_script("previewFindSetReadOnly(panelNodes.get(arguments[0]), true)", item)
+    checkbox = browser.find_element(By.CSS_SELECTOR, '.ProseMirror input[type=checkbox]')
+    assert not checkbox.is_enabled() and not checkbox.is_selected()
+    browser.execute_script("previewFindSetReadOnly(panelNodes.get(arguments[0]), false)", item)
+    checkbox = browser.find_element(By.CSS_SELECTOR, '.ProseMirror input[type=checkbox]')
+    assert checkbox.is_enabled()
+    checkbox.click()
+    assert browser.find_element(By.CSS_SELECTOR, '.ProseMirror input[type=checkbox]').is_selected()
+    saved = browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      flushProseMirrorSource(panel, panel.dataset.filePath);
+      return panel._cmView.state.doc.toString();
+    """, item)
+    assert saved == source.replace('[ ]', '[x]'), saved
+
+
+@pytest.mark.parametrize('direction', ['LR', 'TD'])
+def test_markdown_viewedit_mermaid_refits_when_the_pane_resizes(browser, tmp_path, direction):
+    source = f'```mermaid\nflowchart {direction}\n  A[Owner] --> B[YO!Share] --> C[Guest tabs]\n```\n'
+    item = mount_markdown_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 8)
+
+    def metrics(driver):
+        return driver.execute_script("""
+          const panel = panelNodes.get(arguments[0]);
+          const shell = panel?._pmView?.dom.querySelector('.mermaid-preview-host');
+          const image = shell?.querySelector('img');
+          const viewport = shell?.querySelector('.file-editor-preview-zoom-viewport');
+          if (!image?.naturalWidth || !shell.dataset.previewZoomScale ||
+              shell.classList.contains('file-editor-preview-zoom-measuring')) return false;
+          return {pane: shell.parentElement.clientWidth, viewport: viewport.clientWidth,
+            image: image.getBoundingClientRect().width,
+            viewportHeight: viewport.clientHeight, imageHeight: image.getBoundingClientRect().height,
+            scrollHeight: viewport.scrollHeight,
+            scale: Number(shell.dataset.previewZoomScale), mode: shell.dataset.previewZoomMode};
+        """, item)
+
+    def resize(width):
+        browser.execute_script("panelNodes.get(arguments[0])._pmView.dom.style.width = arguments[1] + 'px'", item, width)
+
+    wait.until(metrics)
+    resize(360)
+    large = wait.until(lambda driver: (state := metrics(driver)) and
+                      state['pane'] == 360 and state['image'] <= state['viewport'] and state)
+    assert large['mode'] == 'fit', large
+    assert 0 <= large['viewportHeight'] - large['imageHeight'] <= 28, large
+    assert large['scrollHeight'] == large['viewportHeight'], large
+    assert (large['imageHeight'] > large['image']) == (direction == 'TD'), large
+    if direction == 'TD':
+        assert large['viewport'] < large['pane'] * 0.75, large
+    resize(200)
+    small = wait.until(lambda driver: (state := metrics(driver)) and
+                       state['pane'] == 200 and state['image'] <= state['viewport'] and
+                       (direction == 'TD' or state['scale'] < large['scale']) and state)
+    assert small['mode'] == 'fit' and small['image'] <= small['viewport'], small
+    assert 0 <= small['viewportHeight'] - small['imageHeight'] <= 28, small
+    browser.find_element(By.CSS_SELECTOR, '.mermaid-preview-host [data-preview-zoom-action="actual"]').click()
+    resize(360)
+    actual = wait.until(lambda driver: (state := metrics(driver)) and state['pane'] == 360 and state)
+    assert actual['mode'] == 'actual' and actual['scale'] == 1, actual
+    browser.find_element(By.CSS_SELECTOR, '.mermaid-preview-host [data-preview-zoom-action="fit"]').click()
+    fitted = wait.until(lambda driver: (state := metrics(driver)) and state['mode'] == 'fit' and state)
+    assert fitted['image'] <= fitted['viewport'], fitted
+    assert 0 <= fitted['viewportHeight'] - fitted['imageHeight'] <= 28, fitted
+    assert fitted['scale'] == large['scale'], fitted
+    if direction == 'TD':
+        browser.execute_script("""
+          const panel = panelNodes.get(arguments[0]);
+          panel.querySelector('.file-editor-preview-pane-panel').style.height = '200px';
+        """, item)
+        shorter = wait.until(lambda driver: (state := metrics(driver)) and state['scale'] < fitted['scale'] and state)
+        assert shorter['viewportHeight'] < 200, shorter
+        assert shorter['scrollHeight'] == shorter['viewportHeight'], shorter
+
+
+@pytest.mark.parametrize('surface', ['viewedit', 'read-only'])
+def test_markdown_preview_fills_width_for_unconstrained_standalone_svg(browser, tmp_path, surface):
+    source = '![Wide](wide.svg)\n\nInline ![Inline](wide.svg) image.\n\n<img src="wide.svg" alt="Sized" width="48">\n'
+
+    def stub_svg(driver):
+        driver.execute_script("""
+          const original = fetchRawFileBlob;
+          fetchRawFileBlob = (path, options) => path.endsWith('/wide.svg')
+            ? Promise.resolve({ok:true,status:200,blob:new Blob(
+              ['<svg xmlns="http://www.w3.org/2000/svg" width="110" height="55"><rect width="110" height="55"/></svg>'],
+              {type:'image/svg+xml'})})
+            : original(path, options);
+        """)
+
+    item = mount_markdown_split(browser, tmp_path, source, before_mount=stub_svg)
+    if surface == 'read-only':
+        assert browser.execute_async_script("""
+          const [source, done] = arguments;
+          const script = document.createElement('script');
+          script.src = '/static/vendor/marked.min.js';
+          script.onerror = () => done(false);
+          script.onload = () => {
+            const root = document.createElement('div');
+            root.className = 'markdown-body';
+            root.style.width = '400px';
+            document.body.append(root);
+            window.svgPreviewTestRoot = root;
+            renderMarkdownPreviewInto(root, source, '/home/test/markdown-split.md', {readOnly: true});
+            done(true);
+          };
+          document.head.append(script);
+        """, source)
+    result = WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      const root = window.svgPreviewTestRoot || panel?._pmView?.dom;
+      if (!root) return false;
+      const images = [...root.querySelectorAll('img.markdown-preview-image')];
+      if (images.length !== 3 || !images.every(image => image.naturalWidth > 0)) return false;
+      return images.map(image => {
+        const box = image.getBoundingClientRect();
+        return {width: box.width, height: box.height, paragraph: image.parentElement.clientWidth};
+      });
+    """, item))
+    wide, inline, sized = result
+    assert abs(wide['width'] - wide['paragraph']) <= 1, result
+    assert abs(wide['height'] * 2 - wide['width']) <= 1, result
+    assert inline['width'] == 110 and sized['width'] == 48, result
+
+
+def visible_markdown_source_selection(browser, item, start, markup, source):
+    return browser.execute_script("""
+      const [item, start, markup, source] = arguments;
+      const cm = panelNodes.get(item)._cmView;
+      const doc = cm.state.doc, selection = cm.state.selection.main;
+      const viewport = cm.scrollDOM.getBoundingClientRect();
+      const visible = [...cm.dom.querySelectorAll('.cm-selectionBackground')].some(node => {
+        const bounds = node.getBoundingClientRect();
+        return bounds.width > 0 && bounds.top < viewport.bottom && bounds.bottom > viewport.top &&
+          getComputedStyle(node).backgroundColor !== 'rgba(0, 0, 0, 0)';
+      });
+      return visible && !cm.hasFocus && selection.from === start &&
+        doc.sliceString(selection.from, selection.to) === markup && doc.toString() === source;
+    """, item, start, markup, source)
+
+
+def test_markdown_viewedit_clicking_image_selects_its_exact_source(browser, tmp_path):
+    uri = ('data:image/png;base64,'
+           'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
+    inline = f'![Pixel]({uri})'
+    reference = '![Reference][p]'
+    html = f'<img alt="HTML image" src="{uri}" width="32">'
+    standalone = f'<img alt="Standalone image" src="{uri}" width="32">'
+    source = ('<!--\n' + 'Hidden source line\n' * 90 + '-->\n\n'
+              'First rendered line.<br>\nSecond rendered line.\n\n'
+              f'Before {inline} and {inline} then {html}.\n\n'
+              f'{standalone}\n\n'
+              f'| Image |\n| --- |\n| {reference} |\n\n[p]: {uri}\n')
+    item = mount_markdown_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 6)
+    images = wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      const images = [...panel?._pmView?.dom.querySelectorAll('img.prosemirror-image') || []];
+      return images.length === 5 && images.every(img => img.naturalWidth) && images;
+    """, item))
+    for index, markup, start in [
+        (1, inline, source.index(inline, source.index(inline) + len(inline))),
+        (2, html, source.index(html)),
+        (3, standalone, source.index(standalone)),
+        (4, reference, source.index(reference)),
+    ]:
+        images[index].click()
+        wait.until(lambda driver: visible_markdown_source_selection(driver, item, start, markup, source),
+                   f'No visible matching source highlight for image {index}')
+
+
+def test_markdown_image_source_highlight_follows_selection(browser, tmp_path):
+    markup = ('<img alt="Pixel" width="32" src="data:image/png;base64,'
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">')
+    item = mount_markdown_split(browser, tmp_path, f'# Example\n\nBefore {markup} after.\n')
+    wait = WebDriverWait(browser, 6)
+    image = wait.until(lambda driver: driver.execute_script("""
+      const image = panelNodes.get(arguments[0])?._pmView?.dom.querySelector('img');
+      return image?.naturalWidth && image;
+    """, item))
+    heading = browser.find_element(By.CSS_SELECTOR, '.ProseMirror h1')
+
+    def selection():
+        return browser.execute_script("""
+          const view = panelNodes.get(arguments[0])._cmView;
+          const {from, to} = view.state.selection.main;
+          return view.state.doc.sliceString(from, to);
+        """, item)
+
+    image.click()
+    wait.until(lambda _: selection() == markup)
+    ActionChains(browser).move_to_element(heading).perform()
+    browser.execute_async_script("requestAnimationFrame(() => arguments[0]())")
+    assert selection() == markup, 'Moving the pointer must preserve the selected image source'
+    browser.execute_script("panelNodes.get(arguments[0])._pmView.dom.blur()", item)
+    assert selection() == markup, 'Losing focus alone must preserve the selected image source'
+    browser.execute_script("panelNodes.get(arguments[0])._pmView.focus()", item)
+    native_logical_key(browser, 'ArrowRight')
+    wait.until(lambda _: selection() == '', 'Keyboard movement away from the image must clear its source highlight')
+    image.click()
+    wait.until(lambda _: selection() == markup)
+    heading.click()
+    wait.until(lambda _: selection() == '', 'Clicking prose must clear the image source highlight')
+    image.click()
+    wait.until(lambda _: selection() == markup)
+    browser.execute_script("""
+      panelNodes.get(arguments[0])._cmView.dispatch({selection: {anchor: 2, head: 9}});
+    """, item)
+    heading.click()
+    assert selection() == 'Example'
+
+
+def test_markdown_viewedit_equations_select_their_exact_source(browser, tmp_path):
+    inline = '$x^2$'
+    parens = r'\(y + 1\)'
+    display = '$$\nz^2\n$$'
+    quoted = '> \\[\n> u^2\n> \\]'
+    listed = '- $$\n  v + 1\n  $$'
+    table = r'$a \| b$'
+    source = (f'# Math\n\nLiteral `{inline}` and <code>{inline}</code>, then {inline} and {inline}, then {parens}.\n\n'
+              f'{display}\n\n{quoted}\n\n{listed}\n\n| Equation |\n| --- |\n| {table} |\n')
+    item = mount_markdown_split(browser, tmp_path, source, math=True)
+    wait = WebDriverWait(browser, 6)
+    equations = wait.until(lambda driver: driver.execute_script("""
+      const equations = [...panelNodes.get(arguments[0])?._pmView?.dom.querySelectorAll('[data-tex-source] .katex-html') || []];
+      return equations.length === 7 && equations;
+    """, item))
+
+    def selection():
+        return browser.execute_script("""
+          const cm = panelNodes.get(arguments[0])._cmView, {from, to} = cm.state.selection.main;
+          return [from, cm.state.doc.sliceString(from, to), cm.state.doc.toString()];
+        """, item)
+
+    for index, (markup, start) in enumerate([
+        (inline, source.index(inline, source.index('then'))),
+        (inline, source.index(inline, source.index('and', source.index('then')))),
+        (parens, source.index(parens)),
+        (display, source.index(display)),
+        (quoted[2:], source.index(quoted) + 2),
+        (listed[2:], source.index(listed) + 2),
+        (table, source.index(table)),
+    ]):
+        equations[index].click()
+        assert selection() == [start, markup, source], (index, selection())
+        wait.until(lambda driver: visible_markdown_source_selection(driver, item, start, markup, source))
+    heading = browser.find_element(By.CSS_SELECTOR, '.ProseMirror h1')
+    ActionChains(browser).move_to_element(heading).perform()
+    assert selection() == [source.index(table), table, source]
+    heading.click()
+    wait.until(lambda _: selection()[1] == '')
+
+
+def test_markdown_viewedit_save_preserves_explicit_html_breaks(browser, tmp_path):
+    code = '```html\n<span>Literal</span><br>\n' + 'continued ' + '\\' + '\nline\n```'
+    source = f'# Example\n\nOne<br>\nTwo\n\nThree<br />\n<br>\nFour\n\n{code}\n\n<!-- Keep this -->\n'
+    item = mount_markdown_split(browser, tmp_path, source)
+    WebDriverWait(browser, 6).until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]), view = panel?._pmView;
+      if (!panel?._cmView || !view?.editable) return false;
+      const heading = view.dom.querySelector('h1');
+      const position = view.posAtDOM(heading, 0) + 1;
+      view.focus();
+      setProseMirrorSelection(view, position, position);
+      return view.hasFocus();
+    """, item))
+    native_logical_key(browser, 'x')
+    state = browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]), view = panel._pmView;
+      flushProseMirrorSource(panel, panel.dataset.filePath);
+      const source = panel._cmView.state.doc.toString();
+      const reopened = panel._pmParser.parse(source);
+      return {source, same: reopened.eq(view.state.doc),
+        rows: [...view.dom.querySelectorAll('p')].map(p => p.querySelectorAll('br').length)};
+    """, item)
+    assert state['same'] and state['rows'] == [1, 2], state
+    assert state['source'].startswith('# Exxample\n') and '<!-- Keep this -->' in state['source'], state
+    assert code in state['source'], state
+
+
+def test_viewedit_link_hover_reveals_destination_after_one_and_a_half_seconds(browser, tmp_path):
+    url = 'https://example.test/docs?q=a&amp;b#topic'
+    item = mount_markdown_split(browser, tmp_path, f'[**Docs**]({url}) and [Local](./local.md)')
+    WebDriverWait(browser, 4).until(lambda driver: driver.execute_script("""
+      const link = panelNodes.get(arguments[0])?._pmView?.dom.querySelector('a');
+      if (!link) return false;
+      const rect = link.getBoundingClientRect();
+      return link.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+    """, item))
+    links = browser.find_elements(By.CSS_SELECTOR, '[data-prosemirror-editor] a[href]')
+    browser.execute_script("""
+      panelNodes.get(arguments[0])._pmView.dom.addEventListener('pointerover', event => {
+        if (event.target.closest('a')) window.__linkHoveredAt = performance.now();
+      });
+    """, item)
+    ActionChains(browser).move_to_element(links[0]).perform()
+    assert browser.execute_script('return arguments[0].matches(":hover") && !!window.__linkHoveredAt', links[0])
+    popup = browser.execute_async_script("""
+      const done = arguments[0];
+      window.__yomuxTestWaitFor(() => document.querySelector('.viewedit-link-tooltip'), {timeoutMs: 4000})
+        .then(node => done({text: node.textContent, elapsed: performance.now() - window.__linkHoveredAt,
+          visible: Boolean(node.getClientRects().length)}), error => done({error: String(error)}));
+    """)
+    assert popup.get('visible') is True and popup['elapsed'] >= 1500, popup
+    assert popup['text'] == 'https://example.test/docs?q=a&b#topic'
+
+    between = browser.execute_script("""
+      const text = document.createTreeWalker(arguments[0].closest('p'), NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = text.nextNode()) && !node.data.includes(' and ')) {}
+      const range = document.createRange();
+      range.setStart(node, 2);
+      range.setEnd(node, 3);
+      const rect = range.getBoundingClientRect();
+      return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};
+    """, links[0])
+    browser.execute_cdp_cmd('Input.dispatchMouseEvent', {'type': 'mouseMoved', **between})
+    action = browser.find_element(By.CSS_SELECTOR, '.viewedit-link-tooltip a')
+    ActionChains(browser).move_to_element(action).perform()
+    assert action.is_displayed()
+
+    ActionChains(browser).move_to_element(links[1]).perform()
+    assert not browser.find_elements(By.CSS_SELECTOR, '.viewedit-link-tooltip')
+    tooltip = WebDriverWait(browser, 4).until(
+        lambda driver: driver.find_element(By.CSS_SELECTOR, '.viewedit-link-tooltip'))
+    assert tooltip.text == './local.md'
+
+    source = browser.execute_script('return panelNodes.get(arguments[0])._cmView.contentDOM.querySelector(".cm-line")', item)
+    ActionChains(browser).move_to_element(source).perform()
+    assert browser.execute_async_script("""
+      setTimeout(() => arguments[0](Boolean(document.querySelector('.viewedit-link-tooltip'))), 1650);
+    """) is False
+
+
+def test_markdown_table_selection_hides_block_style_dropdowns(browser, tmp_path):
+    item = mount_markdown_split(browser, tmp_path, 'Before\n\n| Header |\n| --- |\n| Cell |\n\nAfter\n')
+    wait = WebDriverWait(browser, 5)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !!panel?._pmView && !!panel._cmView && !!panel.querySelector('.markdown-formatting-toolbar');
+    """, item))
+    for surface in ('view-editor', 'text-editor'):
+        for target, show_styles in [('Before', True), ('Header', False), ('Cell', False), ('After', True)]:
+            state = browser.execute_script("""
+              const [item, surface, target] = arguments;
+              const panel = panelNodes.get(item), view = panel._pmView, cm = panel._cmView;
+              if (surface === 'view-editor') {
+                const node = [...view.dom.querySelectorAll('p,th,td')].find(node => node.textContent === target);
+                const position = view.posAtDOM(node, 0) + 1;
+                view.focus();
+                setProseMirrorSelection(view, position, position);
+              } else {
+                const position = cm.state.doc.toString().indexOf(target) + 1;
+                cm.focus();
+                cm.dispatch({selection: {anchor: position}});
+              }
+              const visible = selector => Boolean(panel.querySelector(selector).getClientRects().length);
+              return [markdownFormattingTarget(panel),
+                visible('[data-format-group="paragraph"]'), visible('[data-format-group="list"]'),
+                visible('[data-markdown-format="bold"]')];
+            """, item, surface, target)
+            assert state == [surface, show_styles, show_styles, True], (surface, target, state)
+
+
+def test_viewedit_table_up_down_stays_in_the_same_column(browser, tmp_path):
+    source = '| Left | Middle | Right |\n| --- | --- | --- |\n| One | **Target** | Three |\n| Four | x | Six |\n| Seven | | Nine |\n\nAfter\n'
+    item = mount_markdown_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 5)
+    wait.until(lambda driver: driver.execute_script("""
+      const view = panelNodes.get(arguments[0])?._pmView;
+      const cell = view?.dom.querySelector('tr:nth-child(2) td:nth-child(2)');
+      if (!cell) return false;
+      view.focus();
+      const start = view.posAtDOM(cell, 0);
+      setProseMirrorSelection(view, start + 3, start + 3);
+      return view.hasFocus();
+    """, item))
+    for key, row, offset in [
+        (Keys.ARROW_DOWN, 2, 1), (Keys.ARROW_DOWN, 3, 0), (Keys.ARROW_DOWN, 3, 0),
+        (Keys.ARROW_UP, 2, 0), (Keys.ARROW_UP, 1, 0), (Keys.ARROW_UP, 0, 0), (Keys.ARROW_UP, 0, 0),
+    ]:
+        ActionChains(browser).send_keys(key).perform()
+        caret = """
+          const panel = panelNodes.get(arguments[0]), view = panel?._pmView;
+          if (!view) return null;
+          const {selection} = view.state, cell = view.domAtPos(selection.head).node;
+          const element = cell.nodeType === 1 ? cell : cell.parentElement;
+          const target = element.closest('td,th');
+          return [target?.parentElement.rowIndex, target?.cellIndex,
+            selection.$head.parentOffset, panel._cmView.state.doc.toString()];
+        """
+        # A native arrow key can settle after send_keys returns on a loaded host.
+        expected = [row, 1, offset, source]
+        try:
+            wait.until(lambda driver: driver.execute_script(caret, item) == expected)
+        except TimeoutException as error:
+            raise AssertionError(f'{key!r}: {browser.execute_script(caret, item)} != {expected}') from error
+
+
+def test_viewedit_table_menu_edits_clicked_cell_and_round_trips(browser, tmp_path):
+    markdown = '| A | B |\n| :--- | ---: |\n| **C** | D |\n| E | F |\n\n| Only |\n| --- |\n'
+    item = mount_markdown_split(browser, tmp_path, markdown)
+    original = [['A', 'B'], ['C', 'D'], ['E', 'F']]
+    cases = [
+        ('Insert column left', 0, 1, 1, [['A', '', 'B'], ['C', '', 'D'], ['E', '', 'F']]),
+        ('Insert column right', 0, 1, 1, [['A', 'B', ''], ['C', 'D', ''], ['E', 'F', '']]),
+        ('Insert row above', 0, 0, 1, [['', ''], *original]),
+        ('Insert row below', 0, 1, 1, [*original[:2], ['', ''], original[2]]),
+        ('Delete row', 0, 0, 1, original[1:]),
+        ('Delete column', 0, 1, 1, [['A'], ['C'], ['E']]),
+        ('Delete row', 1, 0, 0, None),
+        ('Delete column', 1, 0, 0, None),
+    ]
+    for label, table, row, column, expected in cases:
+        cell = WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("""
+          const [item, table, row, column] = arguments;
+          const view = panelNodes.get(item)?._pmView;
+          return view?.dom.querySelectorAll('table')[table]?.rows[row]?.cells[column] || false;
+        """, item, table, row, column))
+        ActionChains(browser).context_click(cell).perform()
+        menu = WebDriverWait(browser, 4).until(
+            lambda driver: driver.find_element(By.CSS_SELECTOR, '.markdown-table-context-menu.context-menu-icon-rows'))
+        buttons = menu.find_elements(By.CSS_SELECTOR, 'button')
+        assert [button.text for button in buttons[-2:]] == ['Delete row', 'Delete column']
+        geometry = browser.execute_script("""
+          return [...arguments[0].querySelectorAll('.tab-directional-action-icon')].map(icon => {
+            const box = icon.getBoundingClientRect();
+            const gutter = icon.parentElement.getBoundingClientRect();
+            const label = icon.closest('.context-menu-line').querySelector('.context-menu-label').getBoundingClientRect();
+            return {direction: icon.className, width: box.width, height: box.height,
+              gap: label.left - box.right,
+              verticalOverflow: Math.max(gutter.top - box.top, box.bottom - gutter.bottom),
+              centerError: Math.abs((box.top + box.bottom) - (label.top + label.bottom)) / 2};
+          });
+        """, menu)
+        assert len(geometry) == 4, geometry
+        for icon in geometry:
+            assert icon['width'] > icon['height'] > 0 and icon['gap'] >= 2, icon
+            assert icon['verticalOverflow'] <= 1 and icon['centerError'] <= 1, icon
+        action = next(button for button in buttons if button.text == label)
+        assert action.find_elements(By.CSS_SELECTOR, '.tab-directional-action-icon, [data-menu-icon="delete"]')
+        action.click()
+        state = browser.execute_script("""
+          const panel = panelNodes.get(arguments[0]), view = panel._pmView;
+          flushProseMirrorSource(panel, panel.dataset.filePath);
+          const source = panel._cmView.state.doc.toString();
+          return {
+            tables: [...view.dom.querySelectorAll('table')].map(table => [...table.rows].map(row =>
+              [...row.cells].map(cell => cell.textContent))),
+            headerCounts: [...view.dom.querySelectorAll('table')].map(table => [...table.rows].map(row =>
+              [...row.cells].filter(cell => cell.tagName === 'TH').length)),
+            roundTrip: panel._pmParser.parse(source).eq(view.state.doc),
+            source,
+          };
+        """, item)
+        assert state['tables'] == ([original] if expected is None else [expected, [['Only']]]), (label, state)
+        assert state['headerCounts'] == [[len(rows[0]), *([0] * (len(rows) - 1))] for rows in state['tables']], state
+        assert state['roundTrip'], (label, state)
+        native_logical_key(browser, 'z', [native_editor_modifier(browser)])
+        assert browser.execute_script("return serializeProseMirrorSource(panelNodes.get(arguments[0]))", item) == markdown
+
+
+def test_viewedit_table_menu_offers_inline_formatting_and_column_alignment(browser, tmp_path):
+    markdown = 'Outside text\n\n| A | B |\n| :--- | ---: |\n| Cell | Target |\n'
+    item = mount_markdown_split(browser, tmp_path, markdown)
+    wait = WebDriverWait(browser, 5)
+    target = wait.until(lambda driver: driver.execute_script("""
+      return panelNodes.get(arguments[0])?._pmView?.dom.querySelector('td:last-child');
+    """, item))
+
+    for previous, label, alignment, delimiter in [
+        ('Align column right', 'Center column', 'center', ':---:'),
+        ('Center column', 'Align column left', 'left', ':---'),
+        ('Align column left', 'Default column alignment', '', '---'),
+        ('Default column alignment', 'Align column right', 'right', '---:'),
+    ]:
+        ActionChains(browser).context_click(target).perform()
+        menu = wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.markdown-table-context-menu'))
+        commands = {button.get_attribute('data-markdown-command')
+                    for button in menu.find_elements(By.CSS_SELECTOR, '[data-markdown-command]')}
+        assert commands == {'bold', 'italic', 'underline', 'strike', 'code', 'clearInline'}
+        buttons = {button.get_attribute('aria-label'): button for button in menu.find_elements(By.CSS_SELECTOR, 'button')}
+        assert 'Paste' not in buttons and 'Add URL' in buttons
+        assert buttons[previous].get_attribute('aria-checked') == 'true'
+        assert buttons[label].get_attribute('aria-checked') == 'false'
+        buttons[label].click()
+        state = browser.execute_script(r"""
+          const panel = panelNodes.get(arguments[0]), view = panel._pmView;
+          flushProseMirrorSource(panel, panel.dataset.filePath);
+          const source = panel._cmView.state.doc.toString();
+          return {align: [...view.dom.querySelectorAll('tr')].map(row => [...row.cells].map(cell => cell.style.textAlign)),
+            delimiter: source.split('\n').find(line => line.startsWith('| :--- |')),
+            roundTrip: panel._pmParser.parse(source).eq(view.state.doc)};
+        """, item)
+        assert state == {'align': [['left', alignment], ['left', alignment]],
+                         'delimiter': f'| :--- | {delimiter} |', 'roundTrip': True}
+        target = browser.execute_script("""
+          return panelNodes.get(arguments[0])._pmView.dom.querySelector('td:last-child');
+        """, item)
+
+    outside = browser.execute_script("""
+      const view = panelNodes.get(arguments[0])._pmView;
+      const outside = view.dom.querySelector('p');
+      const start = view.posAtDOM(outside, 0);
+      setProseMirrorSelection(view, start, start + outside.textContent.length);
+      return outside;
+    """, item)
+    ActionChains(browser).context_click(target).perform()
+    menu = wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.markdown-table-context-menu'))
+    menu.find_element(By.CSS_SELECTOR, '[data-markdown-command="bold"]').click()
+    assert browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]), dom = panel._pmView.dom;
+      return dom.querySelector('td:last-child strong')?.textContent === 'Target' &&
+        !dom.querySelector('p strong') && serializeProseMirrorSource(panel).includes('**Target**');
+    """, item)
+    ActionChains(browser).context_click(outside).perform()
+    menu = wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.markdown-preview-context-menu'))
+    assert len(menu.find_elements(By.CSS_SELECTOR, '[data-markdown-command="h1"], [data-markdown-command="bullet"]')) == 2
+
+
 def test_markdown_native_bold_second_occurrence(browser, tmp_path):
     setup_formatting_editor(browser, tmp_path)
     native_logical_key(browser, 'b', ['ctrl'])
     assert browser.execute_script('return serializeProseMirrorSource(formattingPanel)') == 'same **same**'
+
+
+def test_markdown_split_source_updates_preview_before_serializing(browser, tmp_path):
+    setup_formatting_editor(browser, tmp_path)
+    original = browser.execute_script("""
+      const panel = formattingPanel, view = panel._cmView;
+      view.focus();
+      view.dispatch({selection: {anchor: view.state.doc.length}});
+      window.__commitBeforePreviewTest = commitCodeMirrorSource;
+      commitCodeMirrorSource = () => false;
+      return fileEditorPanelState(panel).content;
+    """)
+    try:
+        native_logical_key(browser, 'x')
+        result = browser.execute_async_script("""
+          const done = arguments[0], panel = formattingPanel;
+          window.__yomuxTestWaitFor(() => panel._pmView.dom.textContent.endsWith('x'), {
+            timeoutMs: 1500, description: 'preview refresh while canonical commit is held'
+          }).then(() => done({
+            text: panel._cmView.state.doc.toString(), canonical: fileEditorPanelState(panel).content
+          }), error => done(String(error)));
+        """)
+        assert result == {'text': original + 'x', 'canonical': original}, result
+    finally:
+        browser.execute_script("""
+          const panel = formattingPanel;
+          commitCodeMirrorSource = window.__commitBeforePreviewTest;
+          flushCodeMirrorSource(panel, panel._cmPath);
+        """)
+    assert browser.execute_script('return fileEditorPanelState(formattingPanel).content') == original + 'x'
+
+
+def test_markdown_split_undo_reconciles_preview_before_editing_it(browser, tmp_path):
+    setup_formatting_editor(browser, tmp_path)
+    original = browser.execute_script("""
+      const panel = formattingPanel, view = panel._cmView;
+      view.focus();
+      view.dispatch({selection: {anchor: view.state.doc.length}});
+      window.__commitBeforeUndoTest = commitCodeMirrorSource;
+      commitCodeMirrorSource = () => false;
+      return fileEditorPanelState(panel).content;
+    """)
+    try:
+        native_logical_key(browser, 'x')
+        result = browser.execute_async_script("""
+          const done = arguments[0];
+          window.__yomuxTestWaitFor(() => formattingPanel._pmView.dom.textContent.endsWith('x')).then(() => {
+            window.__scheduleBeforeUndoTest = scheduleCodeMirrorSplitPreview;
+            scheduleCodeMirrorSplitPreview = () => true;
+            commitCodeMirrorSource = window.__commitBeforeUndoTest;
+            done(true);
+          }, error => done(String(error)));
+        """)
+        assert result is True, result
+        native_logical_key(browser, 'z', [native_editor_modifier(browser)])
+        result = browser.execute_script("""
+          const panel = formattingPanel;
+          panel._pmView.focus();
+          return [panel._cmView.state.doc.toString(), panel._pmView.dom.textContent];
+        """)
+        assert result == [original, original], result
+    finally:
+        browser.execute_script("""
+          commitCodeMirrorSource = window.__commitBeforeUndoTest;
+          if (window.__scheduleBeforeUndoTest) scheduleCodeMirrorSplitPreview = window.__scheduleBeforeUndoTest;
+        """)
 
 
 @pytest.mark.parametrize('surface', ['text-editor', 'view-editor'])
@@ -136,14 +763,16 @@ def test_markdown_source_table_and_setext_native_formatting(browser, tmp_path):
     """)
     native_logical_key(browser, '1', ['ctrl', 'alt'])
     assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == '# title'
+    reference_image = ('![ref][]\n\n[ref]: data:image/png;base64,'
+                       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
     browser.execute_script("""
       const view = formattingPanel._cmView;
-      const source = '![ref][]\\n\\n[ref]: https://x';
+      const source = arguments[0];
       view.dispatch({changes:{from:0,to:view.state.doc.length,insert:source},selection:{anchor:0,head:source.length}});
       view.focus();
-    """)
+    """, reference_image)
     native_logical_key(browser, 'b', ['ctrl'])
-    assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == '![ref][]\n\n[ref]: https://x'
+    assert browser.execute_script('return formattingPanel._cmView.state.doc.toString()') == reference_image
 
 
 def test_markdown_native_source_range_and_typing_toggle(browser, tmp_path):

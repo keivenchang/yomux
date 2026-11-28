@@ -67,7 +67,7 @@ function removePaneFromLayout(item) {
 }
 
 // Placeholders are deliberate drop targets after a split/move, but they are still disposable UI.
-// Keep their dismissal on the same layout transaction path as pane-frame close so Dockview, the
+// Keep their dismissal on the same layout transaction path so Dockview, the
 // DOM renderer, URL state, and shared layout snapshots cannot disagree about which leaf vanished.
 function canCloseEmptyPane(slot, slots = layoutSlots) {
   if (!slot || !paneIsPlaceholder(slot, slots) || slotIsSidePane(slot, slots)) return false;
@@ -86,30 +86,6 @@ function closeEmptyPaneFromLayout(slot) {
     prune: false,
   });
   return true;
-}
-
-function emptyPaneCanClose(slot, slots = layoutSlots) {
-  return canCloseEmptyPane(slot, slots);
-}
-
-function closePaneFrameItem(item) {
-  const emptySlot = typeof dockviewEmptyPaneSlot === 'function' ? dockviewEmptyPaneSlot(item) : null;
-  if (emptySlot) {
-    closeEmptyPaneFromLayout(emptySlot);
-    return;
-  }
-  if (isTmuxSession(item)) return killTmuxSession(item);
-  if (isFileEditorItem(item) || gitDiffItemPath(item)) return closeLayoutTabItem(item);
-  const resolved = resolveLayoutItem(item);
-  if (isFileExplorerItem(resolved)) {
-    removeSessionFromLayout(resolved);
-    return;
-  }
-  if (narrowPaneFrameActionTargetsTab(resolved)) {
-    removeSessionFromLayout(resolved, {focusSession: nextNarrowPaneFrameItem(resolved)});
-    return;
-  }
-  removePaneFromLayout(resolved);
 }
 
 function shouldPreserveClosedPaneSlot(slot) {
@@ -1558,20 +1534,39 @@ function terminalContextMenuPreservesNativeBehavior(session, container) {
   }).preserveNativeContextMenu;
 }
 
-function terminalScrollClientKind(session, container) {
+function terminalWindowViewScrollCapability(session) {
+  const view = tabberViewDescriptorForSession(session);
+  if (!view) return null;
+  const source = view.sourceSession;
+  const windows = tmuxSignalWindowsForSession(source);
+  const signal = windows.find(window => window.window_id === view.windowId);
+  const panes = transcriptMetadataState.payload.sessions?.[source]?.panes;
+  const window = signal || (!windows.length && view.windowIndex >= 0
+    ? {panes: panes?.filter(pane => Number(pane.window ?? pane.window_index) === view.windowIndex)}
+    : null);
+  return terminalContextMenuCapabilityForSession(source, {
+    paneTarget: () => terminalContextMenuPaneTargetForWindow(window),
+  });
+}
+
+function terminalScrollCapability(session, container) {
   const containerTarget = terminalContextMenuPaneTargetForContainer(container);
   if (containerTarget) {
     return terminalContextMenuCapabilityForSession(session, {
       paneTarget: () => containerTarget,
-    }).clientKind;
+    });
   }
   // A live terminal may receive the signal snapshot before its cheap DOM target handoff runs. Only
   // real terminal elements may use this narrow fallback; plain test/data objects with no identity
   // must remain fail-closed.
-  if (container?.nodeType !== 1) return '';
+  if (container?.nodeType !== 1) return null;
   return terminalContextMenuCapabilityForSession(session, {
     paneTarget: () => terminalContextMenuPaneTargetForSession(session),
-  }).clientKind;
+  });
+}
+
+function terminalScrollClientKind(session, container) {
+  return terminalScrollCapability(session, container)?.clientKind || '';
 }
 
 function terminalUsesAppWheel(session, container) {
@@ -3762,6 +3757,8 @@ function observeTerminalResize(session, container) {
 let dispatchingSyntheticWheel = false;
 // Per-session fractional remainder so small touchpad deltas still accumulate into whole lines.
 const altScreenWheelRemainder = new Map();
+const terminalWheelGestures = new WeakMap();
+const terminalWheelGestureGapMs = 150;
 // Trackpad motion without mouse tracking becomes page keys, so keep its line budget separately.
 const altScreenPageWheelRemainder = new Map();
 
@@ -3813,11 +3810,13 @@ function enableTerminalScroll(session, term, container) {
     const whole = Math.trunc(state.pendingLines);
     if (!whole) return false;
     state.pendingLines -= whole;
-    return routeTerminalScrollLines(session, term, container, whole, {
+    const handled = routeTerminalScrollLines(session, term, container, whole, {
       source: 'touch',
       clientX: state.lastX,
       clientY: state.lastY,
     });
+    recordTerminalScrollRoute(session, term, container, 'touch', handled);
+    return handled;
   };
   const queueTouchLines = (state, signedLines) => {
     if (terminalUsesOpenCodeAppWheel(session, container)) {
@@ -3828,7 +3827,8 @@ function enableTerminalScroll(session, term, container) {
       const whole = Math.trunc(state.pendingLines);
       if (!whole) return;
       state.pendingLines -= whole;
-      routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
+      recordTerminalScrollRoute(session, term, container, 'touch',
+        routeTerminalScrollLines(session, term, container, whole, {source: 'touch'}));
       return;
     }
     state.pendingLines += signedLines;
@@ -3993,18 +3993,48 @@ function enableTerminalScroll(session, term, container) {
       pageWheelSignedLines: terminalWheelSignedLines(event, term.rows, Number.POSITIVE_INFINITY),
       discreteWheel: terminalWheelEventIsDiscrete(event),
       discreteWheelCount: terminalWheelDiscreteNotchCount(event),
+      modifiedWheel: event.altKey || event.metaKey,
       forceTmuxScrollback: event.shiftKey,
       clientX: event.clientX,
       clientY: event.clientY,
     });
+    recordTerminalScrollRoute(session, term, container, 'wheel', handled);
     if (!handled) return;
     event.preventDefault();
     event.stopPropagation();
   }, {capture: true, passive: false});
 }
 
+// Scroll failures are silent. Log each change in how a terminal routes wheel or touch scrolling,
+// for YO!Stats Logs. Touch routing reads `alternate` and `mouse` from snapshots that can go stale.
+function recordTerminalScrollRoute(session, term, container, source, handled) {
+  const view = terminalWindowViewScrollCapability(session);
+  const capability = view ?? terminalScrollCapability(session, container);
+  const route = JSON.stringify({handled, view: Boolean(view), kind: capability?.clientKind || '', pane: capability?.paneTarget || '',
+    mouse: term?.modes?.mouseTrackingMode || 'none', alternate: sessionPaneIsAlternateScreen(session), grid: `${term?.cols}x${term?.rows}`});
+  container._terminalScrollRoutes ||= {};
+  if (container._terminalScrollRoutes[source] === route) return;
+  container._terminalScrollRoutes[source] = route;
+  const label = source === 'touch' ? 'Touch' : 'Wheel';
+  recordJsDebugEvent('terminal', {category: 'terminal', ok: true, message: `${label} route for ${session}: ${route}`});
+}
+
 function routeTerminalScrollLines(session, term, container, signedLines, options = {}) {
   if (!signedLines) return false;
+  if (options.forceTmuxScrollback) terminalWheelGestures.delete(container);
+  const appWheel = !options.forceTmuxScrollback && options.source === 'wheel';
+  const view = appWheel ? terminalWindowViewScrollCapability(session) : null;
+  const wheel = appWheel ? view ?? terminalScrollCapability(session, container) : null;
+  const directWheel = wheel?.clientKind === 'codex' || (wheel?.clientKind === 'claude' && terminalHasMouseTracking(term));
+  if (directWheel && !(view && options.modifiedWheel)) {
+    // Send directly to the pane so tmux's attached client cannot consume the report. A browser grid
+    // sized differently from the tmux window (another client resized it) would otherwise misplace it.
+    const claude = wheel.clientKind === 'claude';
+    return forwardApplicationWheelReport(session, term, container, signedLines, {
+      ...options, paneTarget: wheel.paneTarget, immediateWheel: true,
+      ...(claude ? {reportsPerStep: 3} : {wheelSpeed: terminalCodexWheelSpeed}),
+    });
+  }
   // xterm already encodes the negotiated mouse protocol and native page keys. The optional
   // tmux diagnostics snapshot may be absent; that must not turn application input into copy mode.
   if (!options.forceTmuxScrollback && (options.source === 'wheel' || options.source === 'page-key')
@@ -4023,13 +4053,10 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
     noteTerminalExplicitInput(session);
     return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
   }
-  if (!options.forceTmuxScrollback && (options.source === 'wheel' || options.source === 'touch')
+  if (!options.forceTmuxScrollback && options.source === 'touch'
     && terminalScrollClientKind(session, container) === 'codex') {
     // The backend writes literal pane input: tmux's client input path can consume mouse reports.
-    forwardApplicationWheelReport(session, term, container, signedLines, {
-      ...options,
-      wheelSpeed: options.source === 'wheel' ? terminalCodexWheelSpeed : 1,
-    });
+    forwardApplicationWheelReport(session, term, container, signedLines, options);
     return true;
   }
   if (!options.forceTmuxScrollback && options.source === 'wheel'
@@ -4066,12 +4093,7 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
       return true;
     }
     if (options.source !== 'touch' || usesMouseReports) {
-      forwardAltScreenWheel(session, container, signedLines, {
-        ...options,
-        wheelSpeed: terminalScrollClientKind(session, container) === 'codex' && options.source === 'wheel'
-          ? terminalCodexWheelSpeed
-          : 1,
-      });
+      forwardAltScreenWheel(session, container, signedLines, options);
       return true;
     }
     const command = terminalTouchAlternateCommand(signedLines);
@@ -4114,11 +4136,11 @@ function terminalApplicationPageCount(session, term, signedLines, discreteWheel,
 // one into the app's negotiated mouse protocol and sends it over the data stream, so the alt-screen
 // app scrolls one line per synthetic event — i.e. our full computed line count, not xterm's capped one.
 function forwardAltScreenWheel(session, container, signedLines, options = {}) {
-  if (typeof WheelEvent !== 'function') return;
+  if (typeof WheelEvent !== 'function') return false;
   const node = terminalScreenElement(container);
-  if (!node?.dispatchEvent) return;
-  const count = terminalWheelReportCount(session, signedLines, options.discreteWheel === true, options.wheelSpeed || 1);
-  if (!count) return;
+  if (!node?.dispatchEvent) return false;
+  const count = terminalWheelReportCount(session, container, signedLines, options);
+  if (!count) return options.immediateWheel === true;
   const deltaY = signedLines < 0 ? -1 : 1;
   const {clientX, clientY} = options;
   dispatchingSyntheticWheel = true;
@@ -4129,17 +4151,30 @@ function forwardAltScreenWheel(session, container, signedLines, options = {}) {
   } finally {
     dispatchingSyntheticWheel = false;
   }
+  return true;
 }
 
-function terminalWheelReportCount(session, signedLines, discreteWheel, wheelSpeed = 1) {
+function terminalWheelReportCount(session, container, signedLines, {discreteWheel, wheelSpeed = 1, immediateWheel, paneTarget} = {}) {
   const scaledLines = signedLines * Math.max(0, Number(wheelSpeed) || 0);
   let count;
   if (discreteWheel) {
     altScreenWheelRemainder.delete(session);
+    terminalWheelGestures.delete(container);
     // A physical notch cannot be split across events: always send at least one report so a
     // reduced wheel speed does not make the first notch appear to do nothing.
     const discreteCount = wheelSpeed < 1 ? Math.round(Math.abs(scaledLines)) : Math.ceil(Math.abs(scaledLines));
     count = Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, discreteCount));
+  } else if (immediateWheel) {
+    const now = performanceNow();
+    const direction = Math.sign(signedLines);
+    const socket = terminals.get(session)?.socket;
+    const previous = terminalWheelGestures.get(container);
+    const continuing = previous?.direction === direction && previous.paneTarget === paneTarget
+      && previous.socket === socket && now - previous.at <= terminalWheelGestureGapMs;
+    const accumulated = Math.abs(scaledLines) + (continuing ? previous.remainder : 0);
+    // Deliver the first step now, then subtract it from the gesture's remaining distance.
+    count = Math.min(terminalWheelMaxLinesPerEvent, Math.max(continuing ? 0 : 1, Math.floor(accumulated)));
+    terminalWheelGestures.set(container, {direction, paneTarget, socket, at: now, remainder: accumulated - count});
   } else {
     const accumulated = (altScreenWheelRemainder.get(session) || 0) + scaledLines;
     const whole = Math.trunc(accumulated);
@@ -4151,8 +4186,13 @@ function terminalWheelReportCount(session, signedLines, discreteWheel, wheelSpee
 }
 
 function forwardApplicationWheelReport(session, term, container, signedLines, options = {}) {
-  const count = terminalWheelReportCount(session, signedLines, options.discreteWheel === true, options.wheelSpeed || 1);
-  if (!count) return;
+  if (options.immediateWheel && (readOnlyMode || terminals.get(session)?.socket?.readyState !== WebSocket.OPEN)) {
+    terminalWheelGestures.delete(container);
+    return false;
+  }
+  const steps = terminalWheelReportCount(session, container, signedLines, options);
+  if (!steps) return true;
+  const count = Math.min(terminalWheelMaxLinesPerEvent, steps * (options.reportsPerStep || 1));
   const screen = terminalScreenElement(container);
   const rect = screen?.getBoundingClientRect?.();
   const cell = terminalCellDimensions(term, container);
@@ -4167,16 +4207,16 @@ function forwardApplicationWheelReport(session, term, container, signedLines, op
     ? Math.max(1, Math.min(Number(term?.rows || 1), Math.floor((clientY - rect.top) / cell.height) + 1))
     : 1;
   // xterm renders the tmux window; the server subtracts the destination pane's offsets.
-  sendTerminalApplicationScroll(session, container, {
+  return sendTerminalApplicationScroll(session, container, {
     direction: signedLines < 0 ? 'up' : 'down', count, column, row,
     ...(hasCoordinates ? {global: true} : {}),
-  });
+  }, options.paneTarget);
 }
 
-function sendTerminalApplicationScroll(session, container, scroll) {
+function sendTerminalApplicationScroll(session, container, scroll, paneTarget) {
   const item = terminals.get(session);
   if (readOnlyMode || item?.socket?.readyState !== WebSocket.OPEN) return false;
-  const pane = terminalContextMenuPaneTargetForContainer(container)
+  const pane = paneTarget || terminalContextMenuPaneTargetForContainer(container)
     || terminalContextMenuPaneTargetForSession(session);
   if (!pane) return false;
   item.socket.send(JSON.stringify({type: 'application-scroll', pane, ...scroll}));

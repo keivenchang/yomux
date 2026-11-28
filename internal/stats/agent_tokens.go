@@ -2270,6 +2270,29 @@ func codexForkRepairCatalogSources(catalog *codexForkRepairCatalog) []Transcript
 	return result
 }
 
+type codexForkIdentity struct{ parent, child, source string }
+
+var codexForkHeader = tailfile.RegisterProjection(func(_ []byte, record map[string]any) codexForkIdentity {
+	if record["type"] != "session_meta" {
+		return codexForkIdentity{}
+	}
+	payload, _ := record["payload"].(map[string]any)
+	for _, field := range []string{"id", "thread_id", "forked_from_id", "thread_source"} {
+		if value := payload[field]; value != nil {
+			if _, ok := value.(string); !ok {
+				return codexForkIdentity{}
+			}
+		}
+	}
+	parent, _ := payload["forked_from_id"].(string)
+	source, _ := payload["thread_source"].(string)
+	return codexForkIdentity{parent: parent, child: codexSessionMetaThreadID(payload), source: source}
+})
+
+// codexForkRepairSource reads only the first line of an archived rollout. It
+// reads the file directly rather than through the shared ingestion pages: the
+// header budget counts the bytes actually read, and scanning hundreds of
+// archived headers must not evict the pages live consumers share.
 func codexForkRepairSource(root, path string, maxHeaderBytes int64) (*TranscriptSource, int64, bool, error) {
 	file, info, err := openCodexForkRepairPathNoSymlinks(root, path, false)
 	if err != nil {
@@ -2300,22 +2323,8 @@ func codexForkRepairSource(root, path string, maxHeaderBytes int64) (*Transcript
 	if newline := bytes.IndexByte(header, '\n'); newline >= 0 {
 		header = header[:newline]
 	}
-	var record struct {
-		Type    string `json:"type"`
-		Payload struct {
-			ID           string `json:"id"`
-			ThreadID     string `json:"thread_id"`
-			ForkedFromID string `json:"forked_from_id"`
-			ThreadSource string `json:"thread_source"`
-		} `json:"payload"`
-	}
-	if err := json.Unmarshal(bytes.TrimSpace(header), &record); err != nil || record.Type != "session_meta" {
-		return nil, headerBytesRead, false, nil
-	}
-	payload := map[string]any{"id": record.Payload.ID, "thread_id": record.Payload.ThreadID}
-	parent := record.Payload.ForkedFromID
-	threadSource := record.Payload.ThreadSource
-	child := codexSessionMetaThreadID(payload)
+	record := codexForkHeader.Read(nil, header)
+	parent, child, threadSource := record.parent, record.child, record.source
 	parent = strings.TrimSpace(parent)
 	if len(parent) > 256 {
 		parent = parent[:256]

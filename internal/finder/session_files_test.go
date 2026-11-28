@@ -5,10 +5,12 @@ package finder
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -74,26 +76,68 @@ func sessionFileRows(payload map[string]any) map[string]map[string]any {
 	return rows
 }
 
-func TestSessionFilesRepositoryResolverAcceptsFileAndDirectoryTargets(t *testing.T) {
+func TestSessionFilesTouchedRepositoriesAcceptFileDirectoryAndDeletedTargets(t *testing.T) {
 	root, _ := newCommittedTestRepo(t)
+	outside := t.TempDir()
 	service, err := New(root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer service.Close()
+	touched := map[string]*sessionFileAttribution{
+		root:                               {},
+		filepath.Join(root, "note.txt"):    {},
+		filepath.Join(root, "gone", "x"):   {},
+		filepath.Join(outside, "file.txt"): {},
+	}
+	scopes := make(map[string]*gitHistoryScope)
+	t.Cleanup(func() {
+		for _, scope := range scopes {
+			scope.close()
+		}
+	})
+	repos, warnings, finderErr := service.sessionFilesTouchedRepositories(context.Background(), touched, scopes)
+	if finderErr != nil || len(warnings) != 0 || len(repos) != 1 || repos[0] != root || scopes[root] == nil || len(scopes) != 1 {
+		t.Fatalf("touched repositories = %v (scopes %d, warnings %v), error=%#v; want only %q", repos, len(scopes), warnings, finderErr, root)
+	}
+}
 
-	for _, target := range []string{root, filepath.Join(root, "note.txt")} {
-		repo, finderErr := service.sessionFilesRepositoryForTarget(context.Background(), target, false)
-		if finderErr != nil || repo != root {
-			t.Fatalf("repository for %q = %q, error=%#v; want %q", target, repo, finderErr, root)
+func TestSessionFilesSkipsTouchedRepositoryGitCannotOpenWithWarning(t *testing.T) {
+	isolateSessionFilesTestHome(t)
+	good, _ := newCommittedTestRepo(t)
+	unsafe, _ := newCommittedTestRepo(t)
+	for _, repo := range []string{good, unsafe} {
+		if err := os.WriteFile(filepath.Join(repo, "note.txt"), []byte("changed\n"), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	repo, finderErr := service.sessionFilesRepositoryForTouchedPath(context.Background(), filepath.Join(root, "missing.txt"))
-	if finderErr != nil || repo != root {
-		t.Fatalf("repository for missing transcript file = %q, error=%#v; want %q", repo, finderErr, root)
+	// Finder refuses symlinked Git metadata that Git itself would follow.
+	config := filepath.Join(unsafe, ".git", "config")
+	if err := os.Rename(config, config+".regular"); err != nil {
+		t.Fatal(err)
 	}
-	if _, finderErr := service.sessionFilesRepositoryForTarget(context.Background(), filepath.Join(root, "missing-directory"), false); finderErr == nil || finderErr.Code != "path_not_found" {
-		t.Fatalf("missing candidate root error = %#v, want path_not_found", finderErr)
+	if err := os.Symlink("config.regular", config); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	transcript := writeSessionFilesTranscript(t, claudeEditRecord(filepath.Join(good, "note.txt")), claudeEditRecord(filepath.Join(unsafe, "note.txt")))
+	service, err := New(good, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	agent := SessionFileAgent{Kind: "claude", CWD: good, Transcript: transcript}
+	indexSessionFileAgents(t, service, agent)
+
+	payload, finderErr := service.SessionFilesWithAgentsStreamHints(context.Background(), "s1", nil, nil, []SessionFileAgent{agent}, 24, "", "", nil, nil)
+	if finderErr != nil {
+		t.Fatalf("one unopenable repository failed the whole request: %#v", finderErr)
+	}
+	if repos := sessionFilesRepositoryList(t, payload); len(repos) != 1 || repos[0] != good {
+		t.Fatalf("repositories = %v, want only %q", repos, good)
+	}
+	warnings := payload["warnings"].([]any)
+	if len(warnings) != 1 || !strings.Contains(warnings[0].(string), unsafe) {
+		t.Fatalf("warnings = %#v, want one naming %s", warnings, unsafe)
 	}
 }
 
@@ -126,7 +170,7 @@ func TestSessionFilesKnownRepositoryReusesMostSpecificScope(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := sessionFilesRepositoryScopePath(test.path, true)
+			path := sessionFilesExistingDirectory(test.path)
 			got, ok := sessionFilesKnownRepository(path, scopes)
 			if got != test.want || ok != test.ok {
 				t.Fatalf("known repository = (%q, %t), want (%q, %t)", got, ok, test.want, test.ok)
@@ -142,7 +186,7 @@ func TestSessionFilesKnownRepositoryDoesNotCrossUnregisteredNestedRepository(t *
 		t.Fatal(err)
 	}
 	scopes := map[string]*gitHistoryScope{root: {repo: root}}
-	path := sessionFilesRepositoryScopePath(filepath.Join(nestedRepo, "missing.jsonl"), true)
+	path := sessionFilesExistingDirectory(filepath.Join(nestedRepo, "missing.jsonl"))
 	if got, ok := sessionFilesKnownRepository(path, scopes); ok {
 		t.Fatalf("known repository = (%q, %t), want no reusable outer scope across the nested .git boundary", got, ok)
 	}
@@ -324,10 +368,10 @@ func TestSessionFilesWithAgentsKeepsCleanTranscriptTouchedFilesAndWindowAttribut
 		t.Fatal(err)
 	}
 	defer service.Close()
+	agent := SessionFileAgent{Kind: "claude", CWD: root, Transcript: transcript, PaneTarget: "s1:2.3", Window: "2", WindowIndex: 2, Pane: "3"}
+	indexSessionFileAgents(t, service, agent)
 
-	payload, finderErr := service.SessionFilesWithAgents(context.Background(), "s1", []string{root}, []SessionFileAgent{
-		{Kind: "claude", CWD: root, Transcript: transcript, PaneTarget: "s1:2.3", Window: "2", WindowIndex: 2, Pane: "3"},
-	}, 24, "", "", nil)
+	payload, finderErr := service.SessionFilesWithAgents(context.Background(), "s1", nil, []SessionFileAgent{agent}, 24, "", "", nil)
 	if finderErr != nil {
 		t.Fatal(finderErr)
 	}
@@ -362,10 +406,10 @@ func TestSessionFilesWithAgentsMergesTranscriptAttributionIntoGitRows(t *testing
 		t.Fatal(err)
 	}
 	defer service.Close()
+	agent := SessionFileAgent{Kind: "codex", CWD: root, Transcript: transcript, PaneTarget: "s1:0.0", Window: "0", WindowIndex: 0, Pane: "0"}
+	indexSessionFileAgents(t, service, agent)
 
-	payload, finderErr := service.SessionFilesWithAgents(context.Background(), "s1", []string{root}, []SessionFileAgent{
-		{Kind: "codex", CWD: root, Transcript: transcript, PaneTarget: "s1:0.0", Window: "0", WindowIndex: 0, Pane: "0"},
-	}, 24, "", "", nil)
+	payload, finderErr := service.SessionFilesWithAgents(context.Background(), "s1", nil, []SessionFileAgent{agent}, 24, "", "", nil)
 	if finderErr != nil {
 		t.Fatal(finderErr)
 	}
@@ -631,6 +675,31 @@ func TestSessionFilesStreamRecomputesAttributionOncePerRepository(t *testing.T) 
 	t.Setenv("HOME", t.TempDir())
 	root, _ := newCommittedTestRepo(t)
 	parent := filepath.Dir(root)
+	externalRepo := filepath.Join(parent, "external-repo")
+	if err := os.MkdirAll(externalRepo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-C", externalRepo, "init", "-q"},
+		{"-C", externalRepo, "config", "user.name", "Session Files Test"},
+		{"-C", externalRepo, "config", "user.email", "session-files@example.invalid"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	externalFile := filepath.Join(externalRepo, "external.txt")
+	if err := os.WriteFile(externalFile, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", externalRepo, "add", "external.txt"}, {"-C", externalRepo, "commit", "-qm", "initial"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	if err := os.WriteFile(externalFile, []byte("after\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	second := filepath.Join(root, "nested", "second.txt")
 	nested := filepath.Join(root, "nested", "old.txt")
 	agentCWD := filepath.Join(parent, "agent")
@@ -659,23 +728,23 @@ func TestSessionFilesStreamRecomputesAttributionOncePerRepository(t *testing.T) 
 	lines := []string{
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"` + nested + `"}}]}}`,
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"` + second + `"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"` + externalFile + `"}}]}}`,
 	}
 	if err := os.WriteFile(transcript, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
-	}
-	if attributed, ok := scanSessionTranscript(transcript, agent, time.Now().Add(-24*time.Hour)); !ok || len(attributed) != 2 {
-		t.Fatalf("transcript fixture attributions = %#v, parsed=%t", attributed, ok)
-	}
-	if attributed := collectSessionFileAttributions(context.Background(), []SessionFileAgent{agent}, []string{parent}, 24); len(attributed) != 2 {
-		t.Fatalf("session attribution scan = %#v, want both transcript paths", attributed)
 	}
 	service, err := New(parent, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer service.Close()
+	indexSessionFileAgents(t, service, agent)
+	if attributed, _ := service.sessionFileAttributions(context.Background(), []SessionFileAgent{agent}, 24); len(attributed) != 3 {
+		t.Fatalf("session attributions = %v, want all three transcript paths", attributionPaths(attributed))
+	}
 
 	combinedDiffCalls := 0
+	commandMu := sync.Mutex{}
 	originalExec := execCommandContext
 	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
 		isDiff, hasRaw, hasNumstat := false, false, false
@@ -685,7 +754,9 @@ func TestSessionFilesStreamRecomputesAttributionOncePerRepository(t *testing.T) 
 			hasNumstat = hasNumstat || arg == "--numstat"
 		}
 		if isDiff && hasRaw && hasNumstat {
+			commandMu.Lock()
 			combinedDiffCalls++
+			commandMu.Unlock()
 		}
 		command := exec.CommandContext(ctx, "git", args...)
 		command.ExtraFiles = extraFiles
@@ -702,8 +773,8 @@ func TestSessionFilesStreamRecomputesAttributionOncePerRepository(t *testing.T) 
 	if finderErr != nil {
 		t.Fatalf("session-files stream: %#v", finderErr)
 	}
-	if combinedDiffCalls != 1 || len(chunks) != 3 || chunks[0]["replace_repo"] != false || chunks[1]["replace_repo"] != true || chunks[2]["replace_repo"] != true {
-		t.Fatalf("combined repository diff commands/stages = %d/%#v, want one initial plus two staged repository views; files=%#v", combinedDiffCalls, chunks, payload["files"])
+	if combinedDiffCalls != 2 || len(chunks) != 8 || chunks[0]["replace_repo"] != false || chunks[1]["replace_repo"] != false {
+		t.Fatalf("repository diff commands/chunks = %d/%#v, want both pane and transcript-only repositories in the initial scan; files=%#v", combinedDiffCalls, chunks, payload["files"])
 	}
 	for index, chunk := range chunks {
 		if _, present := chunk["repo_index"]; present {
@@ -715,7 +786,7 @@ func TestSessionFilesStreamRecomputesAttributionOncePerRepository(t *testing.T) 
 	}
 	rows := sessionFileRows(payload)
 	deleted := rows["nested/old.txt"]
-	if len(rows) != 2 || deleted["status"] != "D" || deleted["agent"] != "claude" || rows["nested/second.txt"]["agent"] != "claude" {
+	if len(rows) != 3 || deleted["status"] != "D" || deleted["agent"] != "claude" || rows["nested/second.txt"]["agent"] != "claude" || rows["external.txt"]["agent"] != "claude" {
 		t.Fatalf("attributed repository rows = %#v", payload["files"])
 	}
 }
@@ -739,7 +810,8 @@ func TestSessionFilesStreamReplacesEachAttributedRepositoryOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	transcript := filepath.Join(t.TempDir(), "rollout.jsonl")
-	transcriptData := fmt.Sprintf(`{"msg":%q}\n`, "*** Begin Patch\n*** Update File: "+filepath.Join(root, "note.txt")+"\n*** Update File: "+second+"\n")
+	// A complete JSONL record ends in a newline; the index never projects a torn final line.
+	transcriptData := fmt.Sprintf(`{"msg":%q}`, "*** Begin Patch\n*** Update File: "+filepath.Join(root, "note.txt")+"\n*** Update File: "+second+"\n") + "\n"
 	if err := os.WriteFile(transcript, []byte(transcriptData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -748,10 +820,10 @@ func TestSessionFilesStreamReplacesEachAttributedRepositoryOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close()
+	agent := SessionFileAgent{Kind: "codex", CWD: root, Transcript: transcript}
+	indexSessionFileAgents(t, service, agent)
 	chunks := make([]map[string]any, 0, 4)
-	_, finderErr := service.SessionFilesWithAgentsStream(context.Background(), "s1", []string{root}, []SessionFileAgent{{
-		Kind: "codex", CWD: root, Transcript: transcript,
-	}}, 24, "", "", nil, func(chunk map[string]any) error {
+	_, finderErr := service.SessionFilesWithAgentsStream(context.Background(), "s1", []string{root}, []SessionFileAgent{agent}, 24, "", "", nil, func(chunk map[string]any) error {
 		chunks = append(chunks, chunk)
 		return nil
 	})
@@ -834,8 +906,10 @@ func TestSessionFilesWithAgentsExcludesDefaultIgnoredTranscriptPaths(t *testing.
 		t.Fatal(err)
 	}
 	defer service.Close()
+	agent := SessionFileAgent{Kind: "claude", CWD: root, Transcript: transcript}
+	indexSessionFileAgents(t, service, agent)
 
-	payload, finderErr := service.SessionFilesWithAgents(context.Background(), "s1", []string{root}, []SessionFileAgent{{Kind: "claude", CWD: root, Transcript: transcript}}, 24, "", "", nil)
+	payload, finderErr := service.SessionFilesWithAgents(context.Background(), "s1", nil, []SessionFileAgent{agent}, 24, "", "", nil)
 	if finderErr != nil {
 		t.Fatal(finderErr)
 	}
@@ -1080,6 +1154,277 @@ func TestSessionFilesExposesRecentRefsAndAliases(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("head aliases missing %q: %#v", alias, aliases)
+		}
+	}
+}
+
+func sessionFilesRepositoryList(t *testing.T, payload map[string]any) []string {
+	t.Helper()
+	repos := make([]string, 0)
+	for _, row := range payload["repos"].([]map[string]any) {
+		repos = append(repos, row["repo"].(string))
+	}
+	return repos
+}
+
+func writeSessionFilesTranscript(t *testing.T, records ...map[string]any) string {
+	t.Helper()
+	lines := make([]string, 0, len(records))
+	for _, record := range records {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, string(encoded))
+	}
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func codexExecRecord(command, workdir string) map[string]any {
+	return map[string]any{"type": "response_item", "payload": map[string]any{
+		"type": "function_call", "name": "exec_command", "arguments": map[string]any{"cmd": command, "workdir": workdir},
+	}}
+}
+
+func claudeEditRecord(path string) map[string]any {
+	return map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
+		map[string]any{"type": "tool_use", "name": "Edit", "input": map[string]any{"file_path": path}},
+	}}}
+}
+
+func TestSessionFilesRepositoriesComeOnlyFromAgentWorkNotStartDirectory(t *testing.T) {
+	isolateSessionFilesTestHome(t)
+	// YOmux starts every session in its own checkout; that directory is dirty but untouched.
+	start, _ := newCommittedTestRepo(t)
+	worked, _ := newCommittedTestRepo(t)
+	for path, content := range map[string]string{
+		filepath.Join(start, "note.txt"):     "start checkout edit\n",
+		filepath.Join(worked, "note.txt"):    "agent edit\n",
+		filepath.Join(worked, "patched.txt"): "patched\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transcript := writeSessionFilesTranscript(t,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": start}},
+		codexExecRecord("git add note.txt", worked),
+		codexExecRecord("apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: patched.txt\n+patched\n*** End Patch\nEOF", worked),
+	)
+	idleTranscript := writeSessionFilesTranscript(t, map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": start}})
+	service, err := New(start, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	agent := SessionFileAgent{Kind: "codex", CWD: start, Transcript: transcript, Window: "0", Pane: "0"}
+	idle := SessionFileAgent{Kind: "codex", CWD: start, Transcript: idleTranscript, Window: "1", Pane: "0"}
+	indexSessionFileAgents(t, service, agent, idle)
+
+	payload, finderErr := service.SessionFilesWithAgentsStreamHints(context.Background(), "s1", nil, nil, []SessionFileAgent{agent}, 24, "", "", nil, nil)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if repos := sessionFilesRepositoryList(t, payload); len(repos) != 1 || repos[0] != worked {
+		t.Fatalf("repositories = %v, want only the repository the agent worked in %q (never start directory %q)", repos, worked, start)
+	}
+	rows := sessionFileRows(payload)
+	if rows["note.txt"] == nil || rows["note.txt"]["repo"] != worked || rows["note.txt"]["agent"] != "codex" || rows["patched.txt"] == nil || rows["patched.txt"]["agent"] != "codex" {
+		t.Fatalf("worked repository rows = %#v", payload["files"])
+	}
+	if payload["stretched"] != false || payload["last_activity"] != nil {
+		t.Fatalf("fresh transcript window = stretched %v last_activity %v, want unstretched", payload["stretched"], payload["last_activity"])
+	}
+
+	idlePayload, finderErr := service.SessionFilesWithAgentsStreamHints(context.Background(), "s2", nil, nil, []SessionFileAgent{idle}, 24, "", "", nil, nil)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if repos := sessionFilesRepositoryList(t, idlePayload); len(repos) != 0 {
+		t.Fatalf("idle agent repositories = %v, want an empty Differ", repos)
+	}
+}
+
+func TestSessionFilesStretchesToLiveAgentLastActivityOnlyWhenWindowIsEmpty(t *testing.T) {
+	isolateSessionFilesTestHome(t)
+	worked, _ := newCommittedTestRepo(t)
+	unrelated, _ := newCommittedTestRepo(t)
+	for _, repo := range []string{worked, unrelated} {
+		if err := os.WriteFile(filepath.Join(repo, "note.txt"), []byte("changed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transcript := writeSessionFilesTranscript(t, claudeEditRecord(filepath.Join(worked, "note.txt")))
+	lastActivity := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(transcript, lastActivity, lastActivity); err != nil {
+		t.Fatal(err)
+	}
+	otherTranscript := writeSessionFilesTranscript(t, claudeEditRecord(filepath.Join(unrelated, "note.txt")))
+	service, err := New(worked, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	agent := SessionFileAgent{Kind: "claude", CWD: worked, Transcript: transcript}
+	// The other transcript is fresh and indexed, but it is not one of this session's agents.
+	index := indexSessionFileAgents(t, service, agent, SessionFileAgent{Kind: "claude", Transcript: otherTranscript})
+
+	payload, finderErr := service.SessionFilesWithAgentsStreamHints(context.Background(), "s1", nil, nil, []SessionFileAgent{agent}, 24, "", "", nil, nil)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if repos := sessionFilesRepositoryList(t, payload); len(repos) != 1 || repos[0] != worked {
+		t.Fatalf("stretched repositories = %v, want only %q", repos, worked)
+	}
+	if payload["stretched"] != true || payload["last_activity"] != lastActivity.Unix() {
+		t.Fatalf("stretched window = %v at %v, want true at %d", payload["stretched"], payload["last_activity"], lastActivity.Unix())
+	}
+
+	now := time.Now()
+	if err := os.Chtimes(transcript, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := index.index(context.Background(), AttributionSource{Path: transcript, Kind: "claude"}, 8<<20, 4096); err != nil {
+		t.Fatal(err)
+	}
+	fresh, finderErr := service.SessionFilesWithAgentsStreamHints(context.Background(), "s1", nil, nil, []SessionFileAgent{agent}, 24, "", "", nil, nil)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if repos := sessionFilesRepositoryList(t, fresh); len(repos) != 1 || repos[0] != worked {
+		t.Fatalf("fresh repositories = %v, want only %q", repos, worked)
+	}
+	if fresh["stretched"] != false || fresh["last_activity"] != nil {
+		t.Fatalf("fresh window = stretched %v last_activity %v, want unstretched", fresh["stretched"], fresh["last_activity"])
+	}
+}
+
+func TestSessionFilesResolvesManyTouchedDirectoriesWithOneGitDiscovery(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("darwin resolves the repository root through its descriptor namespace, not rev-parse")
+	}
+	isolateSessionFilesTestHome(t)
+	root, _ := newCommittedTestRepo(t)
+	records := make([]map[string]any, 0)
+	for _, relative := range []string{"a/one.txt", "b/c/two.txt", "d/e/f/three.txt", "d/e/four.txt", "g/missing/deleted.txt"} {
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(relative, "missing") {
+			if err := os.WriteFile(path, []byte(relative+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		records = append(records, claudeEditRecord(path))
+	}
+	if err := os.RemoveAll(filepath.Join(root, "g", "missing")); err != nil {
+		t.Fatal(err)
+	}
+	transcript := writeSessionFilesTranscript(t, records...)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	agent := SessionFileAgent{Kind: "claude", CWD: root, Transcript: transcript}
+	indexSessionFileAgents(t, service, agent)
+
+	discoveries := 0
+	var discoveryMu sync.Mutex
+	originalExec := execCommandContext
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "--show-toplevel" {
+				discoveryMu.Lock()
+				discoveries++
+				discoveryMu.Unlock()
+			}
+		}
+		return originalExec(ctx, args, extraFiles)
+	}
+	t.Cleanup(func() { execCommandContext = originalExec })
+
+	payload, finderErr := service.SessionFilesWithAgentsStreamHints(context.Background(), "s1", nil, nil, []SessionFileAgent{agent}, 24, "", "", nil, nil)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if repos := sessionFilesRepositoryList(t, payload); len(repos) != 1 || repos[0] != root {
+		t.Fatalf("repositories = %v, want %q", repos, root)
+	}
+	if discoveries != 1 {
+		t.Fatalf("Git repository discoveries = %d, want one for five touched directories in one repository", discoveries)
+	}
+}
+
+func TestSessionFilesKeepsPreparationPartialWhenIndexFinishesDuringRequest(t *testing.T) {
+	isolateSessionFilesTestHome(t)
+	root, _ := newCommittedTestRepo(t)
+	transcript := writeSessionFilesTranscript(t, claudeEditRecord(filepath.Join(root, "note.txt")))
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	// The agent's transcript is not indexed yet when the request reads attributions.
+	index := indexSessionFileAgents(t, service)
+	agent := SessionFileAgent{Kind: "claude", CWD: root, Transcript: transcript}
+	payload, finderErr := service.SessionFilesWithAgentsStreamHints(context.Background(), "s1", []string{root}, nil, []SessionFileAgent{agent}, 24, "", "", nil, func(map[string]any) error {
+		// The index worker finishes and reports ready before the response is assembled.
+		index.mu.Lock()
+		index.progress = AttributionProgress{State: "ready"}
+		index.mu.Unlock()
+		return nil
+	})
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	preparation := payload["preparation"].(AttributionProgress)
+	if !preparation.Partial || preparation.State != "indexing" {
+		t.Fatalf("preparation = %#v, want partial: these attributions were read before the transcript was indexed", preparation)
+	}
+}
+
+func TestSessionFilesCompleteLiveWindowIgnoresHistoricalGap(t *testing.T) {
+	isolateSessionFilesTestHome(t)
+	root, _ := newCommittedTestRepo(t)
+	transcript := writeSessionFilesTranscript(t, claudeEditRecord(filepath.Join(root, "note.txt")))
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	agent := SessionFileAgent{Kind: "claude", CWD: root, Transcript: transcript}
+	index := indexSessionFileAgents(t, service, agent)
+	index.mu.Lock()
+	index.progress = AttributionProgress{State: "indexing", Partial: true}
+	index.mu.Unlock()
+	payload, finderErr := service.SessionFilesWithAgentsStreamHints(context.Background(), "s1", []string{root}, nil, []SessionFileAgent{agent}, 24, "", "", nil, nil)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	preparation := payload["preparation"].(AttributionProgress)
+	if preparation.Partial || preparation.State != "ready" {
+		t.Fatalf("complete live window inherited historical gap: %#v", preparation)
+	}
+	if !index.Progress().Partial {
+		t.Fatal("historical diagnostic gap was discarded")
+	}
+}
+
+func TestAggregateSessionFilesRetainsCapturedPreparation(t *testing.T) {
+	for _, partial := range []bool{true, false} {
+		payload := AggregateSessionFiles([]map[string]any{
+			{"preparation": AttributionProgress{State: "ready"}},
+			{"preparation": AttributionProgress{State: "indexing", Partial: partial}},
+		}, 24, "", "")
+		preparation, ok := payload["preparation"].(AttributionProgress)
+		if !ok || preparation.Partial != partial {
+			t.Fatalf("aggregate preparation lost: %#v", payload)
 		}
 	}
 }

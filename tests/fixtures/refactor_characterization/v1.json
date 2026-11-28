@@ -25,7 +25,7 @@
   },
   "blob_fingerprint": {
     "count": 30,
-    "sha256": "f1feba0e021d8e602d892f211b3cf9f9f303174f1e2e70d0d54275672eb24af5"
+    "sha256": "c42a36c2f924c4be0cf5771fe3dfb72f13e99f4cc2696211d88142113f36da9c"
   },
   "inputs": [
     "yomux_lib/app.py",
@@ -61,40 +61,40 @@
   ],
   "inventory_fingerprints": {
     "daemon_actions": {
-      "count": 51,
-      "sha256": "9a6bdbc633bbfca0455fa77d62ebd3dcd35376bde4587900d098f1f2e53e2584"
+      "count": 24,
+      "sha256": "6a2562fc1e8e7067af7dc2fdaaf84cb25bc5fec49832b034d8741ae152a22c7a"
     },
     "dom_contracts": {
-      "count": 938,
-      "sha256": "127958de8ade6a4698df339765cd19e9d3c0105599c822e2249f0594794c6fec"
+      "count": 917,
+      "sha256": "f03117fdf99164fc1384c59dd7d1c7624b5478a3803bc7dd21fbff9432a4ede5"
     },
     "external_test_node_ids": {
-      "count": 928,
-      "sha256": "9cb8c6063afbea9ef2d2ef3fcc99983bb3a2afbafd4aaef1db27a6512b9a0a2e"
+      "count": 953,
+      "sha256": "27a87491baf64dc0ffc4d1beb65850b3d634cca80c3dcecd0983a9c0ad322c1f"
     },
     "fixture_lifecycles": {
-      "count": 48,
-      "sha256": "3210926432b3ad57cfe6a4acc2fe48841996df6d2ae1f376d709ea59bf85fbf9"
+      "count": 51,
+      "sha256": "b8d5ecec5e5fe520bce3dc265afd5e47a3d89ef0c0889a1c2801f607d5a5581c"
     },
     "frontend_globals_state_domains": {
-      "count": 2556,
-      "sha256": "ad1bdd39701e0bab715171879207c86f125af37595dcb5a0b5a1b77425efcdeb"
+      "count": 2595,
+      "sha256": "e7f9ee674ad1a3824cbf2a14170dfb6ab6ccb624f9ccf3b58c8a981218975c93"
     },
     "gate_lanes": {
-      "count": 14,
-      "sha256": "789521289dad12c3ff3e40db76752f4ef327382f4d7284dce5d5a190094a0ee1"
+      "count": 15,
+      "sha256": "9d06757b44cd03880b5b474d7e7a56c5bc66ef73737f03546a12008dd4c1f067"
     },
     "public_facade_methods": {
-      "count": 684,
-      "sha256": "bc582acbdb5b822090d91c79e8a226bf98bff33991639aa94025c25b9cffc8ec"
+      "count": 689,
+      "sha256": "7a15b037ee29f4041046813432eb162409dc832f7502b3bf7b18d5e4c0433964"
     },
     "routes": {
       "count": 129,
       "sha256": "eda780412904a5d0ce41d716a27bda20824bf887ba30c4c3d3ac295ca42f21e7"
     },
     "timers_listeners_streams": {
-      "count": 247,
-      "sha256": "f079299d752019a8425ee0bff228b8bbaa94f89c5486b4c832b5bb876bee4f8f"
+      "count": 217,
+      "sha256": "1b07b182d15cad2499555863d7797854676c883ccb8b32a0b104559f4170a436"
     },
     "wire_storage_identities": {
       "count": 44,
@@ -129,5 +129,5 @@
       "scope": "source-only harness"
     }
   ],
-  "source": "git:e68c0d709a7780ea4896685288c14ec44febec30"
+  "source": "git:f53c9b3f89ce952527d22a6ba19cc8304db30187"
 }

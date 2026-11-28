@@ -43,7 +43,7 @@ func TestReadContextItemsMatchesClaudeAndCodexWireShapes(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	items, err := readContextItems(path, 20)
+	items, err := (&server{}).readContextItems(path, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestReadContextItemsUsesMessageRoleFallback(t *testing.T) {
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	items, err := readContextItems(path, 20)
+	items, err := (&server{}).readContextItems(path, 20)
 	if err != nil || len(items) != 1 || items[0]["role"] != "message" {
 		t.Fatalf("message role fallback = %#v, err=%v", items, err)
 	}
@@ -87,7 +87,7 @@ func TestTranscriptParserKeepsCodexLifecycleAndPatchItems(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	items, err := readContextItems(path, 20)
+	items, err := (&server{}).readContextItems(path, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestReadTranscriptTailPreservesBoundedRawLines(t *testing.T) {
 	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	text, err := readTranscriptTail(path, 2)
+	text, err := (&server{}).transcriptIngestion.ReadTail(path, 2, 0)
 	if err != nil || text != "two\nthree\n" {
 		t.Fatalf("tail = %q, err=%v", text, err)
 	}
@@ -181,7 +181,7 @@ func TestReadContextItemsUsesBoundedTailForSparseLargeTranscript(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	items, err := readContextItems(path, 4)
+	items, err := (&server{}).readContextItems(path, 4)
 	if err != nil || len(items) != 1 || items[0]["text"] != "tail-only" {
 		t.Fatalf("large transcript context = %#v, err=%v", items, err)
 	}
@@ -270,7 +270,7 @@ func TestAgentTranscriptUsesExplicitOpenCodeSessionID(t *testing.T) {
 	databasePath := filepath.Join(root, "opencode.db")
 	createSessionSurfaceOpenCodeDB(t, databasePath)
 	t.Setenv("YOLOMUX_OPENCODE_DATABASE", databasePath)
-	sessionID, gotPath, gotCWD := agentTranscriptWithCommand("opencode", 0, "/repo", "OC | build", "opencode --session ses-open")
+	sessionID, gotPath, gotCWD := (&server{}).agentTranscriptWithCommand("opencode", 0, "/repo", "OC | build", "opencode --session ses-open")
 	if sessionID != "ses-open" || gotPath != databasePath || gotCWD != "/repo" {
 		t.Fatalf("explicit OpenCode identity = (%q, %q, %q)", sessionID, gotPath, gotCWD)
 	}
@@ -449,7 +449,7 @@ func TestAgentTranscriptFallsBackToClaudeCWD(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", root)
-	sessionID, gotPath, gotCWD := agentTranscript("claude", 0, "/repo")
+	sessionID, gotPath, gotCWD := (&server{}).agentTranscript("claude", 0, "/repo")
 	if sessionID != "" || gotPath != transcript || gotCWD != "/repo" {
 		t.Fatalf("agentTranscript fallback = (%q, %q, %q), want (%q, %q, %q)", sessionID, gotPath, gotCWD, "", transcript, "/repo")
 	}
@@ -460,15 +460,15 @@ func TestAgentTranscriptUsesConfiguredOpenCodeDatabase(t *testing.T) {
 	databasePath := filepath.Join(root, "opencode.db")
 	createSessionSurfaceOpenCodeDB(t, databasePath)
 	t.Setenv("YOLOMUX_OPENCODE_DATABASE", databasePath)
-	sessionID, gotPath, gotCWD := agentTranscriptWithTitle("opencode", 0, "/repo", "OC | build")
+	sessionID, gotPath, gotCWD := (&server{}).agentTranscriptWithTitle("opencode", 0, "/repo", "OC | build")
 	if sessionID != "ses-open" || gotPath != databasePath || gotCWD != "/repo" {
 		t.Fatalf("OpenCode identity = (%q, %q, %q)", sessionID, gotPath, gotCWD)
 	}
-	items, err := readContextItemsForAgent(databasePath, map[string]any{"kind": "opencode", "session_id": sessionID}, 20)
+	items, err := (&server{}).readContextItemsForAgent(databasePath, map[string]any{"kind": "opencode", "session_id": sessionID}, 20)
 	if err != nil || len(items) != 4 || items[0]["role"] != "user" || items[1]["role"] != "assistant" || items[2]["role"] != "tool_use" || items[3]["role"] != "tool_result" {
 		t.Fatalf("OpenCode context = %#v err=%v", items, err)
 	}
-	text, structured, err := readTranscriptTextForAgent(databasePath, map[string]any{"kind": "opencode", "session_id": sessionID}, 5000)
+	text, structured, err := (&server{}).readTranscriptTextForAgent(databasePath, map[string]any{"kind": "opencode", "session_id": sessionID}, 5000)
 	if err != nil || len(structured) != 4 || strings.Contains(text, "SQLite format 3") || !strings.Contains(text, "inspect this") {
 		t.Fatalf("OpenCode transcript projection = text %q items %#v err=%v", text, structured, err)
 	}

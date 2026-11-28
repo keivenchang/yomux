@@ -203,6 +203,48 @@ def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(brows
     browser.execute_script("clearJsDebugEvents();")
 
 
+def test_current_stats_graph_keeps_vertical_scroll_across_owner_refresh(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return typeof recordJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+        const view = graph.closest('.js-debug-graph-view');
+        view.style.height = '220px';
+        view.style.maxHeight = '220px';
+        view.style.flex = '0 0 220px';
+        const savedBuckets = new Map(jsDebugGraphBuckets);
+        const maxTop = view.scrollHeight - view.clientHeight;
+        if (maxTop < 80) return {ready: false, scrollHeight: view.scrollHeight, clientHeight: view.clientHeight};
+        view.scrollTop = Math.max(0, maxTop - 10);
+        const before = view.scrollTop;
+        // A new server owner clears old history before the replacement snapshot arrives.
+        clearJsDebugGraphData();
+        refreshDebugGraphElement(graph, {force: true});
+        const afterEmpty = view.scrollTop;
+        savedBuckets.forEach((bucket, key) => jsDebugGraphBuckets.set(key, bucket));
+        refreshDebugGraphElement(graph, {force: true});
+        const afterReload = view.scrollTop;
+        view.scrollTop = Math.max(0, view.scrollHeight - view.clientHeight - 10);
+        const beforeUserInput = view.scrollTop;
+        clearJsDebugGraphData();
+        refreshDebugGraphElement(graph, {force: true});
+        const afterEmptyInput = view.scrollTop;
+        view.dispatchEvent(new WheelEvent('wheel', {bubbles: true, deltaY: 40}));
+        savedBuckets.forEach((bucket, key) => jsDebugGraphBuckets.set(key, bucket));
+        refreshDebugGraphElement(graph, {force: true});
+        return {ready: true, before, afterEmpty, afterReload, beforeUserInput, afterEmptyInput, afterUserInput: view.scrollTop, maxTop};
+        """
+    )
+    assert result["ready"] is True, result
+    assert result["afterReload"] == result["before"], result
+    assert result["afterUserInput"] == result["afterEmptyInput"] <= result["beforeUserInput"], result
+
+
 def test_stats_only_graph_renders_live_green_edge_pulse(browser, tmp_path):
     load_live_runtime_boot_fixture(
         browser,

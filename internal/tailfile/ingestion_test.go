@@ -211,7 +211,8 @@ func TestIngestionImmutablePartialPollsReuseBytes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(next.Records) != 0 || next.After.Offset != 0 || len(owner.partial[path].data) != 20000 {
+		pending, cached := owner.partial.get(path)
+		if len(next.Records) != 0 || next.After.Offset != 0 || !cached || len(pending.data) != 20000 {
 			t.Fatal("immutable partial progress changed")
 		}
 	}
@@ -367,8 +368,7 @@ func TestIngestionBatchPageReferencesSurviveSharedEviction(t *testing.T) {
 			t.Fatal(err)
 		}
 		owner.mu.Lock()
-		owner.pages = map[pageKey][]byte{}
-		owner.order = nil
+		owner.pages = boundedCache[pageKey, []byte]{}
 		owner.mu.Unlock()
 	}
 	actual, _ := owner.Metrics()
@@ -488,5 +488,242 @@ func TestSnapshotTailAndCheckpointPinTheSameGeneration(t *testing.T) {
 	batch, err := owner.ReadBatch(context.Background(), path, position, CompleteRecordBatchBytes, 100)
 	if err != nil || batch.Reset || len(batch.Records) != 1 || string(batch.Records[0].Data) != "third\n" {
 		t.Fatalf("append batch=%+v err=%v", batch, err)
+	}
+}
+
+func TestRegisteredProjectionsShareDecodedRecordAcrossAppend(t *testing.T) {
+	owner := &Ingestion{}
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	data := []byte("{\"edited\":\"note.md\",\"tokens\":12}\n")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := owner.ReadBatch(context.Background(), path, Position{}, 1024, 4)
+	if err != nil || len(first.Records) != 1 {
+		t.Fatalf("first batch: %v, %d records", err, len(first.Records))
+	}
+
+	var shared map[string]any
+	fileCalls, usageCalls := 0, 0
+	files := RegisterProjection(func(_ []byte, object map[string]any) string {
+		fileCalls++
+		shared = object
+		return object["edited"].(string)
+	})
+	usage := RegisterProjection(func(_ []byte, object map[string]any) float64 {
+		usageCalls++
+		if fmt.Sprintf("%p", object) != fmt.Sprintf("%p", shared) {
+			t.Fatal("another registered consumer independently decoded the same record")
+		}
+		return object["tokens"].(float64)
+	})
+	if got := files.Read(owner, first.Records[0].Data); got != "note.md" {
+		t.Fatal(got)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = file.WriteString("{}\n")
+	closeErr := file.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("append: %v, close: %v", err, closeErr)
+	}
+	replay, err := owner.ReadBatch(context.Background(), path, Position{}, 1024, 4)
+	if err != nil || len(replay.Records) != 2 {
+		t.Fatalf("replay: %v, %d records", err, len(replay.Records))
+	}
+
+	for range 2 {
+		line := bytes.TrimSuffix(replay.Records[0].Data, []byte{'\n'})
+		if got := usage.Read(owner, line); got != 12 {
+			t.Fatal(got)
+		}
+		if got := files.Read(owner, line); got != "note.md" {
+			t.Fatal(got)
+		}
+	}
+	if fileCalls != 1 || usageCalls != 1 {
+		t.Fatalf("projection calls = %d and %d, want one each", fileCalls, usageCalls)
+	}
+}
+
+// Appends keep the cached complete records of a growing transcript: a tail
+// reader rereads only the appended bytes plus two direct validation samples,
+// while an in-place change to sampled bytes starts a new generation.
+func TestIngestionAppendKeepsCachedPagesAndRewriteResets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	line := append(bytes.Repeat([]byte("r"), 999), '\n')
+	if err := os.WriteFile(path, bytes.Repeat(line, 300), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner := &Ingestion{}
+	readTail := func() (string, int64) {
+		before, _ := owner.Metrics()
+		text, err := owner.ReadTail(path, 4096, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, _ := owner.Metrics()
+		return text, after - before
+	}
+	if _, physical := readTail(); physical != int64(len(line)*300) {
+		t.Fatalf("cold tail read %d bytes", physical)
+	}
+	appended := []byte("{\"appended\":1}\n")
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := file.Write(appended)
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("append: %v, close: %v", writeErr, closeErr)
+	}
+	text, physical := readTail()
+	if want := int64(len(appended) + 2*generationSampleBytes); physical != want {
+		t.Fatalf("tail after append read %d bytes, want %d", physical, want)
+	}
+	if !strings.HasSuffix(text, string(line)+string(appended)) {
+		t.Fatal("tail after append lost bytes")
+	}
+
+	// Rewrite the first record in place with a longer file. The head sample no
+	// longer matches the cached page, so no earlier byte may be served.
+	rewritten := append(append([]byte("{\"rewritten\":1}"), bytes.Repeat([]byte(" "), len(line)-16)...), '\n')
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(append(rewritten, data[len(line):]...), appended...)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	text, physical = readTail()
+	if physical < int64(len(data)) || !strings.HasPrefix(text, string(rewritten)) {
+		t.Fatalf("rewrite reused stale pages: physical=%d size=%d", physical, len(data))
+	}
+}
+
+// The decoded-record cache is least-recently-used and charges approximate
+// decoded size, which exceeds the line length for nested objects.
+func TestDecodedRecordCacheIsLRUAndChargesDecodedSize(t *testing.T) {
+	owner := &Ingestion{}
+	record := func(n int) []byte {
+		return fmt.Appendf(nil, "{\"n\":%d,\"payload\":{\"type\":\"event\",\"items\":[1,2,3,{\"k\":\"v\"}]}}\n", n)
+	}
+	first := owner.Decode(record(0))
+	if first == nil {
+		t.Fatal("record did not decode")
+	}
+	line := bytes.TrimSuffix(record(0), []byte{'\n'})
+	charged := owner.decoded.bytes
+	if want := decodedRecordOverheadBytes + decodedBytes(first); charged != want || charged <= int64(len(line)) {
+		t.Fatalf("charged %d bytes for a %d-byte line, want %d", charged, len(line), want)
+	}
+	for n := 1; n < 2*maxCachedTranscriptRecords; n++ {
+		// Keep record 0 recently used; FIFO eviction would drop it.
+		if got := owner.Decode(record(0)); fmt.Sprintf("%p", got) != fmt.Sprintf("%p", first) {
+			t.Fatalf("recently used record evicted after %d inserts", n)
+		}
+		owner.Decode(record(n))
+	}
+	if owner.decoded.recency.Len() > maxCachedTranscriptRecords || owner.decoded.bytes > maxCachedTranscriptBytes {
+		t.Fatalf("decoded cache holds %d records, %d bytes", owner.decoded.recency.Len(), owner.decoded.bytes)
+	}
+	if large := bytes.Repeat([]byte("x"), MaxRecordBytes+1); owner.Decode(large) != nil || owner.decoded.recency.Len() > maxCachedTranscriptRecords {
+		t.Fatal("oversized record was cached")
+	}
+}
+
+// A CR completes a frame only at its snapshot's EOF. Frames are shared across
+// appends, so a replay after an appended LF must see the longer CRLF frame.
+func TestIngestionTerminalCRFrameIsNotReusedAfterAppend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(path, []byte("{\"a\":1}\n{\"b\":2}\r"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner := &Ingestion{}
+	first, err := owner.ReadBatch(context.Background(), path, Position{}, 1024, 100)
+	if err != nil || len(first.Records) != 2 || string(first.Records[1].Data) != "{\"b\":2}\r" {
+		t.Fatalf("terminal CR batch=%+v err=%v", first, err)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := file.Write([]byte("\n{\"c\":3}\n"))
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("append: %v, close: %v", writeErr, closeErr)
+	}
+	replay, err := owner.ReadBatch(context.Background(), path, Position{}, 1024, 100)
+	if err != nil || len(replay.Records) != 3 || string(replay.Records[1].Data) != "{\"b\":2}\r\n" || string(replay.Records[2].Data) != "{\"c\":3}\n" {
+		t.Fatalf("replay after append=%+v err=%v", replay.Records, err)
+	}
+}
+
+func TestProjectionRetentionChargesAndBoundsCache(t *testing.T) {
+	owner := &Ingestion{}
+	line := []byte(`{"one":1}`)
+	owner.Decode(line)
+	before := owner.decoded.bytes
+	calls := 0
+	projected := RegisterProjection(func(_ []byte, _ map[string]any) []byte {
+		calls++
+		return make([]byte, 9<<20)
+	})
+	if len(projected.Read(owner, line)) != 9<<20 {
+		t.Fatal("projection lost")
+	}
+	if owner.decoded.bytes <= before {
+		t.Fatal("retained projection was not charged")
+	}
+	projected.Read(owner, line)
+	if calls != 1 {
+		t.Fatal("cacheable projection was not shared", calls)
+	}
+	other := RegisterProjection(func(_ []byte, _ map[string]any) []byte { return make([]byte, 9<<20) })
+	other.Read(owner, line)
+	if owner.decoded.bytes > maxCachedTranscriptBytes {
+		t.Fatal("projection exceeded byte budget", owner.decoded.bytes)
+	}
+	if got := len(owner.decodedRecord(line).projections); got != 1 {
+		t.Fatal("over-budget projection was retained", got)
+	}
+	unknownCalls := 0
+	unknown := RegisterProjection(func(_ []byte, _ map[string]any) func() {
+		unknownCalls++
+		return func() {}
+	})
+	unknown.Read(owner, line)
+	unknown.Read(owner, line)
+	if unknownCalls != 2 {
+		t.Fatal("unknown retained cost was cached")
+	}
+}
+
+func TestProjectionEvictionDuringUseDoesNotResurrectRecord(t *testing.T) {
+	owner := &Ingestion{}
+	entered, release := make(chan struct{}), make(chan struct{})
+	projection := RegisterProjection(func(_ []byte, _ map[string]any) string {
+		close(entered)
+		<-release
+		return strings.Repeat("value", 1024)
+	})
+	line := []byte(`{"held":true}`)
+	result := make(chan string, 1)
+	go func() { result <- projection.Read(owner, line) }()
+	<-entered
+	for index := 0; index <= maxCachedTranscriptRecords; index++ {
+		owner.Decode([]byte(fmt.Sprintf(`{"index":%d}`, index)))
+	}
+	before := owner.decoded.bytes
+	close(release)
+	if got := <-result; len(got) != 5*1024 {
+		t.Fatal("in-use projection was lost")
+	}
+	if owner.decoded.bytes != before {
+		t.Fatal("evicted projection was readmitted")
 	}
 }

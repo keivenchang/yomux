@@ -625,7 +625,8 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   text-decoration: none;
 }
 .session-state-needs-approval,
-.session-state-needs-input {
+.session-state-needs-input,
+.file-editor-html-status > button[data-html-viewedit-problem] {
   color: var(--danger-text);
   background: var(--danger-bg);
   border-color: var(--danger-border);

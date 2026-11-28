@@ -1,22 +1,197 @@
 <!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>HTML Preview Renderer Sample</title>
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 24px; }
-      table { border-collapse: collapse; }
-      th, td { border: 1px solid #94a3b8; padding: 6px 10px; }
-    </style>
-  </head>
-  <body>
-    <h1>HTML Preview Renderer Sample</h1>
-    <p>This file should render inside the sandboxed HTML Preview.</p>
-    <table>
-      <tr><th>Feature</th><th>Expected behavior</th></tr>
-      <tr><td>Sandbox</td><td>Preview stays isolated</td></tr>
-      <tr><td>Script</td><td>YOmux shows the disabled-JavaScript notice</td></tr>
-    </table>
-    <script>document.body.dataset.scriptRan = "true";</script>
-  </body>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#76b900">
+  <title>YOmux HTML Example</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      --green: #76b900;
+      --ink: #17210b;
+      --muted: #667052;
+      --paper: #f7f8ef;
+      --line: #e2e7d4;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background-color: var(--green);
+      background-image: radial-gradient(circle at 12% 12%, rgb(255 255 255 / 24%) 0 2px, transparent 3px),
+                        radial-gradient(circle at 86% 26%, rgb(255 255 255 / 18%) 0 3px, transparent 4px);
+      background-size: 42px 42px, 68px 68px;
+      color: var(--ink);
+    }
+
+    .page {
+      width: min(1120px, calc(100% - 32px));
+      margin: 32px auto;
+      overflow: hidden;
+      border: 1px solid rgb(23 33 11 / 12%);
+      border-radius: 28px;
+      background: var(--paper);
+      box-shadow: 0 24px 70px rgb(23 33 11 / 22%);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .topbar, .footer { padding: 20px clamp(20px, 5vw, 56px); }
+    .topbar a { color: var(--muted); text-underline-offset: .2em; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: .02em; }
+    .brand-mark { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; background: var(--green); color: var(--ink); }
+
+    main { padding: clamp(20px, 5vw, 56px); }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(260px, .9fr);
+      align-items: center;
+      gap: 24px;
+      min-height: 350px;
+      padding: clamp(24px, 5vw, 48px);
+      overflow: hidden;
+      border-radius: 22px;
+      background: #17210b;
+      color: #f7f8ef;
+    }
+
+    h1 { max-width: 540px; margin: 14px 0; font-size: clamp(2.5rem, 6vw, 5rem); line-height: .98; letter-spacing: -.06em; }
+    .hero p { max-width: 440px; color: #d5dec5; font-size: 1.05rem; line-height: 1.65; }
+    .workspace {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid #53633a;
+      border-radius: 16px;
+      background: #111a09;
+      box-shadow: 0 15px 30px rgb(0 0 0 / 24%);
+    }
+    .workspace-tabs { display: flex; gap: 6px; padding: 10px; background: #29371a; }
+    .workspace-tabs span { padding: 5px 10px; border-radius: 6px; color: #d5dec5; font-size: .8rem; }
+    .workspace-tabs .selected { background: #b7e56b; color: var(--ink); font-weight: 700; }
+    .workspace pre { margin: 0; padding: 22px 16px; color: #e9f4d7; font-size: .85rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .workspace code span { color: #b7e56b; }
+
+    main > section + section { margin-top: 42px; }
+    h2 { margin: 0 0 18px; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -.04em; }
+
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .card { min-height: 190px; padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: white; }
+    .card-mark {
+      display: grid;
+      width: 48px;
+      height: 48px;
+      margin-bottom: 14px;
+      place-items: center;
+      border-radius: 12px;
+      background: #edf6dc;
+      color: #3d6500;
+      font: 700 1.1rem ui-monospace, monospace;
+    }
+    .card:nth-child(2) .card-mark { background: #e7efff; color: #294788; }
+    .card:nth-child(3) .card-mark { background: #fff1d6; color: #754604; }
+    .card h3 { margin: 0 0 7px; font-size: 1.05rem; }
+    .card p { margin: 0; color: var(--muted); line-height: 1.55; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: white; }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    caption { padding: 18px 20px 10px; color: var(--muted); font-size: .9rem; text-align: left; }
+    th, td { padding: 14px 20px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: .76rem; letter-spacing: .1em; text-transform: uppercase; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .tag { display: inline-block; padding: 5px 9px; border-radius: 999px; background: #edf6dc; color: #3d6500; font-size: .8rem; font-weight: 700; }
+
+    .footer { border-top: 1px solid var(--line); color: var(--muted); font-size: .85rem; }
+
+    @media (max-width: 720px) {
+      .page { width: min(100% - 18px, 1120px); margin: 9px auto; border-radius: 20px; }
+      .hero { grid-template-columns: minmax(0, 1fr); }
+      .cards { grid-template-columns: minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">YO</span>
+        <span>YOmux</span>
+      </div>
+      <a href="03-md-mixed.md">Markdown example</a>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <div>
+          <h1 id="page-title">YOmux HTML Example</h1>
+          <p>Open this file in YOmux to see how HTML renders in Preview. Use Split to compare the rendered page with its source.</p>
+        </div>
+        <div class="workspace" role="img" aria-label="A YOmux workspace with Terminal and Notes tabs and a shell listing files">
+          <div class="workspace-tabs" aria-hidden="true">
+            <span class="selected">Terminal</span>
+            <span>Notes</span>
+          </div>
+          <pre aria-hidden="true"><code><span>$</span> ls
+03-md-mixed.md
+11-html.html
+<span>$</span> <span>▌</span></code></pre>
+        </div>
+      </section>
+
+      <section aria-labelledby="workspace-title">
+        <h2 id="workspace-title">In the workspace</h2>
+        <div class="cards">
+          <article class="card">
+            <div class="card-mark" aria-hidden="true">&gt;_</div>
+            <h3>Terminal</h3>
+            <p>Open a shell or an existing tmux session in a tab.</p>
+          </article>
+          <article class="card">
+            <div class="card-mark" aria-hidden="true">&lt;&gt;</div>
+            <h3>HTML ViewEdit</h3>
+            <p>Edit supported text directly in the rendered page and follow the matching caret in TextEdit.</p>
+          </article>
+          <article class="card">
+            <div class="card-mark" aria-hidden="true">↗</div>
+            <h3>YO!Share</h3>
+            <p>Invite a guest to selected tabs and choose which ones they can edit.</p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="preview-title">
+        <h2 id="preview-title">What to try in Preview</h2>
+        <div class="table-wrap">
+          <table>
+            <caption>Expected behavior when you open this example in YOmux.</caption>
+            <thead>
+              <tr><th scope="col">Feature</th><th scope="col">Expected behavior</th><th scope="col">Try it</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>HTMLll and CSS</td><td>Preview renders the page with its embedded styles.</td><td><span class="tag">Open Preview</span></td></tr>
+              <tr><td>Sandbox</td><td>The page stays isolated and YOmux shows a JavaScript-disabled notice.</td><td><span class="tag">Check the notice</span></td></tr>
+              <tr><td>Source and rendered caret</td><td>The dashed caret follows the active caret between TextEdit and ViewEdit.</td><td><span class="tag">Switch to Split</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      This example’s script runs when the file is opened directly in a browser.
+    </footer>
+  </div>
+  <script>document.body.dataset.scriptRan = "true";</script>
+</body>
 </html>

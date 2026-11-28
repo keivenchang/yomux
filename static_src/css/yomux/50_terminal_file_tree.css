@@ -49,6 +49,9 @@
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
+.html-editor-mobile-keyboard {
+  display: contents;
+}
 /* Touch terminals keep the OS keyboard for text entry. The smart-key palette is a movable overlay,
    not a permanent row, so an idle terminal keeps its full visible height. */
 .mobile-terminal-keybar {
@@ -456,19 +459,24 @@
 .panel-overlay-root {
   position: relative;
 }
-/* Inactive-pane dimming: ONE CSS rule keyed off the uniformly-toggled .focused-pane class. Every pane
-   — terminal, Finder, Preferences, Info, Changes, editor — dims identically; there is no per-pane JS
-   overlay <div> (and so no isVirtualItem special-case). pointer-events:none lets a click on a dimmed
-   pane fall through to focus it (the old overlay swallowed the first click). The focused/typing-ready
-   pane is not dimmed. A stale typing-ready terminal is still inactive when another pane owns
-   .focused-pane, so do not exempt .typing-ready-pane here. */
-.panel:not(.focused-pane) .panel-overlay-root::after {
+/* Keep the overlay mounted so focus can fade it in both directions. */
+.panel > .panel-overlay-root::after {
   content: "";
   position: absolute;
   inset: 0;
   z-index: var(--z-terminal-overlay-low);
   background: var(--inactive-pane-overlay);
+  transition: opacity var(--pane-overlay-fade-duration, 800ms) ease;
   pointer-events: none;
+}
+.panel.focused-pane > .panel-overlay-root::after {
+  --pane-overlay-fade-duration: 200ms;
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel > .panel-overlay-root::after {
+    transition: none;
+  }
 }
 .terminal.typing-ready {
   border-color: transparent;
@@ -645,18 +653,18 @@ button.tab-action-description:focus-visible {
 }
 .tab-directional-action-icon--left::after,
 .tab-directional-action-icon--right::after {
-  inset-block: var(--space-4);
-  inline-size: var(--space-7);
+  inset-block: var(--tab-directional-icon-cross-inset, var(--space-4));
+  inline-size: var(--tab-directional-icon-stripe-size, var(--space-7));
 }
-.tab-directional-action-icon--left::after { inset-inline-start: var(--space-3); }
-.tab-directional-action-icon--right::after { inset-inline-end: var(--space-3); }
+.tab-directional-action-icon--left::after { inset-inline-start: var(--tab-directional-icon-edge-inset, var(--space-3)); }
+.tab-directional-action-icon--right::after { inset-inline-end: var(--tab-directional-icon-edge-inset, var(--space-3)); }
 .tab-directional-action-icon--top::after,
 .tab-directional-action-icon--bottom::after {
-  inset-inline: var(--space-4);
-  block-size: var(--space-7);
+  inset-inline: var(--tab-directional-icon-cross-inset, var(--space-4));
+  block-size: var(--tab-directional-icon-stripe-size, var(--space-7));
 }
-.tab-directional-action-icon--top::after { inset-block-start: var(--space-3); }
-.tab-directional-action-icon--bottom::after { inset-block-end: var(--space-3); }
+.tab-directional-action-icon--top::after { inset-block-start: var(--tab-directional-icon-edge-inset, var(--space-3)); }
+.tab-directional-action-icon--bottom::after { inset-block-end: var(--tab-directional-icon-edge-inset, var(--space-3)); }
 .terminal-context-menu .tab-split-actions .tab-split-action.control-active-hover:hover,
 .terminal-context-menu .tab-split-actions .tab-split-action.control-active-hover:focus-visible {
   color: var(--chrome-text-strong);
@@ -756,6 +764,16 @@ button.tab-action-description:focus-visible {
 }
 .context-menu-icon-rows > button .context-menu-icon > .context-menu-check { grid-column: 1; }
 .context-menu-icon-rows > button .context-menu-icon > :not(.context-menu-check) { grid-column: 2; justify-self: center; }
+.context-menu-icon-rows > button .tab-directional-action-icon {
+  --tab-directional-icon-inline-size: 1.1em;
+  --tab-directional-icon-block-size: 0.85em;
+  --tab-directional-icon-border-width: var(--space-1);
+  --tab-directional-icon-outer-radius: var(--space-2);
+  --tab-directional-icon-inner-radius: var(--space-1);
+  --tab-directional-icon-cross-inset: var(--space-2);
+  --tab-directional-icon-edge-inset: var(--space-1);
+  --tab-directional-icon-stripe-size: var(--space-3);
+}
 .file-context-menu-icon-svg {
   display: block;
   width: 1em;
@@ -3312,12 +3330,9 @@ button.info-tree-tab-token.active:focus-visible {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
-.server-update-banner-reload,
-.share-manager .share-stop-action {
+.server-update-banner-reload {
   background: var(--danger-strong);
   color: var(--paint-white);
-}
-.server-update-banner-reload {
   cursor: pointer;
   border: 1px solid var(--danger-strong-hover);
   border-radius: var(--radius-control);
@@ -3326,9 +3341,7 @@ button.info-tree-tab-token.active:focus-visible {
   padding: var(--space-2) var(--space-10);
 }
 .server-update-banner-reload:hover,
-.server-update-banner-reload:focus-visible,
-.share-manager .share-stop-action:hover,
-.share-manager .share-stop-action:focus-visible {
+.server-update-banner-reload:focus-visible {
   border-color: var(--danger-strong-border);
   background: var(--danger-strong-hover);
   color: var(--paint-white);

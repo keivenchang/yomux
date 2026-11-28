@@ -2783,7 +2783,7 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             snapshot_cursor: 'alignment-snapshot',
             next_cursor: '',
             truncated: false,
-            commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Release YOmux 0.10.8', author: '', signature_status: 'N', decorations: ['HEAD -> yo7111', 'tag: v0.10.8', 'origin/main', 'yo7110', 'main'], authored_at: 1786931640, files: 1, added: 2, removed: 1, binary_files: 0}],
+            commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'YOmux 0.10.8 Repo Diff and Finder fixes', author: '', signature_status: 'N', decorations: ['HEAD -> yo7111', 'tag: v0.10.8', 'origin/main', 'yo7110', 'main'], authored_at: 1786931640, files: 1, added: 2, removed: 1, binary_files: 0}],
             worktree_status: {
               available: true,
               dirty: true,
@@ -5525,7 +5525,7 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
         "/home/test/vortex/parser-toolkits": [{"name": "acceptance", "kind": "dir"}],
         "/home/test/vortex/parser-toolkits/acceptance": [{"name": "utils", "kind": "dir"}],
         "/home/test/vortex/parser-toolkits/acceptance/utils": [{"name": "tests", "kind": "dir"}],
-        "/home/test/vortex/parser-toolkits/acceptance/utils/tests": [{"name": "parity", "kind": "dir"}],
+        "/home/test/vortex/parser-toolkits/acceptance/utils/tests": [{"name": "check", "kind": "dir"}],
         "/home/test/vortex/parser-toolkits/acceptance/utils/tests/check": [{"name": "reasoning", "kind": "dir"}],
         "/home/test/vortex/parser-toolkits/acceptance/utils/tests/check/reasoning": [{"name": "table.py", "kind": "file"}],
     }
@@ -7844,6 +7844,39 @@ def finish_repo_diff_interaction_fixture(browser):
       const p=window.__repoDiffInteraction;if(!p)return;
       window.fetch=p.originalFetch;cleanupGitDiffTab(p.item);p.panel.remove();panelNodes.delete(p.item);delete window.__repoDiffInteraction;
     """)
+
+
+def test_repo_diff_rows_have_no_separators_in_either_theme(browser, tmp_path):
+    load_repo_diff_interaction_fixture(browser, tmp_path)
+    try:
+        styles = browser.execute_script("""
+          const {panel} = window.__repoDiffInteraction;
+          const originalTheme = globalThemeMode;
+          try {
+            return ['dark', 'light'].map(theme => {
+              globalThemeMode = theme;
+              applyGlobalThemeMode();
+              const dirty = panel.querySelector('.git-diff-worktree-summary');
+              const commits = [...panel.querySelectorAll('.git-diff-commit')];
+              return {
+                theme: document.body.classList.contains('theme-' + theme),
+                commits: commits.length,
+                separators: [dirty, ...commits].map(row => {
+                  const style = getComputedStyle(row);
+                  return [style.boxShadow, style.borderBottomWidth];
+                }),
+              };
+            });
+          } finally {
+            globalThemeMode = originalTheme;
+            applyGlobalThemeMode();
+          }
+        """)
+        for result in styles:
+            assert result['theme'] and result['commits'] >= 2, result
+            assert all(style == ['none', '0px'] for style in result['separators']), result
+    finally:
+        finish_repo_diff_interaction_fixture(browser)
 
 
 def test_repo_diff_disclosure_keeps_pane_scroll_position(browser, tmp_path):

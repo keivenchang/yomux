@@ -11,11 +11,14 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
+import json
+import shlex
 import uuid
 
 import pytest
 
 from tests.helpers.fixture_tools import fixture_command
+from tools.mockers.transcript import write_records
 from tools.product_environment import apply_yomux_environment_assignments
 from tools.product_environment import product_env
 from tools.product_environment import product_env_names
@@ -66,6 +69,52 @@ def run_isolated_tmux(runtime, *args: str, timeout: float = 8, declared_socket: 
         timeout=timeout,
         check=False,
     )
+
+
+def write_codex_rollout(sessions: Path, name: str, start_cwd: Path, records: Iterable[dict], *, padding: bytes = b"") -> Path:
+    """Write a Codex rollout transcript into ``sessions``, normally ``$HOME/.codex/sessions``.
+
+    ``start_cwd`` is only the session header directory. Differ never treats it as a repository;
+    repositories come from the paths the records touch.
+    """
+    sessions.mkdir(parents=True, exist_ok=True)
+    transcript = sessions / f"rollout-{name}.jsonl"
+    lines = [{"type": "session_meta", "payload": {"cwd": str(start_cwd)}}, *records]
+    write_records(transcript, lines)
+    if padding:
+        with transcript.open("ab") as stream:
+            stream.write(padding)
+    return transcript
+
+
+def codex_exec_record(command: str, workdir: Path) -> dict:
+    """One Codex ``exec_command`` call as recorded in a rollout transcript."""
+    return {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+            "arguments": {"cmd": command, "workdir": str(workdir)}}}
+
+
+def respawn_pane_with_codex_agent(runtime, target: str, cwd: Path, transcript: Path, *, timeout: float = 8) -> None:
+    """Respawn ``target`` as an interactive shell whose child is a stand-in live Codex agent.
+
+    The child's argv[0] is ``codex`` and it keeps ``transcript`` open, which is how the server
+    finds a live Codex pane's transcript. The shell stays interactive for terminal input. Returns
+    once the stand-in holds the transcript open, so the first Differ request already sees it.
+    """
+    ready = transcript.with_name(f".{transcript.name}.open")
+    ready.unlink(missing_ok=True)
+    holder = ("import pathlib, sys, time; handle = open(sys.argv[1], 'rb'); "
+              "pathlib.Path(sys.argv[2]).touch(); time.sleep(10**9)")
+    script = (f"(exec -a codex {shlex.quote(sys.executable)} -c {shlex.quote(holder)} "
+              f"{shlex.quote(str(transcript))} {shlex.quote(str(ready))}) & exec bash --noprofile --norc")
+    result = run_isolated_tmux(runtime, "respawn-pane", "-k", "-t", target, "-c", str(cwd), "bash", "--noprofile", "--norc", "-c", script)
+    assert result.returncode == 0, result.stderr
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while not ready.exists():
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"stand-in Codex agent in {target} did not open {transcript}"
+        _TMUX_PROCESS_EXIT_POLL.wait(min(adaptive_tmux_poll_interval(attempt), remaining))
+        attempt += 1
 
 
 def create_isolated_tmux_session(

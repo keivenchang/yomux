@@ -300,9 +300,16 @@ def pytest_runtest_makereport(item, call):
     path = _item_attribution_path(item)
     # Report extensions must remain JSON-safe for pytest-xdist's worker transport.
     report.yomux_attribution_path = str(path) if path is not None else ""
-    if report.outcome == "skipped" and item.get_closest_marker("real_agent_urls") is not None:
-        report.outcome = "failed"
-        report.longrepr = f"{item.nodeid}: required real-client URL sample did not run: {report.longrepr}"
+    if report.outcome == "skipped":
+        required_samples = {
+            "real_agent_urls": "real-client URL sample",
+            "required_browser": "browser regression",
+        }
+        for marker, description in required_samples.items():
+            if item.get_closest_marker(marker) is not None:
+                report.outcome = "failed"
+                report.longrepr = f"{item.nodeid}: required {description} did not run: {report.longrepr}"
+                break
     if report.when != "call":
         return
     if path is None:

@@ -399,23 +399,16 @@ function renderEmptyPane(slot) {
   panel.className = 'panel empty-pane-panel';
   panel.dataset.slot = slot;
   panel.setAttribute('aria-label', t('pane.empty'));
-  const emptyItem = dockviewEmptyPaneItem(slot);
   if (canCloseEmptyPane(slot)) {
     const controls = document.createElement('div');
     controls.className = 'empty-pane-controls';
-    controls.innerHTML = paneFrameControlsGroupHtml(emptyItem, {
-      slot,
-      actions: false,
-      details: false,
-      popout: false,
-      expand: false,
-      minimize: false,
-      close: true,
-      closeTitle: t('editor.closePane'),
-      closeLabel: t('editor.closePane'),
+    const close = makeButton({
+      label: t('editor.closePane'),
+      onClick: () => closeEmptyPaneFromLayout(slot),
     });
+    close.dataset.emptyPaneClose = '';
+    controls.appendChild(close);
     panel.appendChild(controls);
-    bindPaneFrameControls(panel, emptyItem);
   }
   const fill = document.createElement('div');
   fill.className = 'empty-pane-fill';
@@ -642,7 +635,8 @@ function bindPaneTabDismissInteraction(tab) {
     const item = tab.dataset.paneTab;
     if (!item || button.disabled) return;
     if (button.dataset.paneTabMinimize !== undefined) removeSessionFromLayout(item);
-    else closePaneFrameItem(item);
+    else if (isTmuxSession(item)) killTmuxSession(item);
+    else closeLayoutTabItem(item);
   }, true);
 }
 
@@ -696,7 +690,7 @@ function paneTabDismissButtonsHtml(item) {
     disabled,
   });
   const minimize = buttonHtml('minimize', {paneTabMinimize: ''}, t('finder.hideFromLayout', {name: itemLabel(item)}));
-  const close = canClose ? buttonHtml('close', {paneTabClose: ''}, paneFrameCloseLabel(item), paneItemCloseDisabled(item)) : '';
+  const close = canClose ? buttonHtml('close', {paneTabClose: ''}, paneTabCloseLabel(item), paneItemCloseDisabled(item)) : '';
   return minimize + close;
 }
 
@@ -743,13 +737,13 @@ function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsH
   ${afterBodyHtml}`;
 }
 
-function createFramedPanel({item, className = 'panel', dataset = {}, frame = {}, bind = null} = {}) {
+function createFramedPanel({item, className = 'panel', dataset = {}, frame = {}, bind = null, recordPointerActivity = true} = {}) {
   const panel = document.createElement('article');
   panel.className = className;
   panel.id = panelDomId(item);
   for (const [key, value] of Object.entries(dataset)) panel.dataset[key] = String(value ?? '');
   panel.innerHTML = panelFrameHtml({item, ...frame});
-  bindPanelShell(panel, item);
+  bindPanelShell(panel, item, recordPointerActivity);
   if (typeof bind === 'function') bind(panel, item);
   return panel;
 }
@@ -1358,9 +1352,7 @@ function getOrCreatePanel(session) {
   return panel;
 }
 
-function bindPanelShell(panel, session) {
-  // Inactive-pane dimming is pure CSS now (`.panel:not(.focused-pane) .panel-overlay-root::after`,
-  // keyed off the uniformly-toggled .focused-pane class) — no per-pane overlay <div> to install.
+function bindPanelShell(panel, session, recordPointerActivity) {
   bindPanelPopover(panel);
   bindPaneFrameControls(panel, session);
   panel.addEventListener('pointerenter', event => selectPanelOnHover(session, event));
@@ -1402,7 +1394,7 @@ function bindPanelShell(panel, session) {
         setFocusedTerminal(session, {userInitiated: true});
       }
     } else {
-      setFocusedPanelItem(session, {userInitiated: true});
+      setFocusedPanelItem(session, {userInitiated: true, recordActivity: recordPointerActivity});
     }
   }, {capture: true});
   panel.addEventListener('focusin', event => {
@@ -1427,7 +1419,7 @@ function eventTargetIsTerminalFocusSurface(target) {
   return Boolean(target?.closest?.('.terminal, .xterm'));
 }
 
-const paneFrameActionSelector = '[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-popout], [data-pane-close]';
+const paneFrameActionSelector = '[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-popout]';
 
 function handlePaneFrameActionClick(event, fallbackItem) {
   const button = event.target?.closest?.(paneFrameActionSelector);
@@ -1435,7 +1427,7 @@ function handlePaneFrameActionClick(event, fallbackItem) {
   event.preventDefault();
   event.stopPropagation();
   if (button.disabled) return true;
-  const {paneActions, paneMinimize, paneExpand, panePopout, paneClose} = button.dataset;
+  const {paneActions, paneMinimize, paneExpand, panePopout} = button.dataset;
   if (paneActions !== undefined) {
     const rect = button.getBoundingClientRect();
     showSessionContextMenu(paneActions || fallbackItem, rect.left, rect.bottom + 4);
@@ -1445,8 +1437,6 @@ function handlePaneFrameActionClick(event, fallbackItem) {
     expandPaneFromLayout(paneExpand || fallbackItem);
   } else if (panePopout !== undefined) {
     openPanePopout(panePopout || fallbackItem);
-  } else if (paneClose !== undefined) {
-    closePaneFrameItem(paneClose || fallbackItem);
   }
   return true;
 }

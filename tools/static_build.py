@@ -86,10 +86,10 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
     ),
     "static_src/css/yomux/60_editor_file_panels.css": (
         frozenset({
-            "#0b0e14", "#0e1724", "#0f131b", "#17210f", "#35d36f",
+            "#0b0e14", "#0e1724", "#0f131b", "#35d36f",
             "#3b0a0a", "#6cb6df", "#a8e95a",
             "#b9e7c2", "#b9e9ff", "#c69a15", "#d9ffe0",
-            "#f4b7b7", "#f6e6a8", "#ff5a6d", "#ffe0e4", "#fff8cc",
+            "#f4b7b7", "#ff5a6d", "#ffe0e4", "#fff8cc",
             "rgb(0 0 0 / 0.2)", "rgb(0 0 0 / 0.24)",
             "rgb(120 180 255 / 0.4)", "rgb(159 216 255 / 0.1)",
             "rgb(159 216 255 / 0.14)",

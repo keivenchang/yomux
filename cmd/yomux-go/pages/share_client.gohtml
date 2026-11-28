@@ -2,25 +2,39 @@
 /* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 'use strict';
 window.YOmuxShare = (() => {
-  async function request(url, options = {}) {
+  const syncIntervalMs = 1003;
+  const inputQuietMs = 350;
+  const readOnlyPresence = new WeakMap();
+  async function request(url, options = {}, beforeDecode) {
     const response = await fetch(url, {credentials: 'same-origin', cache: 'no-store', ...options});
+    if (response.ok && beforeDecode) await beforeDecode();
     const body = await response.json();
     if (!response.ok) throw Object.assign(new Error(body.error || 'Request failed'), {status: response.status, appearance: body.appearance});
     return body;
   }
-  function post(url, body) { return request(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}); }
+  function post(url, body, beforeDecode) {
+    return request(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}, beforeDecode);
+  }
   function randomID() { return crypto.randomUUID(); }
   function guestName() { const n = new Uint32Array(1); crypto.getRandomValues(n); return `Guest${String(n[0] % 10000).padStart(4, '0')}`; }
   function presenceExtension(api) {
     const effect = api.StateEffect.define();
     class RemoteCaret extends api.WidgetType {
-      constructor(name, hue) { super(); this.name = name; this.hue = hue; }
-      eq(other) { return this.name === other.name && this.hue === other.hue; }
+      constructor(peer, color) { super(); this.peer = peer; this.color = color; }
+      eq(other) {
+        return this.peer.name === other.peer.name && this.color === other.color &&
+          this.peer.approximate === other.peer.approximate && this.peer.follower === other.peer.follower;
+      }
       toDOM() {
         const caret = document.createElement('span');
         caret.className = 'share-remote-caret';
-        caret.dataset.shareCaretName = this.name;
-        caret.style.setProperty('--share-participant-hue', this.hue);
+        caret.dataset.shareCaretName = this.peer.name;
+        if (this.peer.approximate) caret.dataset.shareCaretApproximate = '';
+        if (this.peer.follower !== undefined) {
+          caret.toggleAttribute('data-share-caret-follower', this.peer.follower);
+          caret.toggleAttribute('data-share-caret-primary', !this.peer.follower);
+        }
+        caret.setAttribute('style', this.color);
         return caret;
       }
     }
@@ -33,9 +47,9 @@ window.YOmuxShare = (() => {
           for (const presence of item.value) {
             const anchor = Math.min(tr.newDoc.length, Math.max(0, presence.anchor));
             const head = Math.min(tr.newDoc.length, Math.max(0, presence.head));
-            const hue = shareParticipantHue(presence.name, presence.hue);
-            if (head !== anchor) ranges.push(api.Decoration.mark({class: 'share-remote-selection', attributes: {style: `--share-participant-hue: ${hue}`}}).range(Math.min(anchor, head), Math.max(anchor, head)));
-            ranges.push(api.Decoration.widget({widget: new RemoteCaret(presence.name, hue), side: 1}).range(head));
+            const color = shareParticipantStyle(presence);
+            if ((!presence.follower || presence.showSelection) && !presence.approximate && head !== anchor) ranges.push(api.Decoration.mark({class: 'share-remote-selection', attributes: {style: color}}).range(Math.min(anchor, head), Math.max(anchor, head)));
+            ranges.push(api.Decoration.widget({widget: new RemoteCaret(presence, color), side: 1}).range(head));
           }
           value = api.Decoration.set(ranges, true);
         }
@@ -43,7 +57,26 @@ window.YOmuxShare = (() => {
       },
       provide: owner => api.EditorView.decorations.from(owner),
     });
-    return {effect, field};
+    let lastDoc, lastPeers;
+    return {field, render(view, peers) {
+      const signature = JSON.stringify(peers.map(({clientID, name, hue, owner, anchor, head, approximate, follower, showSelection}) =>
+        [clientID, name, hue, owner, anchor, head, approximate, follower, showSelection]));
+      if (lastDoc === view.state.doc && lastPeers === signature) return;
+      lastDoc = view.state.doc;
+      lastPeers = signature;
+      view.dispatch({effects: effect.of(peers)});
+    }};
+  }
+  function showReadOnlyPresence(view, peers) {
+    let layer = readOnlyPresence.get(view);
+    if (!layer) {
+      if (!peers.length) return;
+      const api = window.YOmuxCodeMirror;
+      layer = presenceExtension(api);
+      readOnlyPresence.set(view, layer);
+      view.dispatch({effects: api.StateEffect.appendConfig.of(layer.field)});
+    }
+    layer.render(view, peers);
   }
   async function connect(view, url, options = {}) {
     const api = window.YOmuxCodeMirror;
@@ -52,6 +85,10 @@ window.YOmuxShare = (() => {
     const initialURL = new URL(endpoint); initialURL.searchParams.set('initial', '1');
     const admission = new api.Compartment();
     view.dispatch({effects:api.StateEffect.appendConfig.of(admission.of(api.EditorState.readOnly.of(true)))});
+    // Admission is read-only, so this is the editor's final text before joining.
+    const draft = view.state.doc.toString();
+    // YOmux passes a minimal replacement so carets and scroll survive joining. Plain callers replace the document.
+    const replace = options.replacement || ((doc, text) => ({from: 0, to: doc.length, insert: text}));
     const alive = () => options.alive?.() !== false;
     function releaseAdmission() { if (alive()) view.dispatch({effects: admission.reconfigure([])}); }
     let initial;
@@ -59,50 +96,141 @@ window.YOmuxShare = (() => {
     if (!alive() || options.current?.() === false) { releaseAdmission(); return null; }
 
     if (initial.active === false && initial.text === undefined) {releaseAdmission();return null;}
-    if (options.requireText !== undefined && initial.text !== options.requireText) {releaseAdmission();throw new Error('Save or reload the host draft before collaborating');}
+    // An unsaved draft can join only from the text it was based on. Its edits are replayed below.
+    const carryDraft = options.draftBase !== undefined && draft !== options.draftBase;
+    if (carryDraft && initial.text !== options.draftBase) {releaseAdmission();throw new Error('Save or reload the host draft before collaborating');}
     endpoint.searchParams.set('session',initial.session);
     const presence = presenceExtension(api);
     const compartment = new api.Compartment();
-    view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: initial.text}, annotations:api.Transaction.addToHistory.of(false)});
+    if (draft !== initial.text) {
+      view.dispatch({changes: replace(view.state.doc, initial.text), annotations:api.Transaction.addToHistory.of(false)});
+    }
     view.dispatch({effects: [admission.reconfigure([]), api.StateEffect.appendConfig.of(compartment.of([api.collab({startVersion: initial.version, clientID: initial.clientID}), presence.field]))]});
+    if (carryDraft) view.dispatch({changes: replace(view.state.doc, draft)});
     let closed = false, busy = false, timer = null, settled = Promise.resolve(), resolveSettled = null;
+    let quietTimer = null, wakeQuiet = null, lastInput = 0, composing = false, flushers = 0;
+    let lastDoc = view.state.doc, lastText = lastDoc.toString();
+    let lastPresence;
+    function refreshPresence() {
+      if (!closed && lastPresence?.doc === view.state.doc) options.onPresence?.(lastPresence.peers);
+    }
+    const inputEvents = ['keydown', 'beforeinput', 'pointerdown', 'pointermove', 'compositionstart', 'compositionend', 'focusout'];
+    function noteInput(event) {
+      if (event.type === 'pointermove' && !event.buttons) return;
+      if (event.type === 'compositionstart') composing = true;
+      if (event.type === 'compositionend' || event.type === 'focusout') composing = false;
+      lastInput = Date.now();
+      if (wakeQuiet) checkQuiet();
+    }
+    const inputSurface = options.inputSurface || view.dom;
+    inputEvents.forEach(type => inputSurface?.addEventListener?.(type, noteInput, true));
+    let previewInputSurface;
+    function syncPreviewInput() {
+      const next = closed ? null : options.previewInputSurface?.();
+      if (previewInputSurface === next) return;
+      for (const type of inputEvents) {
+        previewInputSurface?.removeEventListener(type, noteInput, true);
+        next?.addEventListener(type, noteInput, true);
+      }
+      if (previewInputSurface && composing) noteInput({type: 'focusout'});
+      previewInputSurface = next;
+    }
+    syncPreviewInput();
+    function checkQuiet() {
+      clearTimeout(quietTimer);
+      quietTimer = null;
+      const delay = lastInput + inputQuietMs - Date.now();
+      if (!closed && !flushers && composing) return;
+      if (!closed && !flushers && delay > 0) {
+        quietTimer = setTimeout(checkQuiet, delay);
+        return;
+      }
+      const resolve = wakeQuiet;
+      wakeQuiet = null;
+      resolve?.();
+    }
+    function waitForQuiet() {
+      if (closed || flushers || (!composing && Date.now() >= lastInput + inputQuietMs)) return;
+      return new Promise(resolve => { wakeQuiet = resolve; checkQuiet(); });
+    }
     const ids = new WeakMap();
     function opID(update) { let id = ids.get(update.origin); if (!id) { id = randomID(); ids.set(update.origin, id); } return id; }
     async function tick() {
       if (closed) return;
       if (busy) return settled;
+      clearTimeout(timer);
+      timer = null;
       busy = true;
       settled=new Promise(resolve=>{resolveSettled=resolve;});
       try {
+        await waitForQuiet();
+        if (closed || options.current?.() === false) { stop(); return; }
         const version = api.getSyncedVersion(view.state);
-        const pending = api.sendableUpdates(view.state).slice(0, 256);
-        const selection = view.state.selection.main;
-        const response = await post(endpoint, {version, updates: pending.map(update => ({changes: update.changes.toJSON(), id: opID(update)})), anchor: selection.anchor, head: selection.head, focused: view.hasFocus && !document.hidden});
-        if (closed) return;
+        const sendable = api.sendableUpdates(view.state);
+        const pending = sendable.slice(0, 256);
+        const selection = options.selection?.() || view.state.selection.main;
+        const canPublishSelection = sendable.length === pending.length;
+        const response = await post(endpoint, {
+          version, updates: pending.map(update => ({changes: update.changes.toJSON(), id: opID(update)})),
+          anchor: canPublishSelection ? selection.anchor : -1, head: canPublishSelection ? selection.head : -1,
+          surface: selection.surface || 'text', approximate: selection.approximate === true,
+          focused: (selection.focused ?? view.hasFocus) && !document.hidden,
+        }, waitForQuiet);
+        await waitForQuiet();
+        if (closed || options.current?.() === false) { stop(); return; }
         if (response.updates.length) view.dispatch(api.receiveUpdates(view.state, response.updates.map(update => ({...update, changes: api.ChangeSet.fromJSON(update.changes)}))));
         // Server positions are at the accepted revision; map through this editor's
         // outstanding local changes before drawing another editor's selection.
         const outstanding = api.sendableUpdates(view.state);
-        const peers = response.presence.filter(peer => peer.clientID !== initial.clientID).map(peer => {
+        const appliedVersion = api.getSyncedVersion(view.state);
+        const atServerVersion = appliedVersion === response.version;
+        const visiblePeers = atServerVersion ? response.presence : [];
+        const peers = visiblePeers.filter(peer => peer.clientID !== initial.clientID).map(peer => {
           let {anchor, head} = peer;
           for (const local of outstanding) { anchor = local.changes.mapPos(anchor); head = local.changes.mapPos(head); }
           return {...peer, anchor, head};
         });
-        view.dispatch({effects: presence.effect.of(peers)});
-        options.onState?.({...response,saved:response.saved && api.sendableUpdates(view.state).length===0}, view.state.doc.toString());
+        presence.render(view, options.sourcePresence ? peers.map(options.sourcePresence) : peers);
+        if (view.state.doc !== lastDoc) {
+          lastDoc = view.state.doc;
+          lastText = lastDoc.toString();
+        }
+        options.onState?.({...response, version: appliedVersion, saved: response.saved && atServerVersion && outstanding.length === 0}, lastText);
+        lastPresence = {doc: view.state.doc, peers};
+        refreshPresence();
         if (!response.active) stop();
       } catch (error) {
-        options.onError?.(error);
+        const ended = error.status === 410 || error.status === 401 || error.status === 403 ||
+          ['document_session_changed', 'permission_changed'].includes(error.message);
+        if (!ended) await waitForQuiet();
         if (closed) return;
-        if (error.status === 410 || error.status === 401 || error.status === 403 || ['document_session_changed', 'permission_changed'].includes(error.message)) {
+        options.onError?.(error);
+        if (ended) {
           options.onEnd?.(error);
           stop();
         }
-      } finally { busy = false; resolveSettled(); if (!closed) timer = setTimeout(tick, 503); }
+      } finally { busy = false; resolveSettled(); if (!closed) timer = setTimeout(tick, syncIntervalMs); }
     }
-    function stop() { if(closed)return; closed = true; clearTimeout(timer); if (alive()) view.dispatch({effects: compartment.reconfigure([])}); }
+    function stop() {
+      if (closed) return;
+      closed = true;
+      clearTimeout(timer);
+      checkQuiet();
+      inputEvents.forEach(type => inputSurface?.removeEventListener?.(type, noteInput, true));
+      syncPreviewInput();
+      if (alive()) view.dispatch({effects: compartment.reconfigure([])});
+    }
+    async function flush() {
+      flushers++;
+      checkQuiet();
+      try {
+        await tick();
+        if (!closed && api.sendableUpdates(view.state).length) await tick();
+        return !closed && api.sendableUpdates(view.state).length === 0;
+      } finally { flushers--; }
+    }
     tick();
-    return {stop, session:initial.session, pending:()=>closed?0:api.sendableUpdates(view.state).length, text:()=>view.state.doc.toString(), flush:async()=>{await tick();if(!closed && api.sendableUpdates(view.state).length)await tick();return !closed && api.sendableUpdates(view.state).length===0;}, resolve: () => post(endpoint, {version: api.getSyncedVersion(view.state), updates: [], resolve: 'resume'})};
+    return {stop, session:initial.session, pending:()=>closed?0:api.sendableUpdates(view.state).length, text:()=>view.state.doc.toString(), flush, refreshPresence, syncPreviewInput, resolve: () => post(endpoint, {version: api.getSyncedVersion(view.state), updates: [], resolve: 'resume'})};
   }
-  return {request, post, connect, randomID, guestName};
+  return {request, post, connect, showReadOnlyPresence, randomID, guestName};
 })();

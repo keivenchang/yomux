@@ -100,7 +100,7 @@ func TestSearchIndexV2MigrationRecordsRankingSizeAndRollback(t *testing.T) {
 	defer store.db.Close()
 	engine := newSearchIndexEngine(store)
 	info, _ := os.Stat(root)
-	for _, query := range []string{"", "2026.md", "tech blog", "tchblg", "shared-directory", "café", "subdirectory 2026"} {
+	for _, query := range []string{"", "2026.md", "write up", "wrtup", "shared-directory", "café", "subdirectory 2026"} {
 		expected := []discoveredIndexPath{}
 		for _, entry := range entries {
 			if _, matched := v1EntrySortKey(entry.name, entry.relative, prepareSearchTokens(strings.Fields(query))); matched {

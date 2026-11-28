@@ -220,7 +220,7 @@ func TestNativeRuntimePathFindsLocalAndConfiguredAgents(t *testing.T) {
 		{local, "claude", "#!/bin/sh\nprintf '%s' '{\"loggedIn\":true}'\n"},
 		{extra, "codex", "#!/bin/sh\nprintf '%s' 'Not logged in' >&2\nexit 1\n"},
 	} {
-		if err := os.WriteFile(filepath.Join(sample.directory, sample.name), []byte(sample.source), 0700); err != nil {
+		if err := testsupport.WriteExecutable(filepath.Join(sample.directory, sample.name), []byte(sample.source), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -262,7 +262,7 @@ func TestNativeAgentProbePreservesUnknownAndCancellation(t *testing.T) {
 	s := nativePageFixtureServer(t)
 	directory := os.Getenv("PATH")
 	source := "#!/bin/sh\nexec /bin/sleep 60\n"
-	if err := os.WriteFile(filepath.Join(directory, "claude"), []byte(source), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(directory, "claude"), []byte(source), 0700); err != nil {
 		t.Fatal(err)
 	}
 	parent, cancel := context.WithCancel(context.Background())
@@ -324,7 +324,7 @@ func checkNativeSessionLaunchPath(t *testing.T, agent, terminal string, extra, f
 	if err := os.Symlink(shellPath, filepath.Join(local, "native-session-child")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(local, executable), []byte(source), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(local, executable), []byte(source), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("YOMUX_TMUX_SOCKET", socket)
@@ -381,7 +381,7 @@ func checkNativeSessionLaunchPath(t *testing.T, agent, terminal string, extra, f
 func TestNativeAuthProbeRejectsOversizedDiagnosticOutput(t *testing.T) {
 	s := nativePageFixtureServer(t)
 	source := "#!/bin/sh\nprintf '%s' '{\"loggedIn\":true}'\ni=0\nwhile [ \"$i\" -lt 10000 ]; do printf 12345678 >&2; i=$((i+1)); done\n"
-	if err := os.WriteFile(filepath.Join(os.Getenv("PATH"), "claude"), []byte(source), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(os.Getenv("PATH"), "claude"), []byte(source), 0700); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := s.pageAgentStatus(context.Background(), true)
@@ -406,7 +406,7 @@ func TestNativeAuthJSONAuthorityMatchesBooleanIdentity(t *testing.T) {
 	} {
 		t.Run(sample.key+"_"+sample.value, func(t *testing.T) {
 			source := "#!/bin/sh\nprintf '%s' " + shellQuote(`{"`+sample.key+`":`+sample.value+`}`) + "\n"
-			if err := os.WriteFile(filepath.Join(directory, "claude"), []byte(source), 0700); err != nil {
+			if err := testsupport.WriteExecutable(filepath.Join(directory, "claude"), []byte(source), 0700); err != nil {
 				t.Fatal(err)
 			}
 			row := probePageAgentAuth(context.Background(), "claude", pageAgentAuth{Installed: true, Available: true, Reason: "auth-unknown"})

@@ -503,7 +503,7 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 	launchBin := t.TempDir()
 	for _, name := range []string{"claude", "codex"} {
 		path := filepath.Join(launchBin, name)
-		if err := os.WriteFile(path, []byte(testsupport.ShellScript(t, "sleep 60\n")), 0o755); err != nil {
+		if err := testsupport.WriteExecutable(path, []byte(testsupport.ShellScript(t, "sleep 60\n")), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -752,7 +752,7 @@ func TestGoRenameSessionRouteValidatesAndRenamesExactTmuxSession(t *testing.T) {
 	}
 	lockTmuxWrapper := filepath.Join(lockBinDir, "tmux")
 	lockWrapperScript := fmt.Sprintf("for arg do\n  if [ \"$arg\" = \"rename-session\" ]; then\n    printf 'ready\\n' > '%s'\n    IFS= read -r _ < '%s'\n    break\n  fi\ndone\nexec %s \"$@\"\n", readyFIFO, releaseFIFO, lockTmuxBinary)
-	if err := os.WriteFile(lockTmuxWrapper, []byte(testsupport.ShellScript(t, lockWrapperScript)), 0o755); err != nil {
+	if err := testsupport.WriteExecutable(lockTmuxWrapper, []byte(testsupport.ShellScript(t, lockWrapperScript)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	originalTmuxPath := os.Getenv("PATH")
@@ -886,7 +886,7 @@ func TestGoRenameSessionRouteValidatesAndRenamesExactTmuxSession(t *testing.T) {
 	binDir := t.TempDir()
 	tmuxWrapper := filepath.Join(binDir, "tmux")
 	wrapper := fmt.Sprintf("for arg do\n  if [ \"$arg\" = \"if-shell\" ]; then\n    %s -S \"$YOLOMUX_TMUX_SOCKET\" kill-session -t '=yo-reuse-source:' || exit $?\n    %s -S \"$YOLOMUX_TMUX_SOCKET\" new-session -d -s yo-reuse-source || exit $?\n    break\n  fi\ndone\nexec %s \"$@\"\n", tmuxBinary, tmuxBinary, tmuxBinary)
-	if err := os.WriteFile(tmuxWrapper, []byte(testsupport.ShellScript(t, wrapper)), 0o755); err != nil {
+	if err := testsupport.WriteExecutable(tmuxWrapper, []byte(testsupport.ShellScript(t, wrapper)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -909,7 +909,7 @@ func TestGoRenameSessionRouteValidatesAndRenamesExactTmuxSession(t *testing.T) {
 func TestGoRenameSessionTmuxCommandHasRequestBoundedTimeout(t *testing.T) {
 	binDir := t.TempDir()
 	fakeTmux := filepath.Join(binDir, "tmux")
-	if err := os.WriteFile(fakeTmux, []byte(testsupport.ShellScript(t, "case \"$*\" in *rename-session*|*if-shell*) exec sleep 30 ;; esac\nexit 1\n")), 0o755); err != nil {
+	if err := testsupport.WriteExecutable(fakeTmux, []byte(testsupport.ShellScript(t, "case \"$*\" in *rename-session*|*if-shell*) exec sleep 30 ;; esac\nexit 1\n")), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -3862,7 +3862,7 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	}
 	tmuxWrapper := filepath.Join(tmuxWrapperDir, "tmux")
 	wrapperBody := "printf '%s\\n' \"$*\" >> \"$YOLOMUX_TEST_TMUX_LOG\"\nexec " + tmuxBinary + " \"$@\"\n"
-	if err := os.WriteFile(tmuxWrapper, []byte(testsupport.ShellScript(t, wrapperBody)), 0o700); err != nil {
+	if err := testsupport.WriteExecutable(tmuxWrapper, []byte(testsupport.ShellScript(t, wrapperBody)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("YOLOMUX_TEST_TMUX_LOG", tmuxLog)
@@ -4970,7 +4970,7 @@ func TestSessionFilesPaneInputsResolveClaudeTranscriptIdentity(t *testing.T) {
 	}
 
 	s := &server{processEntriesFn: processEntries}
-	_, agents, finderErr := s.sessionFilesPaneInputs(session)
+	agents, finderErr := s.sessionFilesPaneInputs(session)
 	if finderErr != nil {
 		t.Fatal(finderErr)
 	}

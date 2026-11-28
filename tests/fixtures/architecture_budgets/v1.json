@@ -1645,6 +1645,7 @@
       "tests/test_check_runner.py:test_go_gate_excludes_deprecated_backend_comparison:4",
       "tests/test_check_runner.py:test_go_gate_excludes_deprecated_backend_comparison:5",
       "tests/test_check_runner.py:test_go_gate_excludes_deprecated_backend_comparison:6",
+      "tests/test_check_runner.py:test_go_module_closure_declares_go_sources_and_tool_imports_separately:1",
       "tests/test_check_runner.py:test_module_bazel_uses_pinned_sdk_and_supported_platform_checksums:1",
       "tests/test_check_runner.py:test_module_bazel_uses_pinned_sdk_and_supported_platform_checksums:2",
       "tests/test_check_runner.py:test_module_bazel_uses_pinned_sdk_and_supported_platform_checksums:3",
@@ -1814,7 +1815,7 @@
       "tests/test_yostats_active_browser_window.py:test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes:8",
       "tests/test_yostats_active_browser_window.py:test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes:9"
     ],
-    "inventory_sha256": "88933f82690faa0c8f2b5a82b43126280fcd51a44196da60b34b6466fbc36746",
+    "inventory_sha256": "bbbc450e0d0a518e74b2209fbb98b755e9f945f3f8c666c874e55195876ae301",
     "unallowlisted": [],
     "validation_errors": []
   },

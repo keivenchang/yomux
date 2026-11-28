@@ -50,6 +50,25 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(reads, 1);
     assert.equal(api.fileEditorCursorStyleForTest(), 'block');
   });
+  test('a stretched Differ result keeps its last activity through normalization and says how old it is', () => {
+    const source = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
+    const context = {
+      diffRefFrom: 'default', diffRefTo: 'base', Date: {now: () => 1000000 * 1000},
+      t: (key, vars) => vars ? `${key}(${vars.rel ?? vars.session})` : key, tPlural: (key, count) => `${key}:${count}`,
+      esc: value => String(value), sessionLabel: value => value, relativeTimeFormat: seconds => `${seconds}s ago`,
+      sessionFilesRepoRoots: () => [], sessionFilesPayloadHasVisibleDifferResult: () => true, changesRepoCount: () => 1,
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('function normalizedSessionFilesPayload('), source.indexOf('function sessionFilesPayloadIsRefreshing(')), context);
+    vm.runInContext(source.slice(source.indexOf('function changesSummaryHtml('), source.indexOf('function changesLoadingHtml(')), context);
+    const stretched = context.normalizedSessionFilesPayload({session: 's', stretched: true, last_activity: 1000000 - 108000});
+    assert.equal(stretched.stretched, true);
+    assert.equal(stretched.last_activity, 1000000 - 108000);
+    assert.match(context.changesSummaryHtml(stretched, [], 's', false, true), /changes\.lastActivity\(108000s ago\)/);
+    const fresh = context.normalizedSessionFilesPayload({session: 's', last_activity: 5});
+    assert.equal(fresh.stretched, false);
+    assert.doesNotMatch(context.changesSummaryHtml(fresh, [], 's', false, true), /lastActivity/);
+  });
   test('pinned Tabber utility and terminal rows precede unpinned conversations', () => {
     const api = loadYomux('', ['one', 'two']);
     const utility = {name: 'Preferences', kind: 'file', mtime: 1, tabber: {type: 'tab', item: '__prefs__'}};
@@ -2512,7 +2531,8 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/CodeMirror diff language parser failed; retrying plain diff editor/.test(appSource), 'diff CodeMirror build has the same parser-failure plain retry safety net as edit mode');
     const diffPanelBody = appSource.slice(appSource.indexOf('async function ensureCodeMirrorDiffPanel('), appSource.indexOf('async function ensureCodeMirrorPanel(', appSource.indexOf('async function ensureCodeMirrorDiffPanel(')));
     assert.ok(/catch \(error\) \{[\s\S]{0,360}CodeMirror diff editor unavailable; showing read-only raw text[\s\S]{0,260}container\.hidden = true;[\s\S]{0,260}return false;/.test(diffPanelBody), 'diff CodeMirror build failures fall back to raw text instead of leaving an emptied blank pane');
-    assert.ok(/ensureCodeMirrorPanel\(panel, item, path, state\)\.then\(loaded => \{[\s\S]{0,160}renderFileEditorRawPane\(rawPane, path, state\.content\);[\s\S]{0,160}\}\)\.catch\(error => \{[\s\S]{0,360}renderFileEditorRawPane\(rawPane, path, state\.content\);/.test(appSource), 'CodeMirror render promise rejections are caught and fall back to raw text');
+    const textCodeMode = appSource.slice(appSource.indexOf('function renderTextCodeMode('), appSource.indexOf('function renderTextEditorMode('));
+    assert.ok(/\(sourceReady \|\| ensureCodeMirrorPanel\(panel, item, path, state\)\)\.then\(loaded => \{[\s\S]{0,160}renderFileEditorRawPane\(rawPane, path, state\.content\);[\s\S]{0,160}\}\)\.catch\(error => \{[\s\S]{0,360}renderFileEditorRawPane\(rawPane, path, state\.content\);/.test(textCodeMode), 'CodeMirror render promise rejections are caught and fall back to raw text');
     assert.equal(appSource.includes("fileEditorEmptyState('No diff'"), false, 'clean selected refs do not render a No diff empty state');
     assert.ok(/if \(!fileStateCanRenderDiffView\(path, state\)\)[\s\S]{0,360}return ensureCodeMirrorPanel\(panel, item, path, state, \{forceMode: 'edit'\}\)/.test(appSource), 'only truly unavailable diff views fall back to the normal editable CodeMirror view');
     assert.ok(/function diffModeShouldFallBackToEdit[\s\S]*!state\.diffLoading[\s\S]*!fileStateCanRenderDiffView\(path, state\)/.test(appSource), 'once a diff load confirms no renderable diff view, diff mode exits to edit; a file WITH history stays in diff mode so the FROM/TO ref picker is reachable');
@@ -2599,7 +2619,8 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(terminalDataHandlerBody.includes('noteTerminalExplicitInput'), false, 'terminal byte handling still avoids the explicit-input helper that commits Finder targets');
     assert.ok(/function terminalDataShouldAcknowledgeAttention\(data, options = \{\}\)[\s\S]*terminalDataWithoutPassiveReports\(data, options\)\.length > 0/.test(appSource), 'terminal byte handling filters passive xterm reports before acknowledging attention');
     assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*acknowledgeTerminalAttentionFromTransportInput\(session, filtered, options\)/.test(appSource), 'terminal byte handling acknowledges red/yellow attention from real typed xterm input');
-    assert.ok(/fetchSessionFiles\(\{destination: 'differ', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'a cached Differ session switch preserves last-known-good rows and lets the server coalesce stale refreshes');
+    // Never force on a session switch: the server answers from its cache, with or without a local copy.
+    assert.ok(/fetchSessionFiles\(\{destination: 'differ', session, silent: true, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'a Differ session switch keeps last-known-good rows and lets the server answer from its cache');
     assert.notEqual(api.sessionFilesCacheKeyForTest('8002'), api.sessionFilesCacheKeyForTest('8003'), 'session-files caches keep different sessions distinct');
     assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session, 'differ'\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('differ', cached\.payload\)/.test(appSource), 'Differ session switches apply cached target payloads immediately before a coalesced refresh');
@@ -3060,7 +3081,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(resizerBlock.includes('var(--pane-resizer-bg)'), 'C15: the Finder resizer draws the shared thin yellow line at rest');
     assert.ok(resizerBlock.includes('var(--pane-resizer-hover-bg)'), 'C15: the Finder resizer brightens via the shared hover token');
     assert.ok(resizerBlock.includes('box-shadow: var(--pane-resizer-hover-shadow)'), 'C15: the Finder resizer hover uses the shared shadow-geometry token');
-    assert.ok(/--inactive-pane-overlay:\s*rgb\(var\(--inactive-pane-overlay-rgb\) \/ calc\(var\(--inactive-pane-overlay-alpha\) \* var\(--inactive-pane-opacity-scale\)\)\)/.test(preferencesCss), 'inactive-pane flat dim is scaled by the opacity slider');
+    assert.ok(preferencesCss.includes('--inactive-pane-overlay: rgb(var(--inactive-pane-overlay-rgb) / var(--inactive-pane-opacity));'), 'inactive panes share the theme-calibrated overlay');
     assert.equal(/inactive-pane-gradient/.test(preferencesCss), false, 'inactive-pane gradient CSS is removed until the feature is revisited');
     {
       // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
@@ -4072,7 +4093,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(layoutSubmenu.items.some(item => item.disabled), false, 'Every View layout option is implemented');
     menus = api.appMenuTree();
     assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Tabs,Help');
-    assert.ok(menus.find(menu => menu.id === 'file').items.some(item => item.label === 'YO!share'));
+    assert.ok(menus.find(menu => menu.id === 'file').items.some(item => item.label === 'YO!Share'));
     assert.equal(menus.some(menu => menu.id === 'yolo'), false);
     const aboutHelpMenu = menus.find(menu => menu.id === 'help');
     assert.equal(aboutHelpMenu.items.some(item => item.type === 'submenu' && item.label === 'About'), false, 'Help menu no longer nests About as a submenu');
@@ -4155,23 +4176,23 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(fileMenuLabels.includes('Rename session'), false);
     assert.equal(fileMenuLabels.includes('Kill session'), false);
     assert.equal(fileMenuLabels.includes('Resume session'), false);
-    assert.ok(fileMenuLabels.includes('YO!info'));
+    assert.ok(fileMenuLabels.includes('YO!Info'));
     assert.ok(fileMenuLabels.includes('Search & Runs'));
-    assert.ok(fileMenuLabels.includes('YO!agent'));
+    assert.ok(fileMenuLabels.includes('YO!Agent'));
     assert.ok(fileMenuLabels.includes('Preferences'));
-    assert.ok(fileMenuLabels.includes('YO!stats'));
+    assert.ok(fileMenuLabels.includes('YO!Stats'));
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
     assert.equal(fileMenu.items[0].primary.label, 'new Claude', 'File starts with session creation instead of putting it under Tabs');
     assert.equal(fileMenu.items[1].primary.label, 'new Codex');
     const destinationLabels = fileMenu.items
       .slice(fileMenu.items.findIndex(item => item.type === 'separator') + 1, fileMenu.items.findLastIndex(item => item.type === 'separator'))
       .map(item => item.label);
-    assert.deepStrictEqual(canonical(destinationLabels), [api.fileSurfaceGroupLabel(), 'Open file', 'Preferences', 'Search & Runs', 'YO!agent', 'YO!chat', 'YO!info', 'YO!share', 'YO!stats'], 'File navigation destinations are alphabetized by their localized visible labels');
+    assert.deepStrictEqual(canonical(destinationLabels), [api.fileSurfaceGroupLabel(), 'Open file', 'Preferences', 'Search & Runs', 'YO!Agent', 'YO!Chat', 'YO!Info', 'YO!Share', 'YO!Stats'], 'File navigation destinations are alphabetized by their localized visible labels');
     const yoLabels = destinationLabels.filter(label => label.startsWith('YO!'));
-    assert.deepStrictEqual(canonical(yoLabels), ['YO!agent', 'YO!chat', 'YO!info', 'YO!share', 'YO!stats'], 'File menu keeps the YO!* destinations in alphabetical order');
+    assert.deepStrictEqual(canonical(yoLabels), ['YO!Agent', 'YO!Chat', 'YO!Info', 'YO!Share', 'YO!Stats'], 'File menu keeps the YO!* destinations in alphabetical order');
     assert.deepStrictEqual(canonical(fileMenu.items.slice(-2).map(item => item.type === 'separator' ? '---' : item.label)), ['---', 'Log out'], 'Log out remains in its own final group');
     const tripletLabel = api.fileSurfaceGroupLabel();
-    for (const label of [tripletLabel, 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'Preferences', 'YO!stats', 'Log out']) {
+    for (const label of [tripletLabel, 'YO!Info', 'Search & Runs', 'YO!Agent', 'Open file', 'Preferences', 'YO!Stats', 'Log out']) {
       const item = fileMenu.items.find(candidate => candidate.label === label);
       assert.ok(item?.iconHtml, `File menu ${label} uses the shared icon row`);
       assert.equal(item.className || '', label === tripletLabel ? 'app-menu-file-destination' : '', `File menu ${label} uses only its intended destination styling`);
@@ -4181,9 +4202,9 @@ async function runCrossSurfaceStateSuite() {
     const macFileMenuApi = loadYomux('?platform=mac', ['1'], 'http:', 'MacIntel');
     const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === macFileMenuApi.fileSurfaceGroupLabel());
     assert.equal(macFinderMenuItem?.detail, macFileMenuApi.t('menu.file.browseFiles'), 'wide File navigation keeps the same compact triplet detail on Mac');
-    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!agent').iconHtml.includes('app-menu-ui-icon-robot'));
-    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!chat').iconHtml.includes('app-menu-ui-icon-chat-bubble'));
-    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!stats').iconHtml.includes('app-menu-ui-icon-chart'));
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!Agent').iconHtml.includes('app-menu-ui-icon-robot'));
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!Chat').iconHtml.includes('app-menu-ui-icon-chat-bubble'));
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!Stats').iconHtml.includes('app-menu-ui-icon-chart'));
     const renderedSource = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(renderedSource.includes("node.className = 'app-modal-overlay keyboard-shortcuts-overlay'"), 'keyboard shortcuts use the shared modal overlay parent');
     assert.ok(renderedSource.includes("node.className = 'app-modal-overlay command-palette'"), 'command palette uses the shared modal overlay parent');
@@ -4215,7 +4236,7 @@ async function runCrossSurfaceStateSuite() {
     const tabsMenuLabels = tabsMenu.items.flatMap(menuLabels).filter(Boolean);
     assert.equal(tmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(tmuxMenu.items[0].keepOpen, true);
-    assert.equal(tmuxMenuLabels.includes('YO!info'), false, 'tmux menu omits the duplicate YO!info entry that File already owns');
+    assert.equal(tmuxMenuLabels.includes('YO!Info'), false, 'tmux menu omits the duplicate YO!Info entry that File already owns');
     assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
     // New-session items use explicit commands in File; Tabs is only the sorted tab navigator.
     assert.equal(tmuxMenuLabels.includes('new Claude'), false);
@@ -4259,7 +4280,7 @@ async function runCrossSurfaceStateSuite() {
       assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*var\(--radius-lg\)[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf records use the shared large corner radius with a faint 1px outline and no card shadow');
     }
     assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
-    assert.ok(tmuxMenuLabels.includes("YO!summary for session '1'"));
+    assert.ok(tmuxMenuLabels.includes("YO!Summary for session '1'"));
     assert.ok(tmuxMenuLabels.includes("Event log for session '1'"));
     assert.ok(tmuxMenuLabels.includes('Show/hide Info Bar'));
     assert.ok(tmuxMenuLabels.includes('tmux status bar'));
@@ -4462,7 +4483,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(shortcutsMenu.type, 'command');
     assert.equal(shortcutsMenu.keybinding, '?');
     assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
-    assert.ok(api.keyboardShortcutsHtml().includes('Open YO!agent in a right pane'), 'shortcut overlay documents the YO!agent pane shortcut');
+    assert.ok(api.keyboardShortcutsHtml().includes('Open YO!Agent in a right pane'), 'shortcut overlay documents the YO!agent pane shortcut');
     assert.ok(api.keyboardShortcutsHtml().includes('Pin / unpin active tab'), 'shortcut overlay lists the Pin Tab chord');
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+K Enter'), 'shortcut overlay renders the platform Pin Tab chord on PC/Linux');
     assert.ok(api.keyboardShortcutsHtml().includes('Previous / next tab') && api.keyboardShortcutsHtml().includes('Meta+← / Meta+→'), 'shortcut overlay documents Meta+Arrow pane-tab navigation');
@@ -5583,13 +5604,13 @@ async function runCrossSurfaceStateSuite() {
     tmuxOnlySlots[namedSessionApi.layoutTreeKey] = namedSessionApi.leafNode('left');
     tmuxOnlySlots.left = namedSessionApi.paneStateWithTabs(['1', 'vortex2'], '1');
     namedSessionApi.setLayoutSlotsForTest(tmuxOnlySlots);
-    namedSessionApi.setTabsMenuSearchTextForTest('do2');
+    namedSessionApi.setTabsMenuSearchTextForTest('vt2');
     const filteredNamedCommands = namedSessionApi.tabMenuItems().filter(item => item.type === 'command');
     const filteredNamedTabs = filteredNamedCommands.filter(item => item.targetItem);
     assert.equal(filteredNamedTabs.length, 1, 'Tabs search filters navigator entries');
     assert.deepEqual(filteredNamedTabs.map(item => item.targetItem), ['vortex2'], 'Tabs search keeps the matching session command');
     assert.equal(namedSessionApi.tabMenuItems().some(item => item.type === 'command-pair' || item.type === 'command-row'), false, 'Tabs search never injects session-creation controls');
-    assert.ok(Number.isFinite(namedSessionApi.tabSearchScore('vortex2', 'do2')), 'Tabs search matches the raw session name');
+    assert.ok(Number.isFinite(namedSessionApi.tabSearchScore('vortex2', 'vt2')), 'Tabs search matches the raw session name');
     namedSessionApi.setTabsMenuSearchTextForTest('');
     const tmuxTabActionLabels = namedSessionApi.tabMenuItems().map(item => item.label).filter(Boolean);
     assert.equal(tmuxTabActionLabels.includes('Current Tab'), false);
@@ -5648,7 +5669,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(editorTabPopoutOwner.includes('return openFilePreviewPopout(path, document.getElementById(panelDomId(item)));'), 'other non-text files retain their preview snapshot popout');
     api.setPinnedTabsForTest([]);
     const sessionViews = api.tmuxSessionViewCommands('1');
-    assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Show/hide Info Bar', 'tmux status bar']);
+    assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!Summary for session '1'", "Event log for session '1'", 'Show/hide Info Bar', 'tmux status bar']);
     assert.equal(Boolean(sessionViews[3].checked), false, 'Info Bar stays a direct show/hide toggle');
     assert.equal(sessionViews[4].checked, false, 'tmux Status Bar starts unchecked when it is off');
     assert.equal(sessionViews[4].detail, 'Off, Top, Bottom (toggle)', 'tmux Status Bar shows every cycle state and identifies the control as a toggle');
@@ -5706,7 +5727,7 @@ async function runCrossSurfaceStateSuite() {
     const sourceEnCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
     assert.equal(sourceEnCatalog['common.details'], 'details', 'W5: generic popover/YO!agent Details copy stays separate from pane Info Bar labels');
     assert.ok(controlsHtml.includes(`title="${hideDetailsLabel}" aria-label="${hideDetailsLabel}" aria-pressed="true"`), 'pane header Info Bar toggle starts as the hide Info Bar action');
-    assert.equal(controlsHtml.includes('title="YO!info" aria-label="YO!info"'), false, 'pane header detail toggle is not mislabeled as the YO!info pane');
+    assert.equal(controlsHtml.includes('title="YO!Info" aria-label="YO!Info"'), false, 'pane header detail toggle is not mislabeled as the YO!info pane');
     detailsPanel = new TestElement('panel-1');
     detailsPanel.dataset.slot = '1';
     const innerDetailToggle = new TestElement('', 'button');

@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"weak"
 )
 
 // GrantedFile retains the admitted namespace generation, including every parent.
-// Authorized Finder saves advance the admitted inode; external replacements do not.
+// Authorized Finder saves advance the admitted inode. ReadCurrent can also
+// admit a regular replacement at the same basename under the pinned parents.
 type GrantedFile struct {
 	mu         sync.Mutex
 	identityMu sync.RWMutex
@@ -66,9 +68,22 @@ func (s *Service) GrantFile(ctx context.Context, raw string) (*GrantedFile, *Err
 }
 
 func (g *GrantedFile) Read(ctx context.Context, limit int64) ([]byte, os.FileInfo, *Error) {
+	return g.read(ctx, limit, false)
+}
+
+func (g *GrantedFile) ReadCurrent(ctx context.Context, limit int64) ([]byte, os.FileInfo, *Error) {
+	return g.read(ctx, limit, true)
+}
+
+func (g *GrantedFile) read(ctx context.Context, limit int64, followReplacement bool) ([]byte, os.FileInfo, *Error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	f, err := openResolvedDescriptorContext(ctx, g.path, false, g.identitySnapshot())
+	identities := g.identitySnapshot()
+	previous := identities[g.path]
+	if followReplacement {
+		delete(identities, g.path)
+	}
+	f, err := openResolvedDescriptorContext(ctx, g.path, false, identities)
 	if err != nil {
 		return nil, nil, changed(g.path)
 	}
@@ -80,6 +95,14 @@ func (g *GrantedFile) Read(ctx context.Context, limit int64) ([]byte, os.FileInf
 	if !info.Mode().IsRegular() {
 		return nil, nil, invalid(g.path, "not a regular file")
 	}
+	current := identityFor(info)
+	replaced := followReplacement && !sameDescriptorIdentity(previous, current)
+	if replaced {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || current.dev != previous.dev || current.uid != previous.uid || stat.Nlink != 1 {
+			return nil, nil, changed(g.path)
+		}
+	}
 	if info.Size() > limit {
 		return nil, nil, tooLarge(g.path, info.Size(), limit)
 	}
@@ -89,6 +112,13 @@ func (g *GrantedFile) Read(ctx context.Context, limit int64) ([]byte, os.FileInf
 	}
 	if int64(len(data)) > limit {
 		return nil, nil, tooLarge(g.path, int64(len(data)), limit)
+	}
+	if replaced {
+		g.identityMu.Lock()
+		if sameDescriptorIdentity(g.identities[g.path], previous) {
+			g.identities[g.path] = current
+		}
+		g.identityMu.Unlock()
 	}
 	return data, info, nil
 }
@@ -102,10 +132,11 @@ func (g *GrantedFile) mutationParent(ctx context.Context) (*mutationParent, *Err
 	return &mutationParent{directory: directory, requested: g.path, resolvedParent: filepath.Dir(g.path), name: filepath.Base(g.path), targetIdentity: &id}, nil
 }
 
-func (g *GrantedFile) Write(ctx context.Context, content string, mtime int64) (map[string]any, *Error) {
+func (g *GrantedFile) Write(ctx context.Context, content string, expected os.FileInfo) (map[string]any, *Error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.service.write(ctx, g.path, content, &mtime, nil, "", false, g)
+	mtime := expected.ModTime().UnixNano()
+	return g.service.write(ctx, g.path, content, nil, &mtime, fileID(expected), false, g)
 }
 
 // ReserveWrites linearizes collaboration admission against ordinary Finder saves.

@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="320" viewBox="0 0 720 320" role="img" aria-labelledby="title desc">
+  <title id="title">Repo Diff browses Git history</title>
+  <desc id="desc">Repo Diff lists the commits of my-app. Expanding the newest commit shows its message and changed files, and selecting a file shows its diff.</desc>
+  <style>
+    svg { --cycle: 12s; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .mono { font-family: ui-monospace, monospace; }
+    .collapsed { visibility: visible; }
+    .expanded, .diff, .file-selected { visibility: hidden; }
+    .pointer { opacity: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .collapsed { animation: collapsed var(--cycle) step-end infinite; }
+      .expanded { animation: expanded var(--cycle) step-end infinite; }
+      .diff, .file-selected { animation: diff var(--cycle) step-end infinite; }
+      .pointer { animation: pointer var(--cycle) ease-in-out infinite; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .collapsed { visibility: hidden; }
+      .expanded, .diff, .file-selected { visibility: visible; }
+    }
+    /* History 0-3s, the commit opens at 3s, a file is selected at 6.5s, hold to 12s. */
+    @keyframes collapsed { 0% { visibility: visible; } 25%, 100% { visibility: hidden; } }
+    @keyframes expanded { 0% { visibility: hidden; } 25%, 100% { visibility: visible; } }
+    @keyframes diff { 0% { visibility: hidden; } 54%, 100% { visibility: visible; } }
+    @keyframes pointer {
+      0%, 10% { opacity: 0; transform: translate(300px, 260px); }
+      14% { opacity: 1; transform: translate(300px, 260px); }
+      23%, 28% { opacity: 1; transform: translate(150px, 80px); }
+      46%, 56% { opacity: 1; transform: translate(130px, 176px); }
+      62%, 100% { opacity: 0; transform: translate(130px, 176px); }
+    }
+  </style>
+  <rect width="720" height="320" rx="12" fill="#11161d"/>
+  <!-- History -->
+  <rect x="12" y="12" width="330" height="296" rx="8" fill="#1b222d"/>
+  <text x="28" y="38" font-size="13" font-weight="700" fill="#edf1f7">Repo Diff</text>
+  <text x="326" y="38" font-size="11" fill="#aab7ca" text-anchor="end" class="mono">~/src/my-app · main</text>
+  <g class="collapsed">
+    <rect x="20" y="52" width="314" height="40" rx="5" fill="#24303f"/>
+    <text x="32" y="69" font-size="11" fill="#f2ce7e" class="mono">a41c9e2</text>
+    <text x="92" y="69" font-size="12" fill="#edf1f7">Fix the login redirect</text>
+    <text x="32" y="85" font-size="10" fill="#8998ad">Sam · 12 minutes ago · 2 files</text>
+    <text x="32" y="115" font-size="11" fill="#f2ce7e" class="mono">7d02b55</text>
+    <text x="92" y="115" font-size="12" fill="#cad6e6">Add dark mode toggle</text>
+    <text x="32" y="131" font-size="10" fill="#8998ad">Alex · 3 hours ago · 5 files</text>
+    <text x="32" y="159" font-size="11" fill="#f2ce7e" class="mono">c9e1f03</text>
+    <text x="92" y="159" font-size="12" fill="#cad6e6">Speed up search</text>
+    <text x="32" y="175" font-size="10" fill="#8998ad">Sam · yesterday · 3 files</text>
+    <text x="32" y="203" font-size="11" fill="#f2ce7e" class="mono">0b7a4de</text>
+    <text x="92" y="203" font-size="12" fill="#cad6e6">Release 1.4.0</text>
+    <text x="32" y="219" font-size="10" fill="#8998ad">Alex · 2 days ago · 1 file</text>
+    <text x="32" y="247" font-size="11" fill="#f2ce7e" class="mono">5f61a2c</text>
+    <text x="92" y="247" font-size="12" fill="#cad6e6">Retry flaky uploads</text>
+    <text x="32" y="263" font-size="10" fill="#8998ad">Sam · 2 days ago · 2 files</text>
+  </g>
+  <g class="expanded">
+    <rect x="20" y="52" width="314" height="148" rx="5" fill="#24303f"/>
+    <text x="32" y="69" font-size="11" fill="#f2ce7e" class="mono">a41c9e2</text>
+    <text x="92" y="69" font-size="12" font-weight="700" fill="#edf1f7">Fix the login redirect</text>
+    <text x="32" y="85" font-size="10" fill="#8998ad">Sam · 12 minutes ago · 2 files</text>
+    <text x="32" y="107" font-size="11" fill="#cad6e6">Send users back to the page they came</text>
+    <text x="32" y="122" font-size="11" fill="#cad6e6">from after they log in.</text>
+    <g class="file-selected"><rect x="26" y="160" width="302" height="22" rx="4" fill="#304530"/></g>
+    <text x="34" y="150" font-size="11" font-weight="700" fill="#f2ce7e" class="mono">M</text>
+    <text x="52" y="150" font-size="11" fill="#edf1f7" class="mono">auth/session.go</text>
+    <text x="290" y="150" font-size="11" fill="#bde991" text-anchor="end" class="mono">+6</text><text x="318" y="150" font-size="11" fill="#ffadb3" text-anchor="end" class="mono">−1</text>
+    <text x="34" y="175" font-size="11" font-weight="700" fill="#f2ce7e" class="mono">M</text>
+    <text x="52" y="175" font-size="11" fill="#edf1f7" class="mono">auth/login.go</text>
+    <text x="290" y="175" font-size="11" fill="#bde991" text-anchor="end" class="mono">+4</text><text x="318" y="175" font-size="11" fill="#ffadb3" text-anchor="end" class="mono">−2</text>
+    <text x="32" y="223" font-size="11" fill="#f2ce7e" class="mono">7d02b55</text>
+    <text x="92" y="223" font-size="12" fill="#cad6e6">Add dark mode toggle</text>
+    <text x="32" y="239" font-size="10" fill="#8998ad">Alex · 3 hours ago · 5 files</text>
+    <text x="32" y="267" font-size="11" fill="#f2ce7e" class="mono">c9e1f03</text>
+    <text x="92" y="267" font-size="12" fill="#cad6e6">Speed up search</text>
+    <text x="32" y="283" font-size="10" fill="#8998ad">Sam · yesterday · 3 files</text>
+  </g>
+  <!-- Diff -->
+  <rect x="354" y="12" width="354" height="296" rx="8" fill="#1b222d"/>
+  <g class="diff">
+    <text x="370" y="38" font-size="12" font-weight="700" fill="#edf1f7" class="mono">auth/login.go</text>
+    <text x="692" y="38" font-size="11" fill="#aab7ca" text-anchor="end" class="mono">a41c9e2</text>
+    <g class="mono" font-size="11">
+      <text x="370" y="72" fill="#8998ad">  func finishLogin(w, r) {</text>
+      <rect x="362" y="80" width="338" height="20" fill="#382b12" opacity="0.6"/>
+      <text x="370" y="94" fill="#ffadb3">-   http.Redirect(w, r, "/", 302)</text>
+      <rect x="362" y="102" width="338" height="20" fill="#382b12" opacity="0.6"/>
+      <text x="370" y="116" fill="#ffadb3">-   return</text>
+      <rect x="362" y="124" width="338" height="20" fill="#182012"/>
+      <text x="370" y="138" fill="#bde991">+   next := safeNext(r)</text>
+      <rect x="362" y="146" width="338" height="20" fill="#182012"/>
+      <text x="370" y="160" fill="#bde991">+   http.Redirect(w, r, next, 302)</text>
+      <rect x="362" y="168" width="338" height="20" fill="#182012"/>
+      <text x="370" y="182" fill="#bde991">+   logLogin(r)</text>
+      <rect x="362" y="190" width="338" height="20" fill="#182012"/>
+      <text x="370" y="204" fill="#bde991">+   return</text>
+      <text x="370" y="226" fill="#8998ad">  }</text>
+    </g>
+  </g>
+  <g class="collapsed"><text x="531" y="164" font-size="12" fill="#8998ad" text-anchor="middle">Expand a commit, then pick a file</text></g>
+  <path class="pointer" d="M0 0 L0 16 L4 12 L8 20 L11 19 L7 11 L13 11 Z" fill="#edf1f7" stroke="#11161d" stroke-width="1"/>
+</svg>

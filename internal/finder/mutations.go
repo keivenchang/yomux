@@ -454,7 +454,7 @@ func (s *Service) write(ctx context.Context, raw, content string, expectedMtime,
 		if expectedMtimeNS != nil {
 			return info == nil || info.ModTime().UnixNano() != *expectedMtimeNS || fileID(info) != expectedFileID
 		}
-		return expectedMtime != nil && info != nil && !writeVersionMatches(*expectedMtime, info, len(grants) > 0)
+		return expectedMtime != nil && info != nil && !mtimeMatches(*expectedMtime, info.ModTime().UnixNano(), info.ModTime().Unix())
 	}
 	if versionChanged(existing) {
 		return nil, changed(requested)
@@ -2371,11 +2371,4 @@ func parsePasteUploadName(name string) (string, int, string, bool) {
 		return "", 0, "", false
 	}
 	return name[:8], sequence, suffix, true
-}
-
-func writeVersionMatches(expected int64, info os.FileInfo, strict bool) bool {
-	if strict {
-		return expected == info.ModTime().UnixNano()
-	}
-	return mtimeMatches(expected, info.ModTime().UnixNano(), info.ModTime().Unix())
 }

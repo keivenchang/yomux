@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -608,50 +609,62 @@ func transcriptRoot(kind string) string {
 	return filepath.Join(home, ".codex", "sessions")
 }
 
-func transcriptCWD(path string) string {
-	file, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer file.Close()
-	decoder := json.NewDecoder(file)
-	var record map[string]any
-	if decoder.Decode(&record) != nil {
-		return ""
-	}
-	if cwd, _ := record["cwd"].(string); cwd != "" {
-		return cwd
-	}
-	payload, _ := record["payload"].(map[string]any)
-	cwd, _ := payload["cwd"].(string)
-	return cwd
+type transcriptIdentity struct {
+	cwd, sessionID string
+	valid          bool
 }
 
-func transcriptSessionID(path string) string {
+var transcriptIdentityRecord = tailfile.RegisterProjection(func(_ []byte, record map[string]any) transcriptIdentity {
+	if record == nil {
+		return transcriptIdentity{}
+	}
+	identity := transcriptIdentity{cwd: stringValue(record["cwd"]), valid: true}
+	payload, _ := record["payload"].(map[string]any)
+	if identity.cwd == "" {
+		identity.cwd = stringValue(payload["cwd"])
+	}
+	if record["type"] == "session_meta" {
+		identity.sessionID = stringValue(payload["id"])
+	}
+	return identity
+})
+
+func (s *server) transcriptIdentity(path string, records int) transcriptIdentity {
 	file, err := os.Open(path)
 	if err != nil {
-		return ""
+		return transcriptIdentity{}
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(file)
-	for index := 0; index < 20; index++ {
-		var record map[string]any
-		if decoder.Decode(&record) != nil {
+	snapshot, err := s.transcriptIngestion.Snapshot(file)
+	if err != nil {
+		return transcriptIdentity{}
+	}
+	reader := bufio.NewReader(io.NewSectionReader(snapshot, 0, snapshot.Size()))
+	var identity transcriptIdentity
+	for index := 0; index < records; index++ {
+		line, _, complete, cut, err := tailfile.ReadRecord(context.Background(), reader, tailfile.MaxRecordBytes)
+		if err != nil || cut {
 			break
 		}
-		if record["type"] != "session_meta" {
-			continue
+		record := transcriptIdentityRecord.Read(&s.transcriptIngestion, line)
+		if !record.valid {
+			break
 		}
-		payload, _ := record["payload"].(map[string]any)
-		id, _ := payload["id"].(string)
-		if id != "" {
-			return id
+		if index == 0 {
+			identity = record
+		}
+		if record.sessionID != "" {
+			identity.sessionID = record.sessionID
+			break
+		}
+		if !complete {
+			break
 		}
 	}
-	return ""
+	return identity
 }
 
-func newestTranscriptForCWD(root, cwd string) string {
+func (s *server) newestTranscriptForCWD(root, cwd string) string {
 	if root == "" {
 		return ""
 	}
@@ -669,7 +682,7 @@ func newestTranscriptForCWD(root, cwd string) string {
 		if entries > maxTranscriptEntries {
 			return filepath.SkipAll
 		}
-		if cwd != "" && transcriptCWD(path) != cwd {
+		if cwd != "" && s.transcriptIdentity(path, 1).cwd != cwd {
 			return nil
 		}
 		info, statErr := entry.Info()
@@ -698,15 +711,15 @@ func openTranscriptForProcess(pid int, kind string) string {
 	return ""
 }
 
-func agentTranscript(kind string, pid int, cwd string) (string, string, string) {
-	return agentTranscriptWithTitle(kind, pid, cwd, "")
+func (s *server) agentTranscript(kind string, pid int, cwd string) (string, string, string) {
+	return s.agentTranscriptWithTitle(kind, pid, cwd, "")
 }
 
-func agentTranscriptWithTitle(kind string, pid int, cwd, title string) (string, string, string) {
-	return agentTranscriptWithCommand(kind, pid, cwd, title, "")
+func (s *server) agentTranscriptWithTitle(kind string, pid int, cwd, title string) (string, string, string) {
+	return s.agentTranscriptWithCommand(kind, pid, cwd, title, "")
 }
 
-func agentTranscriptWithCommand(kind string, pid int, cwd, title, command string) (string, string, string) {
+func (s *server) agentTranscriptWithCommand(kind string, pid int, cwd, title, command string) (string, string, string) {
 	if kind == "opencode" {
 		databasePath := strings.TrimSpace(productenv.Value("OPENCODE_DATABASE"))
 		if databasePath == "" {
@@ -731,12 +744,13 @@ func agentTranscriptWithCommand(kind string, pid int, cwd, title, command string
 	}
 	transcript := openTranscriptForProcess(pid, kind)
 	if transcript == "" && kind != "codex" {
-		transcript = newestTranscriptForCWD(transcriptRoot(kind), cwd)
+		transcript = s.newestTranscriptForCWD(transcriptRoot(kind), cwd)
 	}
 	if transcript == "" {
 		return "", "", cwd
 	}
-	return transcriptSessionID(transcript), transcript, transcriptCWD(transcript)
+	identity := s.transcriptIdentity(transcript, 20)
+	return identity.sessionID, transcript, identity.cwd
 }
 
 func explicitOpenCodeSessionID(command string) string {
@@ -893,7 +907,7 @@ func (s *server) streamContextTranscript(w http.ResponseWriter, r *http.Request,
 	var position tailfile.Position
 	var err error
 	if isOpenCode {
-		items, err = readContextItemsForAgent(path, agent, limit)
+		items, err = s.readContextItemsForAgent(path, agent, limit)
 	} else {
 		items, position, err = s.readContextSnapshot(r.Context(), path, limit)
 	}
@@ -946,7 +960,7 @@ func (s *server) streamContextTranscript(w http.ResponseWriter, r *http.Request,
 			var updated []map[string]any
 			var readErr error
 			if isOpenCode {
-				updated, readErr = readContextItemsForAgent(path, agent, limit)
+				updated, readErr = s.readContextItemsForAgent(path, agent, limit)
 			} else {
 				updated, position, readErr = s.readContextSnapshot(r.Context(), path, limit)
 			}
@@ -985,7 +999,7 @@ func (s *server) contextItems(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": selectionError})
 		return
 	}
-	items, err := readContextItemsForAgent(path, agent, limit)
+	items, err := s.readContextItemsForAgent(path, agent, limit)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "error": "transcript read failed"})
 		return
@@ -1012,7 +1026,7 @@ func (s *server) transcript(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": selectionError, "agent": agent, "errors": []any{}})
 		return
 	}
-	text, contextItems, err := readTranscriptTextForAgent(path, agent, lines)
+	text, contextItems, err := s.readTranscriptTextForAgent(path, agent, lines)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "agent": agent, "error": "transcript read failed", "errors": []any{}})
 		return
@@ -1044,7 +1058,7 @@ func (s *server) context(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": selectionError, "agent": agent, "errors": []any{}})
 		return
 	}
-	items, err := readContextItemsForAgent(path, agent, messages)
+	items, err := s.readContextItemsForAgent(path, agent, messages)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "agent": agent, "error": "transcript read failed", "errors": []any{}})
 		return
@@ -1081,7 +1095,7 @@ func transcriptQueryLimit(w http.ResponseWriter, r *http.Request, name string, d
 }
 
 func (s *server) sessionTranscriptForRequest(session, requestedPane, requestedWindow string) (string, map[string]any, string) {
-	_, agents, finderErr := s.sessionFilesPaneInputs(session)
+	agents, finderErr := s.sessionFilesPaneInputs(session)
 	if finderErr != nil {
 		return "", nil, finderErr.Message
 	}
@@ -1166,14 +1180,6 @@ func transcriptAgentPayload(session string, agent finder.SessionFileAgent) map[s
 	}
 }
 
-func readTranscriptTail(path string, lines int) (string, error) {
-	return readTranscriptTailWithByteLimit(path, lines, 0)
-}
-
-func readTranscriptTailWithByteLimit(path string, lines int, byteLimit int64) (string, error) {
-	return tailfile.Read(path, lines, byteLimit)
-}
-
 func formatTranscriptItem(item map[string]any) string {
 	role, _ := item["role"].(string)
 	if role == "" {
@@ -1193,13 +1199,13 @@ func formatTranscriptItem(item map[string]any) string {
 	return header + "\n" + text
 }
 
-func readTranscriptTextForAgent(path string, agent map[string]any, lines int) (string, []map[string]any, error) {
+func (s *server) readTranscriptTextForAgent(path string, agent map[string]any, lines int) (string, []map[string]any, error) {
 	if kind, _ := agent["kind"].(string); kind == "opencode" {
 		itemLimit := lines
 		if itemLimit > maxCompactTranscriptItems {
 			itemLimit = maxCompactTranscriptItems
 		}
-		items, err := readContextItemsForAgent(path, agent, itemLimit)
+		items, err := s.readContextItemsForAgent(path, agent, itemLimit)
 		if err != nil {
 			return "", nil, err
 		}
@@ -1209,7 +1215,7 @@ func readTranscriptTextForAgent(path string, agent map[string]any, lines int) (s
 		}
 		return strings.Join(formatted, "\n\n"), items, nil
 	}
-	text, err := readTranscriptTail(path, lines)
+	text, err := s.transcriptIngestion.ReadTail(path, lines, 0)
 	return text, nil, err
 }
 
@@ -1338,7 +1344,7 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 			continue
 		}
 		cwd := parts[5]
-		sessionID, transcript, resolvedCWD := agentTranscriptWithCommand(kind, agentPID, cwd, parts[7], agentCommand)
+		sessionID, transcript, resolvedCWD := s.agentTranscriptWithCommand(kind, agentPID, cwd, parts[7], agentCommand)
 		if resolvedCWD != "" {
 			cwd = resolvedCWD
 		}
@@ -1379,7 +1385,7 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 			"error": "", "window": parts[1], "window_index": windowIndex, "pane": parts[3],
 			"window_active": windowActive, "current": active && windowActive,
 		}
-		agent["last_used_ts"] = agentConversationActivityTS(agent)
+		agent["last_used_ts"] = s.agentConversationActivityTS(agent)
 		agents = append(agents, agent)
 	}
 	windowMetadata := make([]map[string]any, 0, len(windows))
@@ -1877,10 +1883,7 @@ func (s *server) readTranscriptItems(ctx context.Context, path string, position 
 	}
 	items := make([]map[string]any, 0, len(batch.Records))
 	for _, row := range batch.Records {
-		var record map[string]any
-		if json.Unmarshal(row.Data, &record) == nil && record != nil {
-			items = append(items, transcriptItems(record)...)
-		}
+		items = append(items, conversationRecord.Read(&s.transcriptIngestion, row.Data)...)
 	}
 	return items, batch, nil
 }
@@ -1909,29 +1912,25 @@ func (s *server) readContextSnapshot(ctx context.Context, path string, limit int
 	if err != nil {
 		return nil, tailfile.Position{}, err
 	}
-	return contextItemsFromData(data, limit), position, nil
+	return s.contextItemsFromData(data, limit), position, nil
 }
 
-func readContextItems(path string, limit int) ([]map[string]any, error) {
-	return readContextItemsWithLimits(path, limit, maxContextTranscriptLines, maxContextTranscriptBytes)
+func (s *server) readContextItems(path string, limit int) ([]map[string]any, error) {
+	return s.readContextItemsWithLimits(path, limit, maxContextTranscriptLines, maxContextTranscriptBytes)
 }
 
-func readContextItemsWithLimits(path string, limit, lines int, byteLimit int64) ([]map[string]any, error) {
-	data, err := readTranscriptTailWithByteLimit(path, lines, byteLimit)
+func (s *server) readContextItemsWithLimits(path string, limit, lines int, byteLimit int64) ([]map[string]any, error) {
+	data, err := s.transcriptIngestion.ReadTail(path, lines, byteLimit)
 	if err != nil {
 		return nil, err
 	}
-	return contextItemsFromData(data, limit), nil
+	return s.contextItemsFromData(data, limit), nil
 }
 
-func contextItemsFromData(data string, limit int) []map[string]any {
+func (s *server) contextItemsFromData(data string, limit int) []map[string]any {
 	all := make([]map[string]any, 0, limit)
-	for _, line := range strings.Split(data, "\n") {
-		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) != nil || record == nil {
-			continue
-		}
-		all = append(all, transcriptItems(record)...)
+	for line := range strings.SplitSeq(data, "\n") {
+		all = append(all, conversationRecord.Read(&s.transcriptIngestion, []byte(line))...)
 	}
 	if len(all) > limit {
 		all = all[len(all)-limit:]
@@ -1941,7 +1940,7 @@ func contextItemsFromData(data string, limit int) []map[string]any {
 
 // Reuse the conversation decoder; filesystem writes and observation times do
 // not establish that the user or agent did work.
-func agentConversationActivityTS(agent map[string]any) float64 {
+func (s *server) agentConversationActivityTS(agent map[string]any) float64 {
 	path := stringValue(agent["transcript"])
 	if path == "" {
 		return 0
@@ -1949,9 +1948,9 @@ func agentConversationActivityTS(agent map[string]any) float64 {
 	var items []map[string]any
 	var err error
 	if stringValue(agent["kind"]) == "opencode" {
-		items, err = readContextItemsForAgent(path, agent, 128)
+		items, err = s.readContextItemsForAgent(path, agent, 128)
 	} else {
-		items, err = readContextItemsWithLimits(path, 128, 128, 256*1024)
+		items, err = s.readContextItemsWithLimits(path, 128, 128, 256*1024)
 	}
 	if err != nil {
 		return 0
@@ -1970,7 +1969,7 @@ func agentConversationActivityTS(agent map[string]any) float64 {
 	return latest
 }
 
-func readContextItemsForAgent(path string, agent map[string]any, limit int) ([]map[string]any, error) {
+func (s *server) readContextItemsForAgent(path string, agent map[string]any, limit int) ([]map[string]any, error) {
 	if kind, _ := agent["kind"].(string); kind == "opencode" {
 		sessionID, _ := agent["session_id"].(string)
 		if sessionID == "" {
@@ -1993,8 +1992,12 @@ func readContextItemsForAgent(path string, agent map[string]any, limit int) ([]m
 		}
 		return items, nil
 	}
-	return readContextItems(path, limit)
+	return s.readContextItems(path, limit)
 }
+
+var conversationRecord = tailfile.RegisterProjection(func(_ []byte, record map[string]any) []map[string]any {
+	return transcriptItems(record)
+})
 
 func transcriptItems(record map[string]any) []map[string]any {
 	timestamp, _ := record["timestamp"].(string)

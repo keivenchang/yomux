@@ -81,19 +81,19 @@ func TestCodexTurnTailState(t *testing.T) {
 		{"malformed tail", item + "not-json\n", AgentStatusRun},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := codexTurnTailState(tc.text, 1); got != tc.want {
+			if got := codexTurnTailState(nil, tc.text, 1); got != tc.want {
 				t.Fatalf("state=%s want %s", got, tc.want)
 			}
 		})
 	}
-	if got := codexTurnTailState(item, 2e9); got != AgentStatusUnavailable {
+	if got := codexTurnTailState(nil, item, 2e9); got != AgentStatusUnavailable {
 		t.Fatalf("a previous process's transcript became active: %s", got)
 	}
 }
 
 func TestCodexTurnReaderBoundedLongTurn(t *testing.T) {
 	root := t.TempDir()
-	if got := CodexTurnStateReader(root)(context.Background(), os.Getpid(), 1); got != AgentStatusUnavailable {
+	if got := CodexTurnStateReader(root, nil)(context.Background(), os.Getpid(), 1); got != AgentStatusUnavailable {
 		t.Fatalf("no process-owned rollout must not imply idle: %s", got)
 	}
 	file, err := os.CreateTemp(root, "rollout-*.jsonl")
@@ -104,7 +104,7 @@ func TestCodexTurnReaderBoundedLongTurn(t *testing.T) {
 	if _, err := file.WriteString(codexTurnEvent("task_started", "a") + strings.Repeat("{}\n", maxCodexTurnTailBytes) + codexTurnEvent("item_completed", "a")); err != nil {
 		t.Fatal(err)
 	}
-	read := CodexTurnStateReader(root)
+	read := CodexTurnStateReader(root, nil)
 	if got := read(context.Background(), os.Getpid(), 1); got != AgentStatusRun {
 		t.Fatalf("long active turn=%s", got)
 	}
@@ -140,7 +140,7 @@ func TestAgentStatusCodexStreamingCommentaryWithoutBusyRow(t *testing.T) {
 		}
 	}
 	for _, pane := range []string{"Approval required\nWould you like to run the following?\nEnter to select · Esc to cancel", "Error: model capacity reached"} {
-		baseline := classifyVisibleAgentText(pane)
+		baseline := classifyVisibleAgentText("codex", pane)
 		got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PID: 1, PaneTarget: "%1"}, AgentStatusSources{
 			CapturePane: func(context.Context, string) (AgentStatusPane, error) { return AgentStatusPane{VisibleText: pane}, nil },
 			CodexTurn:   func(context.Context, int, float64) AgentStatus { return AgentStatusRun },

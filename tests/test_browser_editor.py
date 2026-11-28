@@ -1,14 +1,613 @@
+import html
 import json
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
 from tests.browser_helpers.browser_console import assert_only_expected_browser_warning
+from tests.browser_helpers.browser_console import read_browser_console_log
+from tests.browser_helpers.native_keyboard import native_editor_modifier, native_logical_key
+from tests.browser_helpers.native_pointer import _cdp_click_point
+from tests.browser_helpers.editor_mount import mount_html_split, mount_split_file  # noqa: F401
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from urllib.parse import parse_qs, quote, urlparse
+
+
+@pytest.mark.required_browser
+def test_markdown_viewedit_and_textedit_mirror_selections(browser, tmp_path):
+    source = '# Heading\n\nalpha **beta** gamma\n\nNext &amp; end'
+    item = mount_split_file(browser, tmp_path, source, '/home/test/split.md', 'markdown')
+    wait = WebDriverWait(browser, 5)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return Boolean(panel?._pmView && panel._cmView);
+    """, item))
+    start, point = browser.execute_script("""
+      const rich = panelNodes.get(arguments[0])._pmView;
+      let start;
+      rich.state.doc.descendants((node, position) => {
+        if (node.isText && node.text === 'beta') start = position;
+      });
+      const box = rich.coordsAtPos(start);
+      return [start, {x: box.left + 1, y: (box.bottom + box.top) / 2}];
+    """, item)
+    _cdp_click_point(browser, point)
+    wait.until(lambda driver: driver.execute_script("""
+      const rich = panelNodes.get(arguments[0])._pmView;
+      return rich.hasFocus() && rich.state.selection.empty && rich.state.selection.from === arguments[1];
+    """, item, start))
+    for _ in range(4):
+        native_logical_key(browser, "ArrowRight", ["shift"], commands=["moveRightAndModifySelection"])
+    selected = wait.until(lambda driver: driver.execute_script("""
+      const rich = panelNodes.get(arguments[0])._pmView;
+      return rich.state.selection.to === arguments[1] + 4 &&
+        rich.state.doc.textBetween(rich.state.selection.from, rich.state.selection.to);
+    """, item, start))
+    assert selected == 'beta'
+    wait.until(lambda driver: driver.execute_script("""
+      const { _cmView: text, _pmView: rich } = panelNodes.get(arguments[0]);
+      const mark = text.scrollDOM.querySelector('.split-editor-selection')?.getBoundingClientRect();
+      const selected = rich.state.doc.textBetween(rich.state.selection.from, rich.state.selection.to);
+      return rich.hasFocus() && selected === 'beta' && mark &&
+        Math.abs(mark.left - text.coordsAtPos(arguments[1]).left) < 2 &&
+        Math.abs(mark.right - text.coordsAtPos(arguments[1] + 4).left) < 2;
+    """, item, source.index('beta')), 'ViewEdit bold text must map to its exact source spelling')
+    browser.execute_script("""
+      const text = panelNodes.get(arguments[0])._cmView;
+      text.focus();
+      text.dispatch({selection: {anchor: arguments[1]}});
+    """, item, source.index('&amp;') + 1)
+    native_logical_key(browser, "ArrowRight", ["shift"], commands=["moveRightAndModifySelection"])
+    wait.until(lambda driver: driver.execute_script("""
+      const { _cmView: text, _pmView: rich } = panelNodes.get(arguments[0]);
+      return text.hasFocus && text.state.selection.main.to === arguments[1] &&
+        rich.dom.querySelector('.split-editor-selection')?.textContent === '&' &&
+        !text.scrollDOM.querySelector('.split-editor-selection');
+    """, item, source.index('&amp;') + 2), 'Selecting inside the source entity must highlight its rendered glyph')
+    browser.execute_script("""
+      const text = panelNodes.get(arguments[0])._cmView;
+      text.dispatch({selection: {anchor: arguments[1], head: arguments[1] + 2}});
+    """, item, source.index('**beta'))
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !panel.querySelector('.split-editor-selection') && panel._cmView.state.doc.toString() === arguments[1];
+    """, item, source), 'Markdown delimiters alone must clear the old highlight')
+
+
+@pytest.mark.parametrize('follow_global', [True, False])
+@pytest.mark.parametrize(('theme', 'scheme', 'token_color', 'background'), [
+    ('dark', 'dracula', 'rgb(255, 121, 198)', 'rgb(40, 42, 54)'),
+    ('light', 'github-light-cream', 'rgb(17, 99, 41)', 'rgb(255, 246, 223)'),
+    ('light', 'solarized-light-paper', 'rgb(38, 139, 210)', 'rgb(247, 239, 216)'),
+], ids=['dracula', 'github-cream', 'solarized-paper'])
+def test_editor_color_scheme_updates_open_html_textedit(browser, tmp_path, follow_global, theme, scheme, token_color, background):
+    item = mount_html_split(browser, tmp_path, '<h1 style="color: tomato">Example</h1>')
+    wait = WebDriverWait(browser, 8)
+    browser.execute_async_script("""
+      const [item, followGlobal, theme, done] = arguments;
+      setGlobalThemeMode(theme).then(() => {
+        setFileEditorThemeMode(followGlobal ? editorThemeInheritMode : configuredEditorSchemeForMode(theme === 'dark'));
+        const slots = emptyLayoutSlots();
+        slots.left = paneStateWithTabs([item], item);
+        slots.right = paneStateWithTabs([prefsItemId], prefsItemId);
+        slots[layoutTreeKey] = splitNode('row', leafNode('left'), leafNode('right'), 50);
+        applyLayoutSlots(slots, {focusSession: prefsItemId, forceFull: true});
+        done(true);
+      }, error => done(String(error)));
+    """, item, follow_global, theme)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !!panel?._cmView && !!htmlSplitPreviewFrame(panel)?.contentDocument.querySelector('h1');
+    """, item))
+    palette = """
+      const panel = panelNodes.get(arguments[0]), view = panel._cmView;
+      const token = [...view.contentDOM.querySelectorAll('span')].find(node => node.textContent === 'h1');
+      const frame = htmlSplitPreviewFrame(panel), heading = frame?.contentDocument.querySelector('h1');
+      return {scheme: activeEditorScheme().id, token: token && getComputedStyle(token).color,
+        background: getComputedStyle(view.dom).backgroundColor, heading: heading && getComputedStyle(heading).color,
+        sameView: view === window.__schemeTestView, sameFrame: frame === window.__schemeTestFrame};
+    """
+    browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      window.__schemeTestView = panel._cmView;
+      window.__schemeTestFrame = htmlSplitPreviewFrame(panel);
+    """, item)
+    before = browser.execute_script(palette, item)
+    assert before['token'] and before['token'] != token_color, before
+    browser.find_element(By.CSS_SELECTOR, '[data-preferences-search]').send_keys('c')
+    setting = f'editor_{theme}_color_scheme'
+    selector = f'[data-setting-path="appearance.{setting}"]'
+    wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, selector))
+    select_current_value(browser, selector, scheme)
+    wait.until(lambda driver: driver.execute_script("""
+      return activeEditorScheme().id === arguments[1] &&
+        window.__settingsPayload?.settings?.appearance?.[arguments[0]] === arguments[1];
+    """, setting, scheme))
+    after = browser.execute_script(palette, item)
+    assert after == {'scheme': scheme, 'token': token_color, 'background': background,
+                     'heading': before['heading'], 'sameView': True, 'sameFrame': True}, after
+
+
+def test_html_editor_hides_theme_button_in_each_mode(browser, tmp_path):
+    item = mount_html_split(browser, tmp_path, '<body style="background:salmon"><p>HTML colors</p>')
+    wait = WebDriverWait(browser, 6)
+    for mode in ('split', 'edit', 'preview'):
+        if mode != 'split':
+            wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, f'[data-editor-mode="{mode}"]')).click()
+        state = wait.until(lambda driver: driver.execute_script("""
+          const [item, mode] = arguments;
+          const panel = panelNodes.get(item);
+          if (!panel || fileEditorPanelMode(panel) !== mode) return false;
+          const button = panel.querySelector('.file-editor-theme-panel');
+          return {hidden: button.hidden, visible: Boolean(button.getClientRects().length)};
+        """, item, mode))
+        assert state == {'hidden': True, 'visible': False}, (mode, state)
+    wait.until(lambda driver: driver.execute_script("""
+      const frame = panelNodes.get(arguments[0]).querySelector('.file-editor-html-preview');
+      const body = frame?._htmlPreviewDocument?.body;
+      return body && frame.contentWindow.getComputedStyle(body).backgroundColor === 'rgb(250, 128, 114)';
+    """, item))
+
+
+def test_html_split_updates_before_canonical_source_commit(browser, tmp_path, record_property):
+    source = '<!doctype html><p id="sample">Text</p>'
+    item = mount_html_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 8)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !!panel?._cmView && !!panel.querySelector('iframe')?.contentDocument?.querySelector('#sample');
+    """, item))
+    browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]), view = panel._cmView;
+      view.focus();
+      view.dispatch({selection: {anchor: view.state.doc.toString().indexOf('</p>')}});
+      window.__originalHtmlCommit = commitCodeMirrorSource;
+      commitCodeMirrorSource = () => false;
+      view.contentDOM.addEventListener('keydown', () => { window.__htmlInputAt = performance.now(); }, {once: true});
+    """, item)
+    try:
+        native_logical_key(browser, 'x')
+        result = browser.execute_async_script("""
+          const [item, done] = arguments, panel = panelNodes.get(item);
+          window.__yomuxTestWaitFor(() => {
+            const frame = panel.querySelector('iframe');
+            return frame?.contentDocument?.querySelector('#sample')?.textContent === 'Textx' && frame;
+          }, {timeoutMs: 800}).then(frame => {
+            window.__liveHtmlFrame = frame;
+            done({elapsed: performance.now() - window.__htmlInputAt, canonical: fileEditorPanelState(panel).content,
+              source: panel._cmView.state.doc.toString(), focus: panel._cmView.hasFocus});
+          }, error => done({error: String(error)}));
+        """, item)
+        assert 'error' not in result and result['elapsed'] < 800, result
+        record_property('html_preview_refresh_ms', round(result['elapsed'], 1))
+        assert result['canonical'] == source and result['source'] == source.replace('Text', 'Textx') and result['focus']
+    finally:
+        browser.execute_script("""
+          const panel = panelNodes.get(arguments[0]);
+          commitCodeMirrorSource = window.__originalHtmlCommit;
+          flushCodeMirrorSource(panel, panel._cmPath);
+        """, item)
+    assert browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return panel.querySelector('iframe') === window.__liveHtmlFrame &&
+        fileEditorPanelState(panel).content === panel._cmView.state.doc.toString();
+    """, item)
+
+
+def test_html_split_clicking_body_reveals_the_start_of_the_preview(browser, tmp_path):
+    source = ('<!doctype html>\n'
+              '<style>section{min-height:800px} body{margin:0}</style>\n'
+              '<body>\n<header>YOmux HTML Example</header>\n'
+              '<section>Workspace overview</section>\n'
+              '<section id=share>YO!Share: Invite a guest</section>\n</body>')
+    item = mount_html_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 6)
+    wheel = wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]), frame = htmlSplitPreviewFrame(panel);
+      const share = frame?.contentDocument.querySelector('#share');
+      if (!panel?._cmView || !share) return false;
+      const box = frame.getBoundingClientRect();
+      return {x: box.left + box.width / 2, y: box.top + box.height / 2,
+        deltaY: share.getBoundingClientRect().top};
+    """, item))
+    for attempt in range(2):
+        browser.execute_cdp_cmd('Input.dispatchMouseEvent', {'type': 'mouseWheel', 'deltaX': 0, **wheel})
+        wait.until(lambda driver: driver.execute_script("""
+          const frame = htmlSplitPreviewFrame(panelNodes.get(arguments[0]));
+          return frame.contentDocument.querySelector('header').getBoundingClientRect().bottom < 0;
+        """, item))
+        offset = source.index('<body>') + 2
+        point = browser.execute_script("""
+          const cm = panelNodes.get(arguments[0])._cmView, rect = cm.coordsAtPos(arguments[1]);
+          const point = {x: rect.left + .1, y: (rect.top + rect.bottom) / 2};
+          return cm.contentDOM.contains(document.elementFromPoint(point.x,point.y)) && point;
+        """, item, offset)
+        assert point, 'The body tag must stay visible in TextEdit while Preview is scrolled'
+        _cdp_click_point(browser, point)
+        wait.until(lambda driver: driver.execute_script("""
+          const panel = panelNodes.get(arguments[0]), frame = htmlSplitPreviewFrame(panel);
+          const view = panel._cmView, doc = frame.contentDocument;
+          const caret = panel.querySelector('.html-split-caret');
+          return view.hasFocus && view.state.selection.main.head === arguments[1] &&
+            doc.scrollingElement.scrollTop === 0 && !caret?.hidden && !!caret;
+        """, item, offset), f'Click {attempt + 1} on <body> should reveal the beginning of the rendered document')
+
+
+@pytest.mark.parametrize('sandbox_events', [True, False], ids=['iframe-events', 'observed-scroll'])
+def test_html_split_syncs_rendered_scroll_and_source_caret(browser, tmp_path, sandbox_events):
+    source = '\n'.join([
+        '<!doctype html><style>section { height: 500px; padding: 12px }</style>',
+        '<section id="first">First</section>',
+        '<!--', *(['unrendered comment line'] * 95), '-->',
+        '<section id="second">Second &amp; <strong>nested text</strong></section>',
+        '<section id="third">Third</section>',
+        '<section id="fourth">Fourth</section>',
+        *[f'<div>Tail {number}</div>' for number in range(60)],
+    ])
+    item = mount_html_split(browser, tmp_path, source, sandbox_events=sandbox_events)
+    wait = WebDriverWait(browser, 8)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !!panel?._cmView && !!panel.querySelector('iframe')?.contentDocument?.querySelector('#second');
+    """, item))
+    browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]), view = panel._cmView;
+      const offset = view.state.doc.toString().indexOf('nested text') + 3;
+      view.focus();
+      view.dispatch({selection: {anchor: offset}, effects: panel._cmApi.EditorView.scrollIntoView(offset, {y: 'center'})});
+    """, item)
+
+    def caret_matches(driver, offset):
+        return driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]), frame = panel.querySelector('iframe');
+      const target = frame.contentDocument.querySelector('#second strong'), frameRect = frame.getBoundingClientRect();
+      const mark = panel.querySelector('.html-split-caret');
+      if (!mark || mark.hidden) return false;
+      const range = frame.contentDocument.createRange(), text = target.firstChild;
+      range.setStart(text, arguments[1]);
+      range.collapse(true);
+      const position = range.getBoundingClientRect(), caret = mark.getBoundingClientRect();
+      return position.top >= 0 && position.bottom <= frameRect.height &&
+        Math.abs(caret.left - frameRect.left - position.left) < 3 &&
+        Math.abs(caret.top - frameRect.top - position.top) < 3;
+    """, item, offset)
+
+    wait.until(lambda driver: caret_matches(driver, 3))
+
+    def alignment(driver):
+        return driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]), view = panel._cmView;
+      return {source: view.coordsAtPos(view.state.selection.main.head).top,
+        preview: panel.querySelector('.html-split-caret').getBoundingClientRect().top};
+    """, item)
+
+    # The preview follows the source caret on a later frame, which a loaded host can delay.
+    try:
+        wait.until(lambda driver: abs(alignment(driver)['source'] - alignment(driver)['preview']) < 20)
+    except TimeoutException as error:
+        raise AssertionError(alignment(browser)) from error
+    native_logical_key(browser, 'ArrowRight')
+    wait.until(lambda driver: caret_matches(driver, 4))
+    wheel = browser.execute_script("""
+      const frame = panelNodes.get(arguments[0]).querySelector('iframe');
+      const doc = frame.contentDocument, scroller = doc.scrollingElement, section = doc.querySelector('#third');
+      const bounds = frame.getBoundingClientRect();
+      return {x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2,
+        deltaY: section.getBoundingClientRect().top - scroller.clientHeight / 2};
+    """, item)
+    browser.execute_cdp_cmd('Input.dispatchMouseEvent', {'type': 'mouseWheel', 'deltaX': 0, **wheel})
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]), view = panel._cmView;
+      const frame = htmlSplitPreviewFrame(panel);
+      const sourceLine = view.state.doc.lineAt(view.state.doc.toString().indexOf('<section id="third">')).number;
+      return document.activeElement !== frame &&
+        Math.abs(sourcePositionForEditorScroll(view, .5).line - sourceLine) < 2;
+    """, item))
+    editor_wheel = browser.execute_script("""
+      const view = panelNodes.get(arguments[0])._cmView, scroller = view.scrollDOM;
+      const offset = view.state.doc.toString().indexOf('<section id="fourth">');
+      const bounds = scroller.getBoundingClientRect();
+      return {x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2,
+        deltaY: view.lineBlockAt(offset).top - scroller.scrollTop - scroller.clientHeight / 2 + 1};
+    """, item)
+    browser.execute_cdp_cmd('Input.dispatchMouseEvent', {'type': 'mouseWheel', 'deltaX': 0, **editor_wheel})
+    reverse = {}
+
+    def reverse_aligned(driver):
+        reverse.update(driver.execute_script("""
+          const panel = panelNodes.get(arguments[0]), view = panel._cmView;
+          const frame = htmlSplitPreviewFrame(panel), doc = frame.contentDocument;
+          const source = view.state.doc, editorLine = sourcePositionForEditorScroll(view, .5).line;
+          const third = source.lineAt(source.toString().indexOf('<section id="third">')).number;
+          const renderedBlocks = doc.querySelectorAll('#third, #fourth, #fourth ~ div');
+          const index = Math.floor(editorLine) - third;
+          const before = renderedBlocks[index]?.getBoundingClientRect().top;
+          const after = renderedBlocks[index + 1]?.getBoundingClientRect().top;
+          return {editorLine, third, caretUnchanged: view.state.selection.main.head === source.toString().indexOf('nested text') + 4,
+            error: before + (after - before) * (editorLine % 1) - doc.scrollingElement.clientHeight / 2};
+        """, item))
+        return reverse['caretUnchanged'] and reverse['editorLine'] >= reverse['third'] + 0.5 and (
+            reverse['error'] is not None and abs(reverse['error']) < 3
+        )
+
+    wait.until(reverse_aligned, 'TextEdit wheel did not move the same semantic position to the ViewEdit midpoint')
+    assert browser.execute_script("""
+      const frame = panelNodes.get(arguments[0]).querySelector('iframe');
+      return frame.getAttribute('sandbox') === 'allow-same-origin' &&
+        frame.contentDocument.querySelector('#second strong').textContent === 'nested text';
+    """, item)
+
+
+def test_html_split_caret_tracks_and_clips_to_authored_scroll_container(browser, tmp_path):
+    source = ('<div style="height:145px"></div>\n'
+              '<div id=scroll style="height:100px;overflow:auto"><div style="height:55px"></div>'
+              '<p id=target style="margin:0">Scrollable text</p><div style="height:300px"></div></div>'
+              '<div style="height:900px"></div>')
+    item = mount_html_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 5)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]), frame = htmlSplitPreviewFrame(panel);
+      if (!frame || !panel._cmView) return false;
+      panel._cmView.focus();
+      panel._cmView.dispatch({selection: {anchor: arguments[1]}});
+      return panel._cmView.hasFocus;
+    """, item, source.index('Scrollable text') + 3))
+    for scroll, visible in [(0, True), (20, True), (100, False), (0, True)]:
+        browser.execute_script("""
+          htmlSplitPreviewFrame(panelNodes.get(arguments[0])).contentDocument
+            .getElementById('scroll').scrollTop = arguments[1];
+        """, item, scroll)
+        wait.until(lambda driver: driver.execute_script("""
+          const [item, visible] = arguments;
+          const panel = panelNodes.get(item), frame = htmlSplitPreviewFrame(panel);
+          const marker = panel.querySelector('.html-split-caret');
+          if (!visible) return !!marker?.hidden;
+          const target = frame.contentDocument.getElementById('target');
+          return !!marker && !marker.hidden && panel._cmView.hasFocus &&
+            Math.abs(marker.getBoundingClientRect().top - frame.getBoundingClientRect().top
+              - target.getBoundingClientRect().top) < 4;
+        """, item, visible), f'Caret did not follow authored scrollTop {scroll}')
+        if not visible:
+            top = browser.execute_script("""
+              const panel = panelNodes.get(arguments[0]), frame = htmlSplitPreviewFrame(panel);
+              const before = frame.contentDocument.scrollingElement.scrollTop;
+              const view = panel._cmView;
+              view.dispatch({selection: {anchor: view.state.selection.main.head + 1}});
+              return before;
+            """, item)
+            browser.execute_async_script("const done = arguments[0]; requestAnimationFrame(() => requestAnimationFrame(done));")
+            assert browser.execute_script("""
+              const panel = panelNodes.get(arguments[0]), frame = htmlSplitPreviewFrame(panel);
+              return frame.contentDocument.scrollingElement.scrollTop === arguments[1] &&
+                panel.querySelector('.html-split-caret')?.hidden;
+            """, item, top)
+
+
+def test_html_split_caret_stays_at_entity_boundary_until_semicolon(browser, tmp_path):
+    source = '<p id=entity>&copy;abcd</p>'
+    item = mount_html_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 5)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]), frame = htmlSplitPreviewFrame(panel);
+      if (!frame || !panel._cmView) return false;
+      panel._cmView.focus();
+      panel._cmView.dispatch({selection: {anchor: arguments[1]}});
+      return panel._cmView.hasFocus;
+    """, item, source.index('&copy;')))
+    for index, rendered_offset in enumerate([0, 0, 0, 0, 0, 0, 1, 2]):
+        if index:
+            native_logical_key(browser, 'ArrowRight')
+        wait.until(lambda driver: driver.execute_script("""
+          const [item, renderedOffset] = arguments;
+          const panel = panelNodes.get(item), frame = htmlSplitPreviewFrame(panel), doc = frame.contentDocument;
+          const marker = panel.querySelector('.html-split-caret');
+          const range = doc.createRange();
+          range.setStart(doc.getElementById('entity').firstChild, renderedOffset);
+          range.collapse(true);
+          return !!marker && !marker.hidden && Math.abs(marker.getBoundingClientRect().left
+            - frame.getBoundingClientRect().left - range.getBoundingClientRect().left) < 3;
+        """, item, rendered_offset), f'HTML caret jumped at source offset {index}')
+
+
+def test_html_split_caret_follows_text_after_table(browser, tmp_path):
+    source = '\n'.join([
+        '<!doctype html>',
+        '<table><div>Moved before the table</div><tr><td id="cell">In the table</td></tr></table>',
+        '<template><h2>Inactive heading</h2><div>Inactive div</div></template>',
+        '<h2 id="after">After the table</h2>',
+        '<div>Trailing div</div>',
+    ])
+    item = mount_html_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 5)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]), frame = htmlSplitPreviewFrame(panel);
+      return !!panel._cmView && frame?._htmlPreviewDocument.querySelector('#cell')?.closest('tbody') != null;
+    """, item))
+    def caret_matches(driver, target, text, offset):
+        return driver.execute_script("""
+          const panel = panelNodes.get(arguments[0]), frame = htmlSplitPreviewFrame(panel);
+          const marker = panel.querySelector('.html-split-caret'), doc = frame?._htmlPreviewDocument;
+          const node = doc?.getElementById(arguments[1]).firstChild;
+          if (!marker || marker.hidden || node?.data !== arguments[2]) return false;
+          const range = doc.createRange();
+          range.setStart(node, arguments[3]);
+          range.collapse(true);
+          const expected = range.getBoundingClientRect(), iframe = frame.getBoundingClientRect();
+          const actual = marker.getBoundingClientRect();
+          return Math.abs(actual.left - iframe.left - expected.left) < 3 &&
+            Math.abs(actual.top - iframe.top - expected.top) < 3;
+        """, item, target, text, offset)
+
+    for target, text in [('after', 'After the table'), ('cell', 'In the table'), ('after', 'After the table')]:
+        browser.execute_script("""
+          const view = panelNodes.get(arguments[0])._cmView;
+          view.focus();
+          view.dispatch({selection: {anchor: view.state.doc.toString().indexOf(arguments[1]) + 2}});
+        """, item, text)
+        native_logical_key(browser, 'ArrowRight')
+        wait.until(lambda driver: caret_matches(driver, target, text, 3), f'HTML preview caret did not follow to {target}')
+    native_logical_key(browser, 'x')
+    wait.until(lambda driver: caret_matches(driver, 'after', 'Aftxer the table', 4),
+               'HTML preview caret did not resume following after the iframe refreshed')
+
+
+@pytest.mark.parametrize(
+    'opening,closing',
+    [('<HTML>', '</HTML>'), ('<html><body>', '</body></html>'), ('<!doctype html>', '')],
+    ids=['implicit-body', 'explicit-body', 'no-html-tag'],
+)
+def test_html_split_caret_follows_plain_text_behind_table(browser, tmp_path, opening, closing):
+    source = '\n'.join([
+        opening, '', '  Hello world', '  <h1>blah title</h1>',
+        '  <table border=1>', '    <tr>', '      <td>hey</td>',
+        '      <td>ho</td>', '    </tr>', '    <tr>', '      <td>hey</td>',
+        '      <td>huuuo</td>', '      jesus', '    </tr>', '  </table>',
+        'Refresh', 'Branch: after the table', '    <br/>', '  <hr>', closing,
+    ])
+    item = mount_html_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 5)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !!panel._cmView && !!htmlSplitPreviewFrame(panel);
+    """, item))
+    browser.execute_script("""
+      const view = panelNodes.get(arguments[0])._cmView;
+      const source = view.state.doc.toString();
+      view.focus();
+      view.dispatch({selection: {anchor: source.indexOf('Refresh') - 1}});
+    """, item)
+    for offset in range(3):
+        native_logical_key(browser, 'ArrowRight')
+        wait.until(lambda driver: driver.execute_script("""
+          const [item, offset] = arguments, panel = panelNodes.get(item);
+          const frame = htmlSplitPreviewFrame(panel), doc = frame._htmlPreviewDocument;
+          const node = Array.from(doc.body.childNodes).find(node => node.nodeType === 3 && node.data.includes('Refresh'));
+          const marker = panel.querySelector('.html-split-caret');
+          if (node?.previousElementSibling?.localName !== 'table' || !marker || marker.hidden) return false;
+          const range = doc.createRange();
+          range.setStart(node, node.data.indexOf('Refresh') + offset);
+          range.collapse(true);
+          const expected = range.getBoundingClientRect(), iframe = frame.getBoundingClientRect();
+          const actual = marker.getBoundingClientRect();
+          return Math.abs(actual.left - iframe.left - expected.left) < 3 &&
+            Math.abs(actual.top - iframe.top - expected.top) < 3;
+        """, item, offset), f'HTML preview caret did not follow plain text after the table at offset {offset}')
+
+
+def test_html_split_mock_caret_stays_at_hidden_comment(browser, tmp_path):
+    source = '\n'.join([
+        '<!doctype html>',
+        '<p id="inline">Before<!-- inline comment -->After</p>',
+        '<hr>',
+        '<!--', *(['hidden source'] * 100), 'end of hidden source', '-->',
+        '<p id="next">Next visible text</p>',
+        '<!-- trailing comment -->',
+    ])
+    item = mount_html_split(browser, tmp_path, source)
+    wait = WebDriverWait(browser, 5)
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !!panel._cmView && !!htmlSplitPreviewFrame(panel);
+    """, item))
+    for text, target, expected_offset in [
+        ('inline comment', 'inline', 0),
+        ('end of hidden source', 'next', 0),
+        ('trailing comment', 'next', len('Next visible text')),
+        ('After', 'inline', 1),
+    ]:
+        browser.execute_script("""
+          const panel = panelNodes.get(arguments[0]), view = panel._cmView;
+          const anchor = view.state.doc.toString().indexOf(arguments[1]);
+          view.focus();
+          view.dispatch({selection: {anchor}, effects: panel._cmApi.EditorView.scrollIntoView(anchor, {y: 'center'})});
+        """, item, text)
+        native_logical_key(browser, 'ArrowRight')
+        wait.until(lambda driver: driver.execute_script("""
+          const [item, target, offset] = arguments, panel = panelNodes.get(item);
+          const frame = htmlSplitPreviewFrame(panel), doc = frame._htmlPreviewDocument;
+          const marker = panel.querySelector('.html-split-caret');
+          if (!marker || marker.hidden) return false;
+          const range = doc.createRange();
+          range.setStart(doc.getElementById(target).lastChild, offset);
+          range.collapse(true);
+          const expected = range.getBoundingClientRect(), iframe = frame.getBoundingClientRect();
+          const actual = marker.getBoundingClientRect();
+          return Math.abs(actual.left - iframe.left - expected.left) < 3 &&
+            Math.abs(actual.top - iframe.top - expected.top) < 3;
+        """, item, target, expected_offset), f'HTML mock caret did not follow position in {text}')
+
+
+@pytest.mark.parametrize('sandbox_events', [True, False], ids=['iframe-events', 'observed-hover'])
+def test_html_preview_link_popup_opens_new_tab(browser, tmp_path, sandbox_events):
+    wait = WebDriverWait(browser, 10)
+    target_page = serve_repo_fixture_page('html-preview-link-target.html', '<p id="destination">Destination</p>')
+    url = fixture_page_url(target_page, '#destination')
+    source = '<p><a style="font:12px/1 sans-serif" href="' + html.escape(url, quote=True) + '"><strong>Example link</strong></a></p>'
+    item = mount_split_file(browser, tmp_path, source, '/home/test/links.html', 'xml', sandbox_events=sandbox_events, mode='preview')
+    point = wait.until(lambda driver: driver.execute_script("""
+      const frame = panelNodes.get(arguments[0])?.querySelector('iframe');
+      const link = frame?.contentDocument?.querySelector('strong');
+      if (!link) return false;
+      link.addEventListener('pointerover', () => { window.__htmlLinkEntered = performance.now(); }, {once: true});
+      const inner = link.getBoundingClientRect(), outer = frame.getBoundingClientRect();
+      return {x: outer.x + inner.x + inner.width / 2, y: outer.y + inner.bottom - 1,
+        linkTop: outer.y + inner.top, linkBottom: outer.y + inner.bottom};
+    """, item))
+    pointer = {axis: point[axis] for axis in ('x', 'y')}
+    browser.execute_cdp_cmd('Input.dispatchMouseEvent', {'type': 'mouseMoved', **pointer})
+    popup = wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.viewedit-link-tooltip a'))
+    assert popup.text == url
+    assert popup.get_dom_attribute('target') == '_blank'
+    assert browser.execute_script('return performance.now() - window.__htmlLinkEntered') >= 1500
+    assert browser.execute_script("return panelNodes.get(arguments[0]).querySelector('iframe').getAttribute('sandbox')", item) == 'allow-same-origin'
+    handles = set(browser.window_handles)
+    original = browser.current_window_handle
+    try:
+        popup_box = browser.execute_script('return arguments[0].parentElement.getBoundingClientRect().toJSON()', popup)
+        below = popup_box['top'] >= point['y']
+        gap = popup_box['top'] - point['linkBottom'] if below else point['linkTop'] - popup_box['bottom']
+        assert gap <= 2, (point, popup_box, gap)
+        browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+            'type': 'mouseMoved', 'x': point['x'] + 2,
+            'y': popup_box['top'] + 2 if below else popup_box['bottom'] - 2,
+        })
+        assert browser.find_elements(By.CSS_SELECTOR, '.viewedit-link-tooltip a'), 'Popup closed on the path from its link'
+        ActionChains(browser).move_to_element(popup).pause(0.4).click().perform()
+        added = wait.until(lambda driver: set(driver.window_handles) - handles)
+        browser.switch_to.window(added.pop())
+        wait.until(lambda driver: driver.current_url == url)
+        assert browser.find_element(By.ID, 'destination').text == 'Destination'
+        assert browser.execute_script('return window.opener === null')
+    finally:
+        for handle in set(browser.window_handles) - handles:
+            browser.switch_to.window(handle)
+            browser.close()
+        browser.switch_to.window(original)
+    if not sandbox_events:
+        _cdp_click_point(browser, pointer)
+        assert set(browser.window_handles) == handles
+        assert browser.execute_script("""
+          const frame = panelNodes.get(arguments[0]).querySelector('iframe');
+          return frame.contentDocument.URL === 'about:srcdoc' &&
+            frame.contentDocument.querySelector('a').target === '_blank';
+        """, item), 'A direct click must leave the sandboxed editor document in place'
+        diagnostics = [entry for entry in read_browser_console_log(browser) if entry['level'] in {'WARNING', 'SEVERE'}]
+        assert len(diagnostics) == 1 and diagnostics[0]['source'] == 'security' and diagnostics[0]['message'] == (
+            f"about:srcdoc - Blocked opening '{url}' in a new window because the request was made in a sandboxed "
+            "frame whose 'allow-popups' permission is not set."
+        ), diagnostics
+        return
+    for phase in ('mousePressed', 'mouseReleased'):
+        browser.execute_cdp_cmd('Input.dispatchMouseEvent', {
+            'type': phase, 'button': 'right', 'clickCount': 1, **pointer,
+        })
+    menu = wait.until(lambda driver: driver.find_element(By.CSS_SELECTOR, '.link-context-menu'))
+    assert [button.text for button in menu.find_elements(By.TAG_NAME, 'button')] == [
+        'Open URL in a new tab', 'Copy URL',
+    ]
 
 
 def test_preview_frame_shared_chrome_keeps_html_and_pdf_height_policies(browser, tmp_path):
@@ -242,6 +841,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 {{timeoutMs: 15000, description: 'README diff CodeMirror payload build'}}
               );
               const finalText = panel._cmView?.state?.doc?.toString?.() || '';
+              panel._cmView.dispatch({{selection: {{anchor: 3}}}});
               const state = fileState.get(path) || {{}};
               return {{
                 modeWhilePayloadUnresolved,
@@ -265,6 +865,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 apiHasUnifiedMergeView: Boolean(window.YOmuxCodeMirror?.unifiedMergeView),
                 plainFallback: panel._cmPlainFallback === true,
                 statusText: panel.querySelector('.file-editor-status-message')?.textContent || '',
+                cursor: panel.querySelector('.file-editor-cursor-status')?.textContent,
                 request: window.__readmeDiffRequest || '',
                 errors: window.__readmeDiffErrors,
               }};
@@ -283,6 +884,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     assert "Deterministic test-only README diff line." not in metrics["textWhilePayloadUnresolved"], metrics
     assert metrics["finalMode"] == "diff", json.dumps(metrics, sort_keys=True)
     assert metrics["finalTextLength"] == metrics["expectedTextLength"], metrics
+    assert metrics["cursor"] == "1:4", metrics
     assert metrics["deletedRows"] > 0, metrics
     assert metrics["plainFallback"] is False, metrics
     assert "from=HEAD" in metrics["request"] and "to=current" in metrics["request"], metrics
@@ -1269,6 +1871,55 @@ def test_markdown_prosemirror_cancels_detached_local_image_hydration(browser, tm
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+@pytest.mark.parametrize('loaded_before_detach', [False, True])
+def test_markdown_viewedit_retains_svg_when_tab_detaches(browser, tmp_path, loaded_before_detach):
+    svg = (REPO_ROOT / 'examples' / '31-assets' / 'status-card.svg').read_text(encoding='utf-8')
+
+    def hold_image(driver):
+        driver.execute_script("""
+          const [svg] = arguments;
+          const original = fetchRawFileBlob;
+          fetchRawFileBlob = (path, options) => {
+            if (!path.endsWith('/status-card.svg')) return original(path, options);
+            return new Promise(resolve => {
+              window.__releaseStatusCard = () => resolve({ok:true,status:200,blob:new Blob([svg], {type:'image/svg+xml'})});
+            });
+          };
+        """, svg)
+
+    source = '<details>\n<summary>Images</summary>\n\n<img src="status-card.svg" alt="Status card">\n\n</details>'
+    item = mount_split_file(browser, tmp_path, source, '/home/test/status.md', 'markdown', before_mount=hold_image)
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script('return typeof window.__releaseStatusCard === "function"'))
+    result = browser.execute_async_script("""
+      const [item, loadedBeforeDetach, done] = arguments;
+      const panel = panelNodes.get(item), pane = fileEditorPanelPreviewPane(panel);
+      const view = panel._pmView, image = view.dom.querySelector('img.prosemirror-image');
+      const parent = panel.parentNode, sibling = panel.nextSibling;
+      (async () => {
+        if (loadedBeforeDetach) {
+          window.__releaseStatusCard();
+          await pane._previewAsync;
+        }
+        panel.remove();
+        try {
+          if (!loadedBeforeDetach) {
+            window.__releaseStatusCard();
+            await pane._previewAsync;
+          }
+          const objectUrl = image._rawFileObjectUrl;
+          restoreProseMirrorPanelDom(panel, {previewPane:pane});
+          return {decoded: image.naturalWidth > 0,
+            retained: !!objectUrl && image._rawFileObjectUrl === objectUrl,
+            sameView: panel._pmView === view && pane.contains(view.dom)};
+        } finally {
+          parent.insertBefore(panel, sibling);
+          delete window.__releaseStatusCard;
+        }
+      })().then(done, error => done({error: String(error)}));
+    """, item, loaded_before_detach)
+    assert result == {'decoded': True, 'retained': True, 'sameView': True}, result
+
+
 def test_markdown_prosemirror_blockquoted_fence_keeps_event_loop_responsive(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
@@ -1437,23 +2088,24 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
             const preview = panel.querySelector('.file-editor-preview-pane-panel');
             const wheelViewport = root?.querySelector('.file-editor-preview-zoom-viewport');
             const wheelShell = wheelViewport?.closest('.file-editor-preview-zoom-shell');
+            await window.__yomuxTestWaitFor(() =>
+              wheelViewport?.querySelector('img')?.naturalWidth &&
+              !wheelShell.classList.contains('file-editor-preview-zoom-measuring')
+            );
             wheelShell?.querySelector('[data-preview-zoom-action="actual"]')?.click();
-            for (let index = 0; index < 5; index += 1) {
-              wheelShell?.querySelector('[data-preview-zoom-action="in"]:not(:disabled)')?.click();
-            }
-            await window.__yomuxTestHelpers.frame();
-            await window.__yomuxTestHelpers.frame();
-            if (wheelViewport) {
-              wheelViewport.dataset.prosemirrorMermaidWheelProbe = '1';
-              const wheelStage = wheelViewport.querySelector('.file-editor-preview-zoom-stage');
-              if (wheelStage) wheelStage.style.height = `${wheelViewport.clientHeight + 400}px`;
-              const innerMax = Math.max(0, wheelViewport.scrollHeight - wheelViewport.clientHeight);
-              wheelViewport.scrollTop = innerMax / 2;
+            const zoomIn = wheelShell.querySelector('[data-preview-zoom-action="in"]');
+            for (let index = 0; index < 16 && !zoomIn.disabled && wheelViewport.scrollHeight <= wheelViewport.clientHeight + 240; index += 1) {
+              zoomIn.click();
             }
             if (preview && wheelViewport) {
+              wheelViewport.dataset.prosemirrorMermaidWheelProbe = '1';
               wheelViewport.scrollIntoView({block: 'center'});
               preview.scrollTop = Math.max(0, Math.min(preview.scrollTop, preview.scrollHeight - preview.clientHeight - 300));
             }
+            // Zoom schedules its own scroll positioning. Set the wheel probe after it settles.
+            await window.__yomuxTestHelpers.frame();
+            await window.__yomuxTestHelpers.frame();
+            wheelViewport.scrollTop = (wheelViewport.scrollHeight - wheelViewport.clientHeight) / 2;
             done({
               mode: editorViewModeFor(path, item),
               prosemirror: Boolean(panel._pmView),
@@ -2634,10 +3286,11 @@ def test_markdown_vieweditor_task_source_lines_refresh_after_edit_above(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
+          const path = '/home/test/yolomux.dev/task-line-refresh.md';
+          const item = fileEditorItemFor(path);
+          let result;
           try {
             const source = '- [ ] first task\\n- [x] second task';
-            const path = '/home/test/yolomux.dev/task-line-refresh.md';
-            const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
             setFileEditorViewMode(path, 'preview', item);
             addFileEditorTabItem(path, item);
@@ -2655,13 +3308,16 @@ def test_markdown_vieweditor_task_source_lines_refresh_after_edit_above(browser,
                 .join(',') === '3,4'
             ), {timeoutMs: 5000, description: 'task source-line metadata refresh'});
             const inputs = [...panel._pmView.dom.querySelectorAll('input.markdown-task-checkbox')];
-            done({
+            result = {
               lines: inputs.map(input => input.dataset.sourceLine),
               labels: inputs.map(input => input.getAttribute('aria-label')),
               serialized: serializeProseMirrorSource(panel),
-            });
-          } catch (error) { done({error: String(error?.stack || error)}); }
-        })();
+            };
+          } finally {
+            if (panelNodes.has(item)) await removeOpenFile(path, {item, confirmDirty: false});
+          }
+          done(result);
+        })().catch(error => done({error: String(error?.stack || error)}));
         """
     )
     assert "error" not in metrics, metrics
@@ -2757,6 +3413,7 @@ def test_markdown_prosemirror_native_enter_keeps_typing_and_codemirror_keeps_vie
 
 def test_markdown_split_native_click_typing_syncs_textedit_and_viewedit(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    set_browser_visual_profile(browser, viewport=(1440, 1000))
     setup = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -2775,6 +3432,7 @@ def test_markdown_split_native_click_typing_syncs_textedit_and_viewedit(browser,
             panelNodes.set(item, panel);
             window.__nativeClickPanel = panel;
             document.getElementById('grid').append(panel);
+            panel.style.width = Math.min(980, innerWidth - panel.getBoundingClientRect().left - 24) + 'px';
             renderFileEditorPanel(panel, item);
             await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
             done({ready: true});
@@ -2786,9 +3444,53 @@ def test_markdown_split_native_click_typing_syncs_textedit_and_viewedit(browser,
     )
     assert setup == {"ready": True}, setup
 
+    def split_caret(driver, target, offset, rich_offset=None):
+        return driver.execute_script("""
+          const panel = window.__nativeClickPanel;
+          const [target, offset, richOffset] = arguments;
+          const text = panel._cmView, rich = panel._pmView;
+          const markers = [...panel.querySelectorAll('.split-editor-caret')]
+            .filter(marker => marker.getClientRects().length);
+          if (markers.length !== 1) return false;
+          const marker = markers[0];
+          const targetDOM = target === 'text' ? text.scrollDOM : rich.dom;
+          const ink = getComputedStyle(marker, '::before');
+          if (!targetDOM.contains(marker) || getComputedStyle(marker).opacity !== '1' ||
+              ink.animationName !== 'none' || ink.left !== '0px' || ink.borderLeftStyle !== 'dashed') return false;
+          const boundary = target === 'text' ? text.coordsAtPos(offset) : rich.coordsAtPos(richOffset);
+          if (!boundary || Math.abs(marker.getBoundingClientRect().left - boundary.left) > 1) return false;
+          if (target === 'text') {
+            return rich.hasFocus() && rich.state.selection.head === richOffset &&
+              !text.contentDOM.contains(marker) && Math.abs(marker.getBoundingClientRect().top - boundary.top) < 1;
+          }
+          return text.hasFocus && text.state.selection.main.head === offset &&
+            rich.posAtDOM(marker, 0) === richOffset;
+        """, target, offset, offset + 1 if rich_offset is None else rich_offset)
+
+    browser.execute_script("""
+      const text = window.__nativeClickPanel._cmView;
+      text.focus();
+      text.dispatch({selection: {anchor: 2}});
+    """)
+    WebDriverWait(browser, 4).until(lambda driver: split_caret(driver, "view", 2))
+    native_logical_key(browser, "ArrowRight", commands=["moveRight"])
+    WebDriverWait(browser, 4).until(lambda driver: split_caret(driver, "view", 3))
+    assert browser.execute_script("""
+      return window.__nativeClickPanel.querySelector('.file-editor-cursor-status').textContent;
+    """) == "1:4"
+    browser.execute_script("""
+      const rich = window.__nativeClickPanel._pmView;
+      rich.focus();
+      rich.dispatch(rich.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(rich.state.doc, 5)));
+    """)
+    WebDriverWait(browser, 4).until(lambda driver: split_caret(driver, "text", 4))
+
     view_text = browser.execute_script("return window.__nativeClickPanel._pmView.dom.querySelector('p')")
     ActionChains(browser).move_to_element_with_offset(view_text, 8, 8).click().send_keys("V", Keys.ENTER, "W").perform()
     browser.find_element(By.CSS_SELECTOR, ".file-editor-toolbar").click()
+    WebDriverWait(browser, 4).until(
+        lambda driver: not driver.find_elements(By.CSS_SELECTOR, ".split-editor-caret")
+    )
     time.sleep(0.5)
     debug = browser.execute_script(
         """
@@ -2833,6 +3535,140 @@ def test_markdown_split_native_click_typing_syncs_textedit_and_viewedit(browser,
     assert metrics["viewEditLabel"] == "ViewEdit", metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
+
+    browser.execute_script("window.__nativeClickPanel._pmView.focus()")
+    native_logical_key(browser, "z", modifiers=[native_editor_modifier(browser)])
+    undone = browser.execute_script("return window.__nativeClickPanel._pmView.state.doc.textContent")
+    assert undone.endswith("T") and ("V" not in undone or "W" not in undone), undone
+    browser.find_element(By.CSS_SELECTOR, ".file-editor-toolbar").click()
+
+    source, rich_offset, expected_view = browser.execute_async_script("""
+      const panel = window.__nativeClickPanel;
+      const source = ['- [first](https://example.com) tail',
+        '- Second itemXXX has an entity &amp; and an inline comment <!-- hidden text for cursor testing -->.',
+        '- Third item [XYZ-5394] DD_SSU11T'].join('\\n');
+      const text = panel._cmView;
+      text.dispatch({changes: {from: 0, to: text.state.doc.length, insert: source}});
+      const done = arguments[0];
+      window.__yomuxTestWaitFor(() => panel._pmSource === source).then(() => {
+        let position;
+        panel._pmView.state.doc.descendants((node, offset) => {
+          if (node.isText && node.text.includes('XXX')) position = offset + node.text.indexOf('XXX');
+        });
+        done([source, position, panel._pmView.state.doc.toJSON()]);
+      });
+    """)
+    source_offset = source.index("XXX")
+    for side, opposite in (("text", "view"), ("view", "text")):
+        for offset in (1, 4):
+            x, y, hit_editor = browser.execute_script("""
+              const panel = window.__nativeClickPanel;
+              const inText = arguments[0] === 'text';
+              const view = inText ? panel._cmView : panel._pmView;
+              const rect = view.coordsAtPos(inText ? arguments[1] : arguments[2]);
+              const x = rect.left, y = (rect.top + rect.bottom) / 2;
+              return [x, y, view.dom.contains(document.elementFromPoint(x, y))];
+            """, side, source_offset + offset, rich_offset + offset)
+            assert hit_editor, (side, x, y)
+            for event in ("mousePressed", "mouseReleased"):
+                browser.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                    "type": event, "x": x, "y": y, "button": "left", "clickCount": 1,
+                })
+            def followed(driver, expected=offset):
+                return split_caret(driver, opposite, source_offset + expected, rich_offset + expected)
+
+            def expect_followed(expected):
+                try:
+                    WebDriverWait(browser, 4).until(lambda driver: followed(driver, expected))
+                except TimeoutException as error:
+                    raise AssertionError((side, expected, source_offset, rich_offset, observed_carets())) from error
+
+            def observed_carets():
+                observed = browser.execute_script("""
+                  const panel = window.__nativeClickPanel;
+                  const text = panel._cmView, rich = panel._pmView;
+                  return {
+                    hit: document.elementFromPoint(arguments[0], arguments[1])?.className,
+                    text: [text.hasFocus, text.state.selection.main.head],
+                    view: [rich.hasFocus(), rich.state.selection.head],
+                    markers: [...panel.querySelectorAll('.split-editor-caret')].map(node =>
+                      rich.dom.contains(node) ? ['view', rich.posAtDOM(node, 0)] : ['text', node.style.left, node.style.top]),
+                  };
+                """, x, y)
+                return observed
+
+            expect_followed(offset)
+            native_logical_key(browser, "ArrowRight", commands=["moveRight"])
+            expect_followed(offset + 1)
+            assert browser.execute_script("""
+              const panel = window.__nativeClickPanel;
+              return [panel._cmView.state.doc.toString(), panel._pmView.state.doc.toJSON()];
+            """) == [source, expected_view]
+
+
+def test_markdown_split_click_lines_up_both_sides_like_html(browser, tmp_path):
+    """A click on either side scrolls the other so both carets sit at the same height, as in HTML."""
+    paragraphs = [f"Paragraph {index} words.\n" for index in range(120)]
+    source = "\n".join(["<!--" + "\n" * 9 + "-->\n", *paragraphs[:60], "# Split-view scratchpad\n", *paragraphs[60:]])
+    item = mount_split_file(browser, tmp_path, source, "/home/test/yolomux.dev/LINE-UP.md", "markdown")
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !!panel?._pmView?.dom.querySelector('h1') && !!panel._cmView
+        && elementCanScroll(fileEditorSourceElement(panel, 'preview')) && elementCanScroll(panel._cmView.scrollDOM);
+    """, item))
+
+    def carets(driver):
+        return driver.execute_script("""
+          const panel = panelNodes.get(arguments[0]), text = panel._cmView, rich = panel._pmView;
+          // The unfocused side draws a guide caret instead of moving its own selection.
+          const marker = [...rich.dom.querySelectorAll('.split-editor-caret')].find(node => node.getClientRects().length);
+          const layer = splitCodeMirrorCarets.get(text), guide = layer && text.state.field(layer.field);
+          const head = text.hasFocus ? text.state.selection.main.head : guide?.head;
+          return {
+            textFocused: text.hasFocus, richFocused: rich.hasFocus(),
+            text: Number.isInteger(head) ? text.coordsAtPos(head)?.top : null,
+            rich: rich.hasFocus() ? rich.coordsAtPos(rich.state.selection.head).top : marker?.getBoundingClientRect().top,
+            line: Number.isInteger(head) ? text.state.doc.lineAt(head).text : null,
+          };
+        """, item)
+
+    def wait_lined_up(focused, line):
+        def lined_up(driver):
+            state = carets(driver)
+            return (state[focused] and state["line"] == line and state["text"] is not None
+                    and state["rich"] is not None and abs(state["text"] - state["rich"]) < 6)
+        try:
+            # The line-up runs after the click's own scroll and layout; allow the file's usual deadline.
+            WebDriverWait(browser, 10).until(lined_up)
+        except TimeoutException as error:
+            raise AssertionError(carets(browser)) from error
+
+    # ViewEdit to TextEdit: TextEdit starts at the top, the heading sits low in ViewEdit.
+    heading = browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]), scroller = fileEditorSourceElement(panel, 'preview');
+      const heading = panel._pmView.dom.querySelector('h1');
+      scroller.scrollTop += heading.getBoundingClientRect().top - scroller.getBoundingClientRect().top - scroller.clientHeight * 0.7;
+      panel._cmView.scrollDOM.scrollTop = 0;
+      const bounds = heading.getBoundingClientRect();
+      return {x: bounds.left + 30, y: bounds.top + bounds.height / 2};
+    """, item)
+    _cdp_click_point(browser, heading)
+    wait_lined_up("richFocused", "# Split-view scratchpad")
+
+    # TextEdit to ViewEdit: a line low in TextEdit while ViewEdit is scrolled back to the top.
+    offset = browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]), text = panel._cmView;
+      const offset = text.state.doc.toString().indexOf('Paragraph 90 words.') + 4;
+      text.dispatch({effects: panel._cmApi.EditorView.scrollIntoView(offset, {y: 'start', yMargin: text.scrollDOM.clientHeight * 0.6})});
+      fileEditorSourceElement(panel, 'preview').scrollTop = 0;
+      return offset;
+    """, item)
+    point = WebDriverWait(browser, 4).until(lambda driver: driver.execute_script("""
+      const coords = panelNodes.get(arguments[0])._cmView.coordsAtPos(arguments[1]);
+      return coords && {x: coords.left + 1, y: (coords.top + coords.bottom) / 2};
+    """, item, offset))
+    _cdp_click_point(browser, point)
+    wait_lined_up("textFocused", "Paragraph 90 words.")
 
 
 def test_markdown_split_source_and_viewedit_converge_after_each_surface_blurs(browser, tmp_path):
@@ -2921,7 +3757,7 @@ def test_markdown_split_enter_middle_and_end_have_distinct_markdown_results(brow
           endView.dispatch(endView.state.tr.insertText('typed'));
           endView.dom.dispatchEvent(new FocusEvent('blur'));
           await new Promise(resolve => setTimeout(resolve, 100));
-          done({
+          const result = {
             middleSource,
             endSource,
             endAfterTyping: fileEditorPanelState(end).content,
@@ -2929,8 +3765,12 @@ def test_markdown_split_enter_middle_and_end_have_distinct_markdown_results(brow
             endTextEdit: end._cmView.state.doc.toString(),
             errors: jsDebugFailureEvents('error'),
             rejections: jsDebugFailureEvents('rejection'),
-          });
-        })();
+          };
+          for (const panel of [middle, end]) {
+            await removeOpenFile(panel.dataset.filePath, {confirmDirty: false});
+          }
+          done(result);
+        })().catch(error => done({error: String(error?.stack || error)}));
         """
     )
     assert metrics["middleSource"] == "hello\n\nworld", metrics
@@ -2942,7 +3782,7 @@ def test_markdown_split_enter_middle_and_end_have_distinct_markdown_results(brow
     assert metrics["rejections"] == [], metrics
 
 
-def test_markdown_viewedit_never_renders_literal_br_and_legacy_breaks_are_migrated(browser, tmp_path):
+def test_markdown_viewedit_never_renders_literal_br_and_keeps_explicit_breaks(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
@@ -2966,20 +3806,26 @@ def test_markdown_viewedit_never_renders_literal_br_and_legacy_breaks_are_migrat
               await window.__yomuxTestWaitFor(() => fileEditorPanelState(panel).content.includes('!'));
               panel._pmView.dom.dispatchEvent(new FocusEvent('blur'));
           await new Promise(resolve => setTimeout(resolve, 100));
-          done({
+          const metrics = {
             html: panel._pmView.dom.innerHTML,
             text: panel._pmView.state.doc.textContent,
             source: fileEditorPanelState(panel).content,
             cm: panel._cmView.state.doc.toString(),
             errors: jsDebugFailureEvents('error'),
             rejections: jsDebugFailureEvents('rejection'),
-          });
+          };
+          // This fixture has no file on disk. Mark the draft saved so leaving the page does not prompt.
+          const state = fileEditorPanelState(panel);
+          state.original = state.content;
+          state.dirty = false;
+          done(metrics);
         })();
         """
     )
     assert "&lt;br&gt;" not in metrics["html"] and ">br<" not in metrics["html"], metrics
     assert metrics["text"] == "beforeafter!", metrics
-    assert "<br>" not in metrics["source"], metrics
+    # An explicit <br> before a source newline is kept; a backslash break there would split the paragraph.
+    assert metrics["source"] == "before<br>\nafter!", metrics
     assert metrics["source"] == metrics["cm"], metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
@@ -3084,7 +3930,7 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
             const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
             const prevented = !link.dispatchEvent(event);
            const menu = document.querySelector('.markdown-preview-context-menu');
-           const modify = [...(menu?.querySelectorAll('button') || [])].find(button => button.textContent.trim() === 'Modify URL');
+           const modify = [...(menu?.querySelectorAll('button') || [])].find(button => button.textContent.trim() === 'Edit URL');
            modify?.click();
            await window.__yomuxTestWaitFor(() => document.querySelector('.markdown-link-url-dialog [data-markdown-link-url-input]'));
            const urlDialog = document.querySelector('.markdown-link-url-dialog');
@@ -3121,7 +3967,7 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
     )
     assert "failure" not in metrics, metrics
     assert metrics["prevented"] is True, metrics
-    assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
+    assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Edit URL", "Remove URL"], metrics
     assert metrics["labels"][4:7] == ["Copy text", "Copy with format", "Paste"], metrics
     assert "https://example.com/updated" in metrics["modified"], metrics
     assert metrics["removed"] == "YOmux", metrics
@@ -3214,7 +4060,7 @@ def test_markdown_relative_link_context_menu_opens_yomux_editor(browser, tmp_pat
     assert "failure" not in metrics, metrics
     assert metrics["previewLabels"][0] == "Open in a new Editor", metrics
     assert metrics["readOnlyLabels"][0] == "Open in a new Editor", metrics
-    assert metrics["viewEditLabels"][:3] == ["Open in a new Editor", "Copy URL", "Modify URL"], metrics
+    assert metrics["viewEditLabels"][:3] == ["Open in a new Editor", "Copy URL", "Edit URL"], metrics
     assert metrics["externalClickPrevented"] is True, metrics
     assert metrics["openedUrls"] == [["https://example.com/docs", "_blank", "noopener,noreferrer"]], metrics
     assert metrics["openedFiles"] == [
@@ -3261,7 +4107,7 @@ def test_markdown_viewedit_link_context_menu_selects_link_without_prior_highligh
     )
     assert "failure" not in metrics, metrics
     assert metrics["selectedText"] == "Link", metrics
-    assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
+    assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Edit URL", "Remove URL"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -3303,6 +4149,10 @@ def test_markdown_viewedit_table_link_context_menu_opens(browser, tmp_path):
     assert "failure" not in metrics, metrics
     assert metrics["prevented"] is True, metrics
     assert metrics["labels"][:2] == ["Open URL in a new tab", "Copy URL"], metrics
+    assert [label for label in metrics["labels"] if label.startswith("Insert ")] == [
+        "Insert column left", "Insert column right", "Insert row above", "Insert row below",
+    ], metrics
+    assert metrics["labels"][-2:] == ["Delete row", "Delete column"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -3389,7 +4239,7 @@ def test_markdown_viewedit_url_actions_do_not_show_i18n_keys(browser, tmp_path):
         """
     )
     assert "failure" not in metrics, metrics
-    assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
+    assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Edit URL", "Remove URL"], metrics
     assert not any(label.startswith("contextmenu.") for label in metrics["labels"]), metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
@@ -6930,7 +7780,7 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
           calloutCode: getComputedStyle(document.querySelector('#callout-code')).color,
           calloutCodeBg: getComputedStyle(document.querySelector('#callout-code')).backgroundColor,
           expectedPreview: probePaint(
-                `background:var(${document.body.classList.contains('editor-theme-light') ? '--light-readable-bg' : '--markdown-preview-bg'})`,
+                `background:var(${document.body.classList.contains('editor-theme-light') ? '--editor-preview-bg' : '--markdown-preview-bg'})`,
             preview,
           ).background,
           expectedCode: probePaint(
@@ -6944,8 +7794,10 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
         const dark = read();
         document.body.classList.remove('theme-dark', 'editor-theme-dark');
         document.body.classList.add('theme-light', 'editor-theme-light');
+        document.documentElement.style.setProperty('--lt-editor-preview-bg', '#fff6df');
         const light = read();
-        return {dark, light};
+        document.body.classList.add('editor-preview-vanilla');
+        return {dark, light, vanilla: getComputedStyle(preview).backgroundColor};
         """
     )
     assert metrics["dark"]["preview"] == metrics["dark"]["expectedPreview"], metrics
@@ -6957,7 +7809,8 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
     assert metrics["dark"]["calloutStrong"] == metrics["dark"]["expectedDarkCallout"]["color"], metrics
     assert metrics["dark"]["calloutCode"] == metrics["dark"]["expectedInlineCode"]["color"], metrics
     assert metrics["dark"]["calloutCodeBg"] == metrics["dark"]["expectedInlineCode"]["background"], metrics
-    assert metrics["light"]["preview"] == metrics["light"]["expectedPreview"], metrics
+    assert metrics["light"]["preview"] == metrics["light"]["expectedPreview"] == "rgb(255, 246, 223)", metrics
+    assert metrics["vanilla"] == "rgb(255, 255, 255)", metrics
     assert metrics["light"]["code"] == metrics["light"]["expectedCode"], metrics
     # This native bgcolor comes from the HTML fixture. It deliberately proves that a vanilla
     # HTML table retains its authored paint in light mode; it is not a product design token.
@@ -8550,7 +9403,7 @@ def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(brow
           <script>{app_bundle_before_boot_script()}</script>
           <script>
             window.__focusedRerenderReady = (async () => {{
-              const path = '/home/test/repo/interview.md';
+              const path = '/home/test/repo/meeting.md';
               const content = Array.from({{length: 500}}, (_value, index) => `line ${{index + 1}} with enough text to keep CodeMirror scrolling normally`).join('\\n');
               const item = fileEditorItemFor(path);
               setFileState(path, {{kind: 'text', content, original: content, dirty: false, language: 'markdown'}});

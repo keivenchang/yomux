@@ -859,6 +859,346 @@ func TestWaitCollectorCadenceWakesWhenDemandArrivesDuringIdleWindow(t *testing.T
 	}
 }
 
+func TestWaitCollectorCadenceKeepsFixedFamiliesIndependentOfDemand(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := &agentStatusScheduleClock{timers: make(chan time.Duration, 1)}
+	finished := make(chan bool, 1)
+	go func() {
+		finished <- waitCollectorCadence(ctx, clock, 5*time.Minute, 5*time.Minute, func() bool { return false })
+	}()
+	select {
+	case delay := <-clock.timers:
+		if delay != 5*time.Minute {
+			cancel()
+			<-finished
+			t.Fatalf("fixed disk cadence used demand-sensitive timer %s, want 5m", delay)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("collector did not schedule its timer")
+	}
+	cancel()
+	if <-finished {
+		t.Fatal("cancelled cadence reported a collection deadline")
+	}
+}
+
+type diskDemandTransitionClock struct {
+	collectorClock
+	demanded atomic.Bool
+}
+
+func (c *diskDemandTransitionClock) NewTimer(delay time.Duration) HostCollectorTimer {
+	c.advance(delay)
+	c.demanded.Store(true)
+	timer := &neverTimer{ch: make(chan time.Time, 1)}
+	timer.ch <- c.Now()
+	return timer
+}
+
+func TestHostCollectorDiskDemandTransitionPreservesUnavailableIntervals(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "disk.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	clock := &diskDemandTransitionClock{collectorClock: collectorClock{now: time.Unix(100, 0)}}
+	source := &capturedDiskHostSources{diskSamples: []DiskUsageSample{
+		{SourceID: "mount:healthy", Mountpoint: "/", UsedBytes: 25, CapacityBytes: 100},
+		{SourceID: "mount:unavailable", Mountpoint: "/unavailable", Reason: "invalid_sample"},
+	}}
+	collector := NewHostCollector(source, writer, clock, HostCollectorConfig{
+		EpochID: "disk-demand", EpochStartedAt: 100, OwnerGeneration: 1, SourceID: "host",
+		ActiveFunc: clock.demanded.Load,
+	})
+	collector.runFamily(ctx, "system_disk")
+	if !waitCollectorCadence(ctx, clock, collector.familyCadence("system_disk"), collector.familyIdleCadence("system_disk"), collector.config.ActiveFunc) {
+		t.Fatal("disk cadence was cancelled")
+	}
+	collector.runFamily(ctx, "system_disk")
+	health := collector.Health()["system_disk"]
+	if !clock.demanded.Load() || source.diskCalls != 2 || health.Rejected != 0 || health.LastSuccessfulCommit != 400 {
+		t.Fatalf("demand interrupted disk persistence: calls=%d health=%+v", source.diskCalls, health)
+	}
+	reader, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	gaps, err := reader.ReadUnavailableSpans(ctx, 0, 1000, MaxFactReadLimit)
+	if err != nil || len(gaps) != 2 || gaps[0].StartedAt != 100 || gaps[0].EndedAt != 400 || gaps[1].StartedAt != 400 || gaps[1].EndedAt != 700 {
+		t.Fatalf("disk unavailable intervals = %+v, err=%v", gaps, err)
+	}
+	rows, err := reader.ReadObservations(ctx, 0, 1000, MaxFactReadLimit)
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("disk history lost healthy or unavailable mount inventory: rows=%+v err=%v", rows, err)
+	}
+}
+
+type diskHistoryTimer struct {
+	delay time.Duration
+	timer *neverTimer
+}
+
+type diskHistoryClock struct {
+	collectorClock
+	timers chan diskHistoryTimer
+}
+
+func (c *diskHistoryClock) NewTimer(delay time.Duration) HostCollectorTimer {
+	timer := &neverTimer{ch: make(chan time.Time, 1)}
+	c.timers <- diskHistoryTimer{delay, timer}
+	return timer
+}
+
+func TestHostCollectorDiskRestartResumesAfterRecordedIntervals(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "disk.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	const disk = "system_disk"
+	source := &capturedDiskHostSources{diskSamples: []DiskUsageSample{
+		{SourceID: "mount:healthy", Mountpoint: "/", UsedBytes: 25, CapacityBytes: 100},
+		{SourceID: "mount:unavailable", Mountpoint: "/unavailable", Reason: "invalid_sample"},
+	}}
+	first := NewHostCollector(source, writer, &collectorClock{now: time.Unix(100, 0)}, HostCollectorConfig{
+		EpochID: "before-restart", EpochStartedAt: 100, OwnerGeneration: 1, SourceID: "host",
+	})
+	first.runFamily(ctx, disk)
+	if health := first.Health()[disk]; health.LastSuccessfulCommit != 100 {
+		t.Fatalf("initial disk write: %+v", health)
+	}
+	clock := &diskHistoryClock{collectorClock: collectorClock{now: time.Unix(150, 0)}, timers: make(chan diskHistoryTimer, 1)}
+	restarted := NewHostCollector(source, writer, clock, HostCollectorConfig{
+		EpochID: "after-restart", EpochStartedAt: 150, OwnerGeneration: 2, SourceID: "host",
+	})
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		restarted.familyLoop(runCtx, disk, 5*time.Minute, 5*time.Minute)
+	}()
+	defer func() { cancel(); <-done }()
+	nextTimer := func() diskHistoryTimer {
+		select {
+		case scheduled := <-clock.timers:
+			return scheduled
+		case <-time.After(2 * time.Second):
+			t.Fatal("disk collector did not schedule")
+			return diskHistoryTimer{}
+		}
+	}
+	resume := nextTimer()
+	if resume.delay != 250*time.Second || source.diskCalls != 1 {
+		t.Fatalf("restart delay=%s calls=%d health=%+v", resume.delay, source.diskCalls, restarted.Health()[disk])
+	}
+	source.diskSamples[1] = DiskUsageSample{SourceID: "mount:unavailable", Mountpoint: "/unavailable", UsedBytes: 50, CapacityBytes: 100}
+	clock.advance(resume.delay)
+	resume.timer.ch <- clock.Now()
+	cadence := nextTimer()
+	if cadence.delay != 5*time.Minute || source.diskCalls != 2 {
+		t.Fatalf("resumed delay=%s calls=%d", cadence.delay, source.diskCalls)
+	}
+	if health := restarted.Health()[disk]; health.Rejected != 0 || health.LastSuccessfulCommit != 400 {
+		t.Fatalf("disk write after restart: %+v", health)
+	}
+	// The timer runs on monotonic time. A wall clock correction can put the
+	// next sample just inside the previously committed interval.
+	clock.advance(cadence.delay - 5*time.Millisecond)
+	cadence.timer.ch <- clock.Now()
+	correction := nextTimer()
+	if correction.delay < 4*time.Millisecond || correction.delay > 6*time.Millisecond || source.diskCalls != 2 {
+		t.Fatalf("clock correction delay=%s calls=%d", correction.delay, source.diskCalls)
+	}
+	clock.advance(5 * time.Millisecond)
+	correction.timer.ch <- clock.Now()
+	nextTimer()
+	if health := restarted.Health()[disk]; health.Rejected != 0 || health.LastSuccessfulCommit != 700 {
+		t.Fatalf("disk write after clock correction: %+v", health)
+	}
+}
+
+// A backward wall clock jump leaves recorded disk history ahead of the current
+// time. The collector must keep its cadence, start exactly one new epoch for
+// the jump (not one per sample until the clock catches up), and the chart over
+// the range both timelines cover must show one gauge value, not their sum.
+func TestHostCollectorDiskSamplesAfterBackwardClockJump(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "disk.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	const disk = "system_disk"
+	source := &capturedDiskHostSources{diskSamples: []DiskUsageSample{{SourceID: "mount:healthy", Mountpoint: "/", UsedBytes: 25, CapacityBytes: 100}}}
+	clock := &diskHistoryClock{collectorClock: collectorClock{now: time.Unix(100000, 0)}, timers: make(chan diskHistoryTimer, 1)}
+	collector := NewHostCollector(source, writer, clock, HostCollectorConfig{
+		EpochID: "running", EpochStartedAt: 100000, OwnerGeneration: 1, SourceID: "host", DiskCadence: 5 * time.Minute,
+	})
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		collector.familyLoop(runCtx, disk, 5*time.Minute, 5*time.Minute)
+	}()
+	defer func() { cancel(); <-done }()
+	nextTimer := func() diskHistoryTimer {
+		select {
+		case scheduled := <-clock.timers:
+			return scheduled
+		case <-time.After(2 * time.Second):
+			t.Fatal("disk collector did not schedule")
+			return diskHistoryTimer{}
+		}
+	}
+	// Each step fires the cadence timer after moving the wall clock by delta
+	// and expects the next sample to commit at wall time commit.
+	cadence := nextTimer()
+	steps := []struct {
+		delta  time.Duration
+		commit float64
+	}{
+		{5 * time.Minute, 100300},
+		{5 * time.Minute, 100600},
+		// The clock moves back 15 minutes; recorded history now ends 20
+		// minutes ahead, beyond one cadence.
+		{-15 * time.Minute, 99700},
+		{5 * time.Minute, 100000},
+		{5 * time.Minute, 100300},
+		{5 * time.Minute, 100600},
+		{5 * time.Minute, 100900},
+	}
+	for index, step := range steps {
+		if index == 2 {
+			source.diskSamples[0].UsedBytes = 50
+		}
+		clock.advance(step.delta)
+		cadence.timer.ch <- clock.Now()
+		cadence = nextTimer()
+		health := collector.Health()[disk]
+		if cadence.delay != 5*time.Minute || health.Rejected != 0 || health.LastSuccessfulCommit != step.commit {
+			t.Fatalf("step %d: delay=%s health=%+v", index, cadence.delay, health)
+		}
+	}
+	if source.diskCalls != len(steps)+1 {
+		t.Fatalf("disk samples = %d, want %d", source.diskCalls, len(steps)+1)
+	}
+
+	reader, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	epochs, err := reader.ReadCoverageEpochs(ctx, 0, 200000, MaxFactReadLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskEpochs := map[string]bool{}
+	for _, epoch := range epochs {
+		if epoch.Family == disk {
+			diskEpochs[epoch.EpochID] = true
+		}
+	}
+	if len(diskEpochs) != 2 {
+		t.Fatalf("disk epochs = %v, want the original and exactly one after the jump", diskEpochs)
+	}
+	observations, err := reader.ReadObservations(ctx, 0, 200000, MaxFactReadLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailable, err := reader.ReadUnavailableSpans(ctx, 0, 200000, MaxFactReadLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both timelines sampled at 100000, 100300 and 100600.
+	layer, err := (Materializer{}).Build(MaterializeRequest{Start: 99600, End: 101100, Resolution: 300}, observations, epochs, unavailable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(layer.Buckets) != 5 {
+		t.Fatalf("buckets = %d", len(layer.Buckets))
+	}
+	for _, bucket := range layer.Buckets {
+		if got := seriesValue(bucket, "system_disk_used_percent:/"); got != 25 && got != 50 {
+			t.Fatalf("bucket %+v used percent = %v, want one sample's value", bucket.Start, got)
+		}
+	}
+	for _, gap := range layer.NoData {
+		if gap.Family == disk && gap.Start < 101100 && gap.End > 99700 {
+			t.Fatalf("overlapping epochs left a coverage gap: %+v", gap)
+		}
+	}
+}
+
+// CPU and memory samples after a backward wall clock jump were rejected until
+// the clock caught up with the epoch's recorded history. Each family must
+// start exactly one new epoch for the jump and keep committing.
+func TestHostCollectorCPUAndMemoryRotateOnceAfterBackwardClockJump(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "host.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	memory := MemoryCounters{UsedBytes: 1, CapacityBytes: 2}
+	sources := &capturedHostSources{
+		cpu:    []CPUSnapshot{snapshot(10, 20, 2), snapshot(12, 22, 3), snapshot(14, 24, 4), snapshot(16, 26, 5), snapshot(18, 28, 6), snapshot(20, 30, 7), snapshot(22, 32, 8)},
+		memory: []MemoryCounters{memory, memory, memory, memory, memory, memory, memory},
+	}
+	clock := &collectorClock{now: time.Unix(100000, 0)}
+	collector := NewHostCollector(sources, writer, clock, HostCollectorConfig{EpochID: "running", EpochStartedAt: 100000, OwnerGeneration: 1, SourceID: "host"})
+	for index, step := range []struct {
+		delta  time.Duration
+		commit float64
+	}{
+		{0, 100000}, {5 * time.Second, 100005}, {-2 * time.Hour, 92805}, {5 * time.Second, 92810}, {5 * time.Second, 92815}, {5 * time.Second, 92820},
+	} {
+		clock.advance(step.delta)
+		collector.runFamily(ctx, "cpu")
+		collector.runFamily(ctx, "system_memory")
+		for _, family := range []string{"cpu", "system_memory"} {
+			// The first CPU snapshot only primes the sampler.
+			if family == "cpu" && index == 0 {
+				continue
+			}
+			if health := collector.Health()[family]; health.Rejected != 0 || health.LastSuccessfulCommit != step.commit {
+				t.Fatalf("step %d %s: %+v", index, family, health)
+			}
+		}
+	}
+	reader, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	epochs, err := reader.ReadCoverageEpochs(ctx, 0, 200000, MaxFactReadLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryEpochs := map[string]bool{}
+	for _, epoch := range epochs {
+		if epoch.Family == "system_memory" {
+			memoryEpochs[epoch.EpochID] = true
+		}
+		// The test clock has no monotonic reading, so the first CPU sample after
+		// the jump sees a negative interval, is recorded unavailable, and closes
+		// its epoch as any unavailable CPU sample does. Later samples must stay
+		// in the next epoch instead of rotating while the clock catches up.
+		if epoch.Family == "cpu" && epoch.StartedAt > 92810 && epoch.StartedAt < 100000 {
+			t.Fatalf("cpu rotated again after the jump: %+v", epoch)
+		}
+	}
+	if len(memoryEpochs) != 2 {
+		t.Fatalf("memory epochs = %v, want the original and exactly one after the jump", memoryEpochs)
+	}
+}
+
 func TestHostCollectorDoesNotPersistIdleGPUGaps(t *testing.T) {
 	sources := &capturedHostSources{
 		cpu:    []CPUSnapshot{snapshot(10, 20, 2), snapshot(12, 22, 3), snapshot(14, 24, 4)},
@@ -1038,5 +1378,23 @@ func TestAuditPartialDiskPersistsHealthyRowsAndGaps(t *testing.T) {
 	gaps, err := reader.ReadUnavailableSpans(ctx, 0, 2000, MaxFactReadLimit)
 	if err != nil || len(gaps) != 2 {
 		t.Fatalf("gaps: %+v, %v", gaps, err)
+	}
+}
+
+type failingDiskHistoryWriter struct{ countingWriter }
+
+func (failingDiskHistoryWriter) diskHistoryEnd(context.Context, float64) (float64, error) {
+	return 0, errors.New("fixture history unavailable")
+}
+
+func TestDiskHistoryFailureAllowsSampling(t *testing.T) {
+	collector := NewHostCollector(&capturedHostSources{}, failingDiskHistoryWriter{}, &collectorClock{now: time.Unix(100, 0)}, HostCollectorConfig{})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if !collector.waitForDiskHistory(ctx) {
+		t.Fatal("history read failure prevented a fresh disk sample")
+	}
+	if collector.Health()["system_disk"].LatestError == nil {
+		t.Fatal("history failure diagnostic was lost")
 	}
 }

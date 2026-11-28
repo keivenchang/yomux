@@ -7,6 +7,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -116,6 +118,17 @@ func (s *server) officePreview(w http.ResponseWriter, r *http.Request) {
 		officePreviewError(w, 503, "converter_missing", "LibreOffice is not installed on the server.")
 		return
 	}
+	// A reload of an unchanged document answers from the preview cache without LibreOffice.
+	key, keyErr := officePreviewCacheKey(compiler, ext, data)
+	if keyErr != nil {
+		slog.Debug("Office preview is not cacheable", "error", keyErr)
+	} else if pdf, _, _, ok := s.memoryCache.get(key); ok {
+		s.memoryCache.count(memoryCacheOffice, true)
+		writeOfficePreview(w, pdf, true)
+		return
+	} else {
+		s.memoryCache.count(memoryCacheOffice, false)
+	}
 	pdf, err := convertOfficePreview(ctx, compiler, ext, data)
 	if err != nil {
 		code, status := "conversion_failed", 422
@@ -131,12 +144,52 @@ func (s *server) officePreview(w http.ResponseWriter, r *http.Request) {
 		officePreviewError(w, status, code, err.Error())
 		return
 	}
+	if keyErr == nil {
+		s.memoryCache.put(memoryCacheOffice, key, pdf, nil, int64(len(pdf)))
+	}
+	writeOfficePreview(w, pdf, false)
+}
+
+// writeOfficePreview sends a converted PDF; X-YOmux-Preview-Cache says whether it came from the
+// preview cache.
+func writeOfficePreview(w http.ResponseWriter, pdf []byte, cached bool) {
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	cache := "miss"
+	if cached {
+		cache = "hit"
+	}
+	w.Header().Set("X-YOmux-Preview-Cache", cache)
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(pdf); err != nil {
 		slog.Warn("Office preview response failed", "error", err)
 	}
+}
+
+// officePreviewCacheKey names a conversion of data by the installed LibreOffice. The converter is
+// identified by the resolved program and the files beside it that change with each release.
+func officePreviewCacheKey(compiler, ext string, data []byte) (string, error) {
+	resolved, err := filepath.EvalSymlinks(compiler)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	fmt.Fprintf(digest, "yomux-office-preview-v1\x00%s\x00%s\x00", ext, resolved)
+	for _, path := range []string{resolved, filepath.Join(filepath.Dir(resolved), "soffice.bin"), filepath.Join(filepath.Dir(resolved), "versionrc")} {
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) && path != resolved {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(digest, "%s\x00%s\x00", filepath.Base(path), fileIdentity(info))
+	}
+	fmt.Fprintf(digest, "%d\x00", len(data))
+	if _, err := digest.Write(data); err != nil {
+		return "", err
+	}
+	return memoryCacheOffice + ":" + hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 var errOfficeSandbox = errors.New("Office preview sandbox unavailable")

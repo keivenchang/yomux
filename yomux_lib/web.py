@@ -680,12 +680,15 @@ def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_langu
     agent_notice_html = agent_login_notice_html("setup-login-notice", locale)
     set_up = html.escape(server_string(locale, "setup.setUp"))
     edit_label = html.escape(server_string(locale, "common.edit"))
+    copy_label = html.escape(server_string(locale, "common.copy"))
     # The status line is also rewritten client-side on each poll, so the same localized strings are
     # handed to setup-auth.js via window.__setupStrings.
     setup_strings = json.dumps({
         "waiting": server_string(locale, "setup.waiting"),
         "waitingServer": server_string(locale, "setup.waitingServer"),
         "authUpdated": server_string(locale, "setup.authUpdated"),
+        "copiedPath": server_string(locale, "status.copiedPath"),
+        "clipboardUnavailable": server_string(locale, "common.clipboardUnavailable"),
     })
     waiting = html.escape(server_string(locale, "setup.waiting"))
     security_html = "" if secure else (
@@ -706,7 +709,7 @@ def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_langu
   {locale_picker}
   <h1>{set_up} {brand_html("brand-title setup-brand setup-brand-waiting", locale=locale)}</h1>
   {security_html}
-  <p>{edit_label} <code>{auth_path}</code></p>
+  <p class="setup-path">{edit_label} <code id="setupAuthPath" dir="ltr">{auth_path}</code> <button type="button" class="setup-copy-path" id="setupCopyPath" hidden>{copy_label}</button> <span id="setupCopyStatus" role="status"></span></p>
   <pre>users:
   - username: "{login}"
     password: "your-admin-password"

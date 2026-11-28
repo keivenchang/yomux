@@ -61,7 +61,7 @@ attach-session)
   ;;
 esac
 `
-	if err := os.WriteFile(filepath.Join(root, "tmux"), []byte(testsupport.ShellScript(t, script)), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(root, "tmux"), []byte(testsupport.ShellScript(t, script)), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", root+":"+os.Getenv("PATH"))
@@ -1128,7 +1128,7 @@ func TestTerminalHyperlinkByteFidelityAcrossEverySplit(t *testing.T) {
 			script = []byte(strings.Replace(string(script), "exec cat", `stty raw -echo
   : > "$TERMINAL_CONTROL_FIXTURE/raw"
   exec cat`, 1))
-			if err := os.WriteFile(scriptPath, script, 0700); err != nil {
+			if err := testsupport.WriteExecutable(scriptPath, script, 0700); err != nil {
 				t.Fatal(err)
 			}
 			connection := terminalBridgeConnection(t, s)

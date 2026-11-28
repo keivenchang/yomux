@@ -1700,12 +1700,21 @@ function renderGitDiffCommitList(item, list, state) {
 }
 
 function createGitDiffPanel(item) {
-  const panel = document.createElement('section');
-  panel.className = 'git-diff-panel';
-  panel.dataset.layoutItem = item;
+  const panel = createFramedPanel({
+    item,
+    className: 'panel git-diff-panel',
+    dataset: {layoutItem: item},
+    // Touch panning starts with pointerdown. Count activity only on accepted clicks.
+    recordPointerActivity: false,
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(item),
+      bodyClass: 'git-diff-viewport',
+      bodyHtml: '<header class="git-diff-toolbar"></header><div class="git-diff-meta"></div><div class="git-diff-panel-body"></div>',
+      toastStack: false,
+    },
+  });
   panel.setAttribute('aria-label', gitDiffTabLabel(item));
-  const toolbar = document.createElement('header');
-  toolbar.className = 'git-diff-toolbar';
+  const toolbar = panel.querySelector('.git-diff-toolbar');
   const heading = gitDiffTextNode('git-diff-heading', t('contextmenu.showDiff'));
   const path = gitDiffTextNode('git-diff-path');
   path.replaceChildren(gitDiffTextNode('git-diff-pathname'));
@@ -1714,20 +1723,10 @@ function createGitDiffPanel(item) {
     void refreshGitDiffHistory(item, {refresh: true});
   }});
   toolbar.append(heading, path, refresh);
-  const frameControls = virtualPanelInnerControlsHtml(item);
-  if (frameControls) {
-    toolbar.insertAdjacentHTML('beforeend', frameControls);
-    bindPaneFrameControls(panel, item);
-  }
-  const meta = document.createElement('div');
-  meta.className = 'git-diff-meta';
-  const body = document.createElement('div');
-  body.className = 'git-diff-panel-body';
-  body.dataset.dockviewRegion = 'content';
+  const body = panel.querySelector('.git-diff-panel-body');
   body.setAttribute('aria-label', gitDiffTabLabel(item));
   body.addEventListener('click', () => noteTabberItemActivity(item));
   bindGitDiffHistoryInfiniteScroll(item, body);
-  panel.append(toolbar, meta, body);
   const state = ensureGitDiffTabState(item);
   if (typeof ResizeObserver === 'function') {
     state.viewportObserver?.disconnect?.();

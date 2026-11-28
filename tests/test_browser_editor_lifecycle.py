@@ -24,68 +24,11 @@ from tests.browser_helpers.browser_console import consume_only_expected_js_debug
 from tests.browser_helpers.native_pointer import cdp_drag_hold, cdp_release, click_visible_selector
 from tests.browser_helpers.native_file_actions import rename_finder_file_with_native_input
 from tests.browser_helpers.native_keyboard import native_document_start, native_editor_modifier, native_logical_key
+from tests.browser_helpers.editor_mount import _open_relocation_editor
 from tests.gate_harness import _retire_fixture_background_producers
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
-from tests.tmux_runtime import run_isolated_tmux
-
-
-def _open_relocation_editor(browser, server, path):
-    settings_path = server.paths.config_dir / 'settings.yaml'
-    settings = yaml.safe_load(settings_path.read_text(encoding='utf-8')) if settings_path.exists() else {}
-    settings.setdefault('general', {})['startup_tips'] = False
-    settings_path.write_text(yaml.safe_dump(settings), encoding='utf-8')
-    session = server.tmux.sessions[0]
-    browser.get(server.base_url + f'/?sessions={session}&layout=left&tabs=left:{session}')
-    browser.execute_script(BROWSER_WAIT_HELPER_SOURCE)
-    browser.execute_script('window.__relocationServerBinary=arguments[0]', server.process.args[0])
-    result = browser.execute_async_script("""
-      const path = arguments[0], done = arguments[arguments.length - 1];
-      (async () => {
-        await window.__yomuxTestWaitFor(() => typeof openFileInEditor === 'function', {timeoutMs:10000});
-        if (boolSetting('general.startup_tips') !== false) throw new Error('relocation fixture startup tips must be disabled');
-        setTabberMode('advanced');
-        await saveSettingsPatch(settingPatch('editor.autosave',false));
-        await window.__yomuxTestWaitFor(() => boolSetting('editor.autosave',true) === false
-          && fileEditorAutosaveEnabled === false,{timeoutMs:5000});
-        window.__relocationActivityTouches=[];
-        window.__relocationRegistrations=[];
-        window.__relocationEvents=[];
-        const originalFetch=window.fetch;
-        window.fetch=(url,options) => {
-          if (String(url) === '/api/activity/touch') window.__relocationActivityTouches.push(JSON.parse(options.body));
-          const response=originalFetch(url,options);
-          if (String(url) !== '/api/watch/roots') return response;
-          return response.then(async result => {
-            const sent=JSON.parse(options.body), body=await result.clone().json();
-            window.__relocationRegistrations.push({request:{client_id:sent.client_id,roots:sent.roots,
-              search_roots:sent.search_roots,root_surfaces:sent.root_surfaces,background_files:sent.background_files,
-              open_files:sent.open_files,files:sent.files},status:result.status,
-              response:{request_id:body.request?.id,roots:body.roots,open_files:body.open_files,
-                revision:body.revision,error_path:body.error?.details?.path}});
-            return result;
-          });
-        };
-        const originalHandle=handleClientPushEvent;
-        handleClientPushEvent=(type,payload,envelope) => {
-          if (['file_relocated','fs_changed','files_changed'].includes(type)) window.__relocationEvents.push({type,payload});
-          return originalHandle(type,payload,envelope);
-        };
-        await openFileExplorerPane();
-        await openFileExplorerManualRoot(dirnameOf(path));
-        const item = await openFileInEditor(path, basenameOf(path), {viewMode:'edit',userInitiated:true});
-        await openFileEditorPane(path, {item});
-        await window.__yomuxTestWaitFor(() => panelNodes.get(item)?._cmView?.contentDOM.getBoundingClientRect().height > 0,
-          {timeoutMs:10000});
-        await syncServerWatchRoots({immediate:true});
-        await window.__yomuxTestWaitFor(() => clientEventTransportState.connected && serverWatchRootsState.registered,
-          {timeoutMs:10000});
-        return {item};
-      })().then(done, error => done({error:String(error.stack || error),
-        registrations:window.__relocationRegistrations,events:window.__relocationEvents}));
-    """, str(path))
-    assert 'error' not in result, result
-    return result['item']
+from tests.tmux_runtime import codex_exec_record, respawn_pane_with_codex_agent, write_codex_rollout
 
 
 def _type_relocation_text(browser, item, text, surface='text-editor'):
@@ -1425,19 +1368,25 @@ def test_editor_cursor_styles_paint_blocks_and_lines(browser, isolated_dev_serve
                 cell:pm?glyph.width:Math.abs(next.left-box.left),color:pm?paint.caretColor:paint[arguments[2]==='block'?'backgroundColor':'borderLeftColor'],
                 shape:pm?paint.caretShape:null,ratio:devicePixelRatio};
             """, setup, surface, style)
-            image = browser_screenshot_rgb(browser)
             screenshot = tmp_path / f'caret-{surface}-{style}-{theme}.png'
-            image.save(screenshot)
             color = tuple(int(value) for value in metrics['color'].replace('rgb(', '').replace(')', '').split(','))
             ratio = metrics['ratio']
             left = round(metrics['x'] * ratio)
             top = round(metrics['y'] * ratio)
             right = round((metrics['x'] + max(metrics['cell'], 4) + 2) * ratio)
             bottom = round((metrics['y'] + metrics['height']) * ratio)
-            columns = [x for x in range(max(0, left - 1), min(image.width, right))
-                       if sum(all(abs(a-b) <= 4 for a, b in zip(image.getpixel((x, y)), color))
-                              for y in range(max(0, top), min(image.height, bottom))) >= 2 * ratio]
-            painted_width = len(columns) / ratio
+
+            def caret_painted_width(_driver):
+                image = browser_screenshot_rgb(browser)
+                image.save(screenshot)
+                columns = [x for x in range(max(0, left - 1), min(image.width, right))
+                           if sum(all(abs(a-b) <= 4 for a, b in zip(image.getpixel((x, y)), color))
+                                  for y in range(max(0, top), min(image.height, bottom))) >= 2 * ratio]
+                return len(columns) / ratio
+
+            # The native caret paints on a later frame than the selection change, which a loaded host can delay.
+            painted_width = WebDriverWait(browser, 5, poll_frequency=0.1).until(
+                caret_painted_width, f'{surface} {style} caret never painted: {metrics} screenshot={screenshot}')
             if style == 'block':
                 assert painted_width >= metrics['cell'] * 0.65, f'{surface} {style} {metrics} painted={painted_width} screenshot={screenshot}'
             else:
@@ -1587,7 +1536,10 @@ def test_deleted_differ_row_preserves_pending_native_editor_buffer(browser, isol
                  ['config', 'user.email', 'fixture@example.invalid'], ['add', path.name], ['commit', '-qm', 'baseline']):
         subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True)
     session = server.tmux.sessions[0]
-    run_isolated_tmux(server.tmux, 'respawn-pane', '-k', '-t', f'={session}:', '-c', str(repo), 'bash', '--noprofile', '--norc')
+    # Differ shows repositories the session's agent touched, never the pane directory.
+    transcript = write_codex_rollout(server.paths.home_dir / '.codex' / 'sessions', 'deleted-differ-buffer', server.paths.home_dir,
+                                     [codex_exec_record(f'git add {path.name}', repo)])
+    respawn_pane_with_codex_agent(server.tmux, f'={session}:', repo, transcript)
     original = _open_relocation_editor(browser, server, path)
     item = browser.execute_async_script("""
       const [path,original,copied,session,done]=arguments;

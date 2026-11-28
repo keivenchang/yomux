@@ -104,16 +104,15 @@ func newSessionFilesPlan(request sessionFilesRequest) sessionFilesPlan {
 	}
 }
 
+// sessionFilesPlanInputs returns the explicitly requested repository paths and the session's live
+// agents. Repositories otherwise come only from what those agents touched, never from pane or
+// agent start directories.
 func (s *server) sessionFilesPlanInputs(plan sessionFilesPlan) ([]string, []finder.SessionFileAgent, *finder.Error) {
-	roots, agents, finderErr := s.sessionFilesPaneInputs(plan.request.session)
+	agents, finderErr := s.sessionFilesPaneInputs(plan.request.session)
 	if finderErr != nil {
 		return nil, nil, finderErr
 	}
-	return sessionFilesPlanRoots(plan, roots), agents, nil
-}
-
-func sessionFilesPlanRoots(plan sessionFilesPlan, roots []string) []string {
-	return sessionFilesStreamRoots(plan.request.repoPaths, roots)
+	return append([]string(nil), plan.request.repoPaths...), agents, nil
 }
 
 func (s *server) sessionFilesPlanProduceWithInputs(ctx context.Context, plan sessionFilesPlan, roots []string, agents []finder.SessionFileAgent, emit func(map[string]any) error) (map[string]any, *finder.Error) {

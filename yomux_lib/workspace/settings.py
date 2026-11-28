@@ -461,6 +461,13 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
     if any(key in legacy_performance for key in RETIRED_HOVER_TIMING_KEYS):
         sanitized["performance"]["popover_show_delay_ms"] = HOVER_SHOW_DELAY_MS
         sanitized["performance"]["popover_hide_delay_ms"] = HOVER_HIDE_DELAY_MS
+    tabber = sanitized["tabber"]
+    model = YOAGENT_CODEX_MODEL_CATALOG.get(tabber["codex_model"])
+    efforts = model["effort_options"] if model else SETTING_CHOICES["yoagent", "claude_effort"]
+    if tabber["codex_effort"] not in efforts:
+        tabber["codex_effort"] = model["default_effort"] if model else DEFAULT_SETTINGS["yoagent"]["claude_effort"]
+        if coerced is not None and "tabber.codex_effort" not in coerced:
+            coerced.append("tabber.codex_effort")
     return sanitized
 
 

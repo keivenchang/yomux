@@ -382,9 +382,13 @@ def independent():
     assert findings[2].startswith("Sample.value:")
 
 
-def test_scoped_sharing_still_rejects_retired_replay(tmp_path):
-    path = tmp_path / "cmd/yomux-go/share.go"
-    path.parent.mkdir(parents=True)
+@pytest.mark.parametrize("relative", (
+    "cmd/yomux-go/share.go", "cmd/yomux-go/share_tex.go", "AGENTS.md",
+    "static_src/js/yomux/45_file_explorer_actions.js",
+))
+def test_scoped_sharing_still_rejects_retired_replay(tmp_path, relative):
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b'package main\n// /api/' + b'share\n')
     assert architecture_budgets._retired_share_surface_violations(tmp_path) == ()
     path.write_bytes(b'package main\n// share' + b'_replay\n')

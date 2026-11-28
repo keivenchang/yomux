@@ -13,8 +13,10 @@ function editorSchemePreferenceChoices(options = {}) {
     'popular-ide-light-plus',
     'yomux-light',
     'github-light',
+    'github-light-cream',
     'one-light',
     'solarized-light',
+    'solarized-light-paper',
   ];
   const ids = [...preferredOrder, ...EDITOR_SCHEME_IDS.filter(id => !preferredOrder.includes(id))];
   return ids
@@ -182,6 +184,23 @@ function yoagentCodexModelPreferenceChoices() {
   return modelPreferenceChoices('yoagent.codex_model', Object.keys(YOAGENT_CODEX_MODEL_LABELS), YOAGENT_CODEX_MODEL_LABELS);
 }
 
+function descriptionModelBackend(model) {
+  return String(model || '').startsWith('claude-') ? 'claude' : 'codex';
+}
+
+function descriptionModelPreferenceChoices() {
+  const labels = {...YOAGENT_CODEX_MODEL_LABELS, ...YOAGENT_CLAUDE_MODEL_LABELS};
+  return modelPreferenceChoices('tabber.codex_model', Object.keys(labels), labels)
+    .filter(choice => choice.value !== 'gpt-5.6-sol')
+    .map(choice => ({...choice, disabled: !yoagentBackendUsable(descriptionModelBackend(choice.value))}));
+}
+
+function syncDescriptionModelAvailability() {
+  for (const option of document.querySelectorAll('[data-setting-path="tabber.codex_model"] option')) {
+    option.disabled = !yoagentBackendUsable(descriptionModelBackend(option.value));
+  }
+}
+
 function effortPreferenceLabel(value) {
   return ['low', 'medium', 'high'].includes(value)
     ? t(`common.effort.${value}`)
@@ -312,8 +331,9 @@ function preferenceSections() {
         }),
       }),
       preferenceSettingItem('tabber.automatic_descriptions', {type: 'boolean'}),
-      preferenceSettingItem('tabber.codex_model', {type: 'select', choices: modelPreferenceChoices('tabber.codex_model', Object.keys(YOAGENT_CODEX_MODEL_LABELS), YOAGENT_CODEX_MODEL_LABELS)}),
-      preferenceSettingItem('tabber.codex_effort', {type: 'radio', choices: codexEffortPreferenceChoices('tabber.codex_model')}),
+      preferenceSettingItem('tabber.codex_model', {type: 'select', choices: descriptionModelPreferenceChoices()}),
+      preferenceSettingItem('tabber.codex_effort', {type: 'radio', choices: descriptionModelBackend(preferenceValue('tabber.codex_model')) === 'claude'
+        ? yoagentClaudeEffortPreferenceChoices() : codexEffortPreferenceChoices('tabber.codex_model')}),
       preferenceSettingItem('tabber.description_interval_minutes', {type: 'number', min: 5, max: 60, step: 1, suffix: 'min'}),
       preferenceSettingItem('appearance.date_time_hour_cycle', {type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
@@ -333,7 +353,8 @@ function preferenceSections() {
       preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
       preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
-      preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
+      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
+      preferenceSettingItem('appearance.inactive_pane_dim_opacity', {type: 'range', min: 0, max: 100, step: 1, suffix: '%'}),
     ]},
     {id: PREFERENCE_SECTION_IDS.sizes, title: t('pref.section.sizes'), items: [
       preferenceSettingItem('appearance.sync_font_sizes', {type: 'boolean'}),
@@ -344,7 +365,6 @@ function preferenceSections() {
       preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
-      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
       preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
     ]},
     {id: PREFERENCE_SECTION_IDS.terminal, title: t('pref.section.terminal'), colorSettingsLink: true, items: [
@@ -422,6 +442,7 @@ function preferenceSections() {
       preferenceSettingItem('performance.popover_show_delay_ms', {type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'}),
       preferenceSettingItem('performance.popover_hide_delay_ms', {type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms'}),
       preferenceSettingItem('performance.remote_resize_delay_ms', {type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms'}),
+      preferenceSettingItem('performance.static_cache_mb', {type: 'number', min: 0, max: 1024, step: 16, suffix: 'MB'}),
       preferenceSettingItem('stats.prune_at_local_time', {type: 'select', choices: statsPruneLocalTimeChoices()}),
     ]},
     {id: PREFERENCE_SECTION_IDS.cost, title: t('pref.section.cost'), items: [
@@ -681,7 +702,7 @@ function preferenceSelectOptionsHtml(item, value) {
   const groupLookup = new Map();
   const optionHtml = choice => {
     const choiceValue = String(preferenceChoiceValue(choice));
-    return `<option value="${esc(choiceValue)}"${choiceValue === String(value) ? ' selected' : ''}>${esc(preferenceChoiceLabel(choice))}</option>`;
+    return `<option value="${esc(choiceValue)}"${choiceValue === String(value) ? ' selected' : ''}${choice.disabled ? ' disabled' : ''}>${esc(preferenceChoiceLabel(choice))}</option>`;
   };
   const looseOptions = [];
   for (const choice of choices) {
@@ -1017,7 +1038,7 @@ function bindPreferencesPanel(panel) {
       const value = valueFromPreferenceControl(control);
       const output = control.parentElement?.querySelector('.preferences-range-value');
       if (output) output.textContent = String(control.value);
-      if (control.dataset.settingPath === 'appearance.inactive_pane_opacity') applyInactivePaneOpacity(value);
+      if (control.dataset.settingPath === 'appearance.inactive_pane_dim_opacity') applyInactivePaneOpacity(value);
       if (control.dataset.settingPath === 'appearance.pane_ring_opacity') applyPaneRingOpacity(value);
     }
   });

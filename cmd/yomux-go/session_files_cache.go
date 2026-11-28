@@ -793,8 +793,5 @@ func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID stri
 
 func (s *server) sessionFilesPayloadWithCache(record sessionFilesCacheRecord, descriptor, viewID string, hit, stale, refreshing bool, now time.Time) map[string]any {
 	payload := sessionFilesPayloadWithCache(record, descriptor, viewID, hit, stale, refreshing, now)
-	if s.finder != nil {
-		payload["preparation"] = s.finder.AttributionPreparation()
-	}
 	return payload
 }

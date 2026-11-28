@@ -100,19 +100,26 @@ def test_release_commit_and_tag_match_product_version():
 
     release_tags = sorted(context["tags"])
     commit_subject = context["commit_subject"]
-    if not release_tags and not commit_subject.startswith("Release YOmux "):
+    if not release_tags and not commit_subject.startswith("YOmux "):
         return
 
-    assert commit_subject == f"Release YOmux {version.YOMUX_VERSION}"
+    assert bazel_execution_contract.is_release_subject(commit_subject, version.YOMUX_VERSION)
     if not release_tags:
         return
 
     assert release_tags == [f"v{version.YOMUX_VERSION}"]
     tag_type = context["tags"][release_tags[0]]["type"]
     tag_subject = context["tags"][release_tags[0]]["subject"]
-    assert commit_subject == f"Release YOmux {version.YOMUX_VERSION}"
+    assert bazel_execution_contract.is_release_subject(commit_subject, version.YOMUX_VERSION)
     assert tag_type == "tag"
     assert tag_subject == f"YOmux {version.YOMUX_VERSION}"
+
+
+def test_release_subject_names_the_exact_version():
+    assert bazel_execution_contract.is_release_subject("YOmux 1.2.3", "1.2.3")
+    assert bazel_execution_contract.is_release_subject("YOmux 1.2.3 Faster startup and Finder fixes", "1.2.3")
+    assert not bazel_execution_contract.is_release_subject("YOmux 1.2.30 Faster startup", "1.2.3")
+    assert not bazel_execution_contract.is_release_subject("Release YOmux 1.2.3", "1.2.3")
 
 
 @pytest.mark.parametrize("invalid", [None, "type", "subject", "commit_subject", "extra_tag"])
@@ -120,7 +127,7 @@ def test_declared_release_check_retains_release_assertions_without_git(monkeypat
     root = tmp_path.resolve()
     release_tag = f"v{version.YOMUX_VERSION}"
     context = {"revision": "a" * 40, "head_version_source": f'version: "{version.YOMUX_VERSION}"\n',
-               "commit_subject": f"Release YOmux {version.YOMUX_VERSION}",
+               "commit_subject": f"YOmux {version.YOMUX_VERSION} Faster startup and Finder fixes",
                "tags": {release_tag: {"type": "tag", "subject": f"YOmux {version.YOMUX_VERSION}"}}}
     if invalid in {"type", "subject"}:
         context["tags"][release_tag][invalid] = "wrong"

@@ -46,6 +46,7 @@ function markdownFormattingPanelWritable(panel) {
 
 function prosemirrorPanelEditable(panel) {
   return markdownFormattingPanelWritable(panel) && panel._pmSearchReadOnly !== true && !panel._pmError
+    && (!fileEditorPanelState(panel)?._shareActive || Boolean(panel._shareConnection))
     && ['preview', 'split'].includes(editorViewModeFor(panel.dataset.filePath, panel.dataset.layoutItem));
 }
 
@@ -91,9 +92,13 @@ function handleMarkdownFormattingShortcut(event) {
 const markdownSourceFormatCache = new WeakMap();
 
 function markdownSourceMarkRanges(view) {
-  if (markdownSourceFormatCache.has(view.state)) return markdownSourceFormatCache.get(view.state);
   const api = window.YOmuxCodeMirror;
-  const text = view.state.doc.toString();
+  const doc = view.state.doc;
+  const tree = api.ensureSyntaxTree(view.state, doc.length, 100);
+  if (!tree) return null;
+  const cached = markdownSourceFormatCache.get(doc);
+  if (cached?.tree === tree) return cached.ranges;
+  const text = doc.toString();
   const ranges = [];
   ranges.blocks = [];
   ranges.ignored = [];
@@ -101,8 +106,6 @@ function markdownSourceMarkRanges(view) {
   ranges.references = [];
   const htmlTags = [];
   const kinds = {StrongEmphasis: 'bold', Emphasis: 'italic', Strikethrough: 'strike', InlineCode: 'code'};
-  const tree = api.ensureSyntaxTree(view.state, text.length, 100);
-  if (!tree) return null;
   tree.iterate({enter(node) {
     if (node.name === 'Image') {
       ranges.ignored.push({from: node.from, to: node.to});
@@ -154,7 +157,7 @@ function markdownSourceMarkRanges(view) {
       if (open.parent === tag.parent) ranges.push({command: entry?.id || 'html:' + tag.name, htmlTag: tag.name, sourceMarkers: [open.source, tag.source], from: open.from, start: open.to, end: tag.from, to: tag.to});
     }
   }
-  markdownSourceFormatCache.set(view.state, ranges);
+  markdownSourceFormatCache.set(doc, {tree, ranges});
   return ranges;
 }
 
@@ -368,6 +371,18 @@ function markdownSourceSelectionOverlaps(selection, from, to) {
   return selection.empty ? from <= selection.head && to >= selection.head : from < selection.to && to > selection.from;
 }
 
+function markdownSourceSelectionTouchesTable(tree, selection) {
+  let touchesTable = false;
+  tree?.iterate({from: selection.from, to: selection.to, enter(node) {
+    if (touchesTable) return false;
+    if (node.name === 'Table' && markdownSourceSelectionOverlaps(selection, node.from, node.to)) {
+      touchesTable = true;
+      return false;
+    }
+  }});
+  return touchesTable;
+}
+
 function markdownSourceBlockChanges(view, entry) {
   const selection = view.state.selection.main, doc = view.state.doc;
   let first = doc.lineAt(selection.from), last = doc.lineAt(Math.max(selection.from, selection.to - (selection.empty ? 0 : 1)));
@@ -375,10 +390,9 @@ function markdownSourceBlockChanges(view, entry) {
   const setextBlocks = [];
   const indentedBlocks = [];
   const listItems = [];
-  let selectedTable = false;
   const tree = window.YOmuxCodeMirror.ensureSyntaxTree(view.state, doc.length, 100);
+  if (markdownSourceSelectionTouchesTable(tree, selection)) return [];
   tree?.iterate({enter(node) {
-    if (node.name === 'Table' && markdownSourceSelectionOverlaps(selection, node.from, node.to)) selectedTable = true;
     if (/^SetextHeading[12]$/.test(node.name)) setextBlocks.push({first: doc.lineAt(node.from), last: doc.lineAt(Math.max(node.from, node.to - 1))});
     if (node.name === 'CodeBlock' && markdownSourceSelectionOverlaps(selection, node.from, node.to)) indentedBlocks.push({first: doc.lineAt(node.from).number, last: doc.lineAt(node.to).number});
     if (node.name === 'ListItem') listItems.push({from: node.from, to: node.to, parent: node.node.parent.from});
@@ -388,7 +402,6 @@ function markdownSourceBlockChanges(view, entry) {
       codeBlocks.push({opening, closing, indent: opening.text.match(/^ */)[0].length});
     }
   }});
-  if (selectedTable) return [];
   const selectedSetext = entry.id === 'pre' ? [] : setextBlocks.filter(block => markdownSourceSelectionOverlaps(selection, block.first.from, block.last.to));
   if (selectedSetext.length) {
     first = doc.line(Math.min(first.number, selectedSetext[0].first.number));
@@ -532,6 +545,22 @@ function markdownFormattingState(panel, entry, surface = markdownFormattingTarge
   return surface === 'view-editor' ? markdownProseMirrorFormatState(panel._pmView, entry) : markdownSourceFormatState(panel._cmView, entry);
 }
 
+function markdownFormattingSelectionTouchesTable(panel, surface) {
+  if (surface === 'text-editor') {
+    const state = panel._cmView.state;
+    const tree = window.YOmuxCodeMirror.ensureSyntaxTree(state, state.selection.main.to, 0);
+    return markdownSourceSelectionTouchesTable(tree, state.selection.main);
+  }
+  const {doc, schema, selection} = panel._pmView.state;
+  if (selection.empty) return prosemirrorTableCell(selection.$head.parent, schema);
+  let touchesTable = false;
+  doc.nodesBetween(selection.from, selection.to, node => {
+    if (node.type === schema.nodes.table) touchesTable = true;
+    return !touchesTable;
+  });
+  return touchesTable;
+}
+
 function refreshMarkdownFormattingToolbar(panel) {
   const toolbar = panel.querySelector('.markdown-formatting-toolbar');
   if (!toolbar) return;
@@ -541,7 +570,10 @@ function refreshMarkdownFormattingToolbar(panel) {
     const entry = markdownFormatCommands.find(command => command.id === button.dataset.markdownFormat);
     button.setAttribute('aria-pressed', markdownFormattingState(panel, entry, surface));
   }
+  const hideBlockStyles = toolbar.hidden || markdownFormattingSelectionTouchesTable(panel, surface);
   for (const select of toolbar.querySelectorAll('select')) {
+    select.hidden = hideBlockStyles;
+    if (hideBlockStyles) continue;
     const active = markdownFormatCommands.filter(entry => entry.group === select.dataset.formatGroup && markdownFormattingState(panel, entry, surface) === 'true');
     select.value = active.length === 1 ? active[0].id : '';
   }

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#76b900">
+  <title>The Moss Moon Field Guide</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      --green: #76b900;
+      --ink: #17210b;
+      --muted: #667052;
+      --paper: #f7f8ef;
+      --line: #e2e7d4;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      min-width: 320px;
+      margin: 0;
+      background-color: #76b900;
+      background-image: radial-gradient(circle at 12% 12%, rgb(255 255 255 / 24%) 0 2px, transparent 3px),
+                        radial-gradient(circle at 86% 26%, rgb(255 255 255 / 18%) 0 3px, transparent 4px);
+      background-size: 42px 42px, 68px 68px;
+      color: var(--ink);
+    }
+
+    a { color: inherit; }
+
+    .page {
+      width: min(1120px, calc(100% - 32px));
+      margin: 32px auto;
+      overflow: hidden;
+      border: 1px solid rgb(23 33 11 / 12%);
+      border-radius: 28px;
+      background: var(--paper);
+      box-shadow: 0 24px 70px rgb(23 33 11 / 22%);
+    }
+
+    .topbar, .footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 20px clamp(20px, 5vw, 56px);
+    }
+
+    .topbar { border-bottom: 1px solid var(--line); }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: .02em; }
+    .brand-mark { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; background: var(--green); color: white; }
+    .edition { color: var(--muted); font-size: .78rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+
+    main { padding: clamp(20px, 5vw, 56px); }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(260px, .9fr);
+      align-items: center;
+      gap: 24px;
+      min-height: 350px;
+      padding: clamp(24px, 5vw, 48px);
+      overflow: hidden;
+      border-radius: 22px;
+      background: #17210b;
+      color: #f7f8ef;
+    }
+
+    .eyebrow { color: #b7e56b; font-size: .78rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { max-width: 540px; margin: 14px 0; font-size: clamp(2.5rem, 6vw, 5rem); line-height: .98; letter-spacing: -.06em; }
+    .hero p { max-width: 440px; color: #d5dec5; font-size: 1.05rem; line-height: 1.65; }
+    .pill { display: inline-flex; margin-top: 12px; padding: 9px 13px; border: 1px solid #53633a; border-radius: 999px; color: #e9f4d7; font-size: .85rem; }
+    .hero-art { width: 100%; max-height: 280px; }
+
+    .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin: 42px 0 18px; }
+    h2 { margin: 0; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -.04em; }
+    .section-heading p { margin: 0; color: var(--muted); }
+
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .card { min-height: 190px; padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: white; }
+    .card-art { width: 58px; height: 58px; margin-bottom: 12px; }
+    .card h3 { margin: 0 0 7px; font-size: 1.05rem; }
+    .card p { margin: 0; color: var(--muted); line-height: 1.55; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: white; }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    caption { padding: 18px 20px 10px; color: var(--muted); font-size: .9rem; text-align: left; }
+    th, td { padding: 14px 20px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: .76rem; letter-spacing: .1em; text-transform: uppercase; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .tag { display: inline-block; padding: 5px 9px; border-radius: 999px; background: #edf6dc; color: #3d6500; font-size: .8rem; font-weight: 700; }
+
+    .footer { margin-top: 42px; border-top: 1px solid var(--line); color: var(--muted); font-size: .85rem; }
+    .footer strong { color: var(--ink); }
+
+    @media (max-width: 720px) {
+      .page { width: min(100% - 18px, 1120px); margin: 9px auto; border-radius: 20px; }
+      .hero { grid-template-columns: 1fr; }
+      .hero-art { max-height: 220px; }
+      .cards { grid-template-columns: 1fr; }
+      .section-heading { align-items: start; flex-direction: column; }
+      .topbar, .footer { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">✦</span>
+        <span>Odd Orbit Field Notes</span>
+      </div>
+      <span class="edition">Dispatch No. 08 · 2049</span>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <div>
+          <span class="eyebrow">Somewhere past the fern belt</span>
+          <h1 id="page-title">The Moss Moon Field Guide</h1>
+          <p>A pppocket-sized report from a tiny green moon where the mushrooms glow, the rivers hum, and one very small frog runs the weather station.</p>
+          <span class="pill">☼ 18° and pleasantly spore-y</span>
+        </div>
+        <svg class="hero-art" viewBox="0 0 460 300" role="img" aria-labelledby="moon-title moon-desc" xmlns="http://www.w3.org/2000/svg">
+          <title id="moon-title">A mossy moon with a tiny observatory</title>
+          <desc id="moon-desc">A green moon floats among stars, with a little observatory and a ring of mushrooms.</desc>
+          <defs>
+            <linearGradient id="moon" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#d5f39a"/><stop offset="1" stop-color="#76b900"/></linearGradient>
+            <linearGradient id="hill" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#9bd239"/><stop offset="1" stop-color="#477400"/></linearGradient>
+          </defs>
+          <circle cx="242" cy="145" r="112" fill="url(#moon)"/>
+          <circle cx="204" cy="111" r="18" fill="#b0da67" opacity=".65"/>
+          <circle cx="285" cy="174" r="27" fill="#b0da67" opacity=".55"/>
+          <circle cx="281" cy="92" r="10" fill="#b0da67" opacity=".7"/>
+          <path d="M131 194c32-40 75-48 111-25 34-34 75-29 111 8v61H131z" fill="url(#hill)"/>
+          <path d="M221 188h43v-38h-43z" fill="#f7f8ef"/><path d="M213 152l30-24 30 24z" fill="#466c0b"/>
+          <rect x="235" y="165" width="13" height="23" rx="6" fill="#76b900"/>
+          <circle cx="242" cy="146" r="5" fill="#17210b"/><path d="M242 146l27-18" stroke="#17210b" stroke-width="4" stroke-linecap="round"/>
+          <path d="M166 214c0-12 10-22 22-22s22 10 22 22z" fill="#f9eee0"/><path d="M163 215c1-11 11-18 25-18s24 7 25 18z" fill="#e56e52"/>
+          <path d="M304 231c0-10 8-18 18-18s18 8 18 18z" fill="#f9eee0"/><path d="M301 232c1-9 9-15 21-15s20 6 21 15z" fill="#e56e52"/>
+          <g fill="#f7f8ef"><path d="M94 69l4 10 10 4-10 4-4 10-4-10-10-4 10-4z"/><path d="M355 56l3 7 7 3-7 3-3 7-3-7-7-3 7-3z"/><circle cx="119" cy="149" r="3"/><circle cx="375" cy="128" r="4"/><circle cx="324" cy="44" r="2"/></g>
+          <path d="M82 236c18-12 34-12 51 0M344 261c13-9 25-9 38 0" fill="none" stroke="#d5f39a" stroke-width="3" stroke-linecap="round"/>
+        </svg>
+      </section>
+
+      <section aria-labelledby="oddities-title">
+        <div class="section-heading">
+          <h2 id="oddities-title">Three things we found</h2>
+          <p>All harmless. Probably.</p>
+        </div>
+        <div class="cards">
+          <article class="card">
+            <svg class="card-art" viewBox="0 0 64 64" role="img" aria-label="A smiling orange mushroom" xmlns="http://www.w3.org/2000/svg">
+              <path d="M27 31h12v24H27z" fill="#f3d7a5"/><path d="M9 31C9 18 19 8 32 8s23 10 23 23z" fill="#e56e52"/><circle cx="25" cy="25" r="3" fill="#fff2d8"/><circle cx="39" cy="20" r="4" fill="#fff2d8"/><path d="M27 41h12M12 55h40" stroke="#476d12" stroke-width="4" stroke-linecap="round"/>
+            </svg>
+            <h3>Lantern mushroom</h3>
+            <p>Gives excellent light and unsolicited advice about clouds.</p>
+          </article>
+          <article class="card">
+            <svg class="card-art" viewBox="0 0 64 64" role="img" aria-label="A small blue comet" xmlns="http://www.w3.org/2000/svg">
+              <path d="M11 50C22 36 28 27 37 15" fill="none" stroke="#c8d8ff" stroke-width="11" stroke-linecap="round"/><circle cx="43" cy="19" r="13" fill="#4b78e6"/><path d="M39 17c3-5 8-5 10-1" fill="none" stroke="#dce6ff" stroke-width="3" stroke-linecap="round"/><circle cx="47" cy="22" r="2" fill="#fff"/>
+            </svg>
+            <h3>Pocket comet</h3>
+            <p>Fits in a teacup. Keeps asking for directions to Saturn.</p>
+          </article>
+          <article class="card">
+            <svg class="card-art" viewBox="0 0 64 64" role="img" aria-label="A green frog wearing a yellow scarf" xmlns="http://www.w3.org/2000/svg">
+              <path d="M10 40c0-13 10-22 22-22s22 9 22 22v9H10z" fill="#76b900"/><circle cx="22" cy="21" r="9" fill="#76b900"/><circle cx="42" cy="21" r="9" fill="#76b900"/><circle cx="23" cy="22" r="3" fill="#17210b"/><circle cx="41" cy="22" r="3" fill="#17210b"/><path d="M22 40c6 7 14 7 20 0" fill="none" stroke="#17210b" stroke-width="3" stroke-linecap="round"/><path d="M13 34h38" stroke="#ffd34f" stroke-width="7" stroke-linecap="round"/><path d="M41 35l8 14-8-3-7 5z" fill="#ffd34f"/>
+            </svg>
+            <h3>Weather frog</h3>
+            <p>Predicts rain by staring thoughtfully at a pebble.</p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="inventory-title">
+        <div class="section-heading">
+          <h2 id="inventory-title">The expedition basket</h2>
+          <p>Today's extremely scientific inventory.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <caption>Collected beside the western crater, just before lunch.</caption>
+            <thead>
+              <tr><th scope="col">Specimen</th><th scope="col">Count</th><th scope="col">Field note</th><th scope="col">Mood</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Glow fern</td><td>12 fronds</td><td>Blinks when complimented</td><td><span class="tag">Shy</span></td></tr>
+              <tr><td>Moon melon</td><td>4 slices</td><td>Tastes faintly like Tuesday</td><td><span class="tag">Cheerful</span></td></tr>
+              <tr><td>Polite pebble</td><td>1</td><td>Said “after you” to a beetle</td><td><span class="tag">Mysterious</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span><strong>Oddd Orbit Field Notes</strong> · Unofficial, mostly accurate.</span>
+      <span>Made under a very green sky.</span>
+    </footer>
+  </div>
+</body>
+</html>

@@ -1649,7 +1649,7 @@ func TestGoTerminalPasteUsesBracketedBytesAndSeparateReturn(t *testing.T) {
 			rawPath := filepath.Join(root, "input")
 			script := fmt.Sprintf("stty raw -echo\nprintf '\\033[?2004h'\ntmux -S %q wait-for -S ready\ndd bs=1 count=%d of=%q 2>/dev/null\ntmux -S %q wait-for -S received\ntmux -S %q wait-for stop\n", socket, len(prompt)+13, rawPath, socket, socket)
 			scriptPath := filepath.Join(root, "reader.sh")
-			if err := os.WriteFile(scriptPath, []byte(testsupport.ShellScript(t, script)), 0o700); err != nil {
+			if err := testsupport.WriteExecutable(scriptPath, []byte(testsupport.ShellScript(t, script)), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "paste", scriptPath).CombinedOutput(); err != nil {
@@ -1746,7 +1746,7 @@ while True:
             sys.stdout.flush()
         text = b""
 `, countPath, workingPath)
-	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+	if err := testsupport.WriteExecutable(scriptPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "yo-private", scriptPath).CombinedOutput(); err != nil {

@@ -4,29 +4,17 @@
 package finder
 
 import (
-	"bufio"
-	"container/heap"
-	"context"
 	"encoding/json"
-	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"strconv"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/keivenchang/yomux/internal/cache"
+	"github.com/keivenchang/yomux/internal/tailfile"
 )
 
-const (
-	maxSessionTranscriptLineBytes             = 4 * 1024 * 1024
-	maxHistoricalCodexFiles                   = 256
-	maxHistoricalCodexAttributionCacheEntries = maxHistoricalCodexFiles
-	maxHistoricalCodexAttributionCacheBytes   = 8 * 1024 * 1024
-)
+const maxSessionTranscriptLineBytes = 4 * 1024 * 1024
 
 var codexPatchHeader = regexp.MustCompile(`\*\*\* (Add|Update|Delete) File: ([^"\\\n]+)`)
 var generatedUploadFileNamePattern = regexp.MustCompile(`^\d{8}-\d{3}(?:-[^/]+)?\.[A-Za-z0-9]{1,12}$`)
@@ -137,59 +125,11 @@ func recordSessionTranscriptPath(changes map[string]*sessionFileAttribution, raw
 	entry.add(agent, marker, mtime)
 }
 
-func scanSessionTranscript(path string, agent SessionFileAgent, cutoff time.Time) (map[string]*sessionFileAttribution, bool) {
-	return scanSessionTranscriptContext(context.Background(), path, agent, cutoff)
-}
-
-func scanSessionTranscriptContext(ctx context.Context, path string, agent SessionFileAgent, cutoff time.Time) (map[string]*sessionFileAttribution, bool) {
-	if ctx.Err() != nil {
-		return nil, false
+var claudeFileOperations = tailfile.RegisterProjection(func(_ []byte, record map[string]any) []transcriptFileOperation {
+	if stringValue(record["type"]) != "assistant" {
+		return nil
 	}
-	stat, err := os.Stat(path)
-	if err != nil || stat.ModTime().Before(cutoff) {
-		return map[string]*sessionFileAttribution{}, false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return map[string]*sessionFileAttribution{}, false
-	}
-	defer file.Close()
-	return scanSessionTranscriptReader(ctx, file, agent, stat.ModTime().Unix())
-}
-
-func scanSessionTranscriptReader(ctx context.Context, source io.Reader, agent SessionFileAgent, mtime int64) (map[string]*sessionFileAttribution, bool) {
-	changes := make(map[string]*sessionFileAttribution)
-	complete := scanTranscriptLines(ctx, source, func(line []byte) {
-		switch strings.ToLower(strings.TrimSpace(agent.Kind)) {
-		case "claude":
-			scanClaudeTranscriptLine(line, agent, mtime, changes)
-		case "codex":
-			scanCodexTranscriptLine(line, agent, mtime, changes)
-		}
-	})
-	if !complete {
-		return nil, false
-	}
-	return changes, true
-}
-
-func scanTranscriptLines(ctx context.Context, source io.Reader, visit func([]byte)) bool {
-	scanner := bufio.NewScanner(contextReader{ctx: ctx, source: source})
-	scanner.Buffer(make([]byte, 64*1024), maxSessionTranscriptLineBytes)
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			return false
-		}
-		visit(scanner.Bytes())
-	}
-	return scanner.Err() == nil && ctx.Err() == nil
-}
-
-func scanClaudeTranscriptLine(line []byte, agent SessionFileAgent, mtime int64, changes map[string]*sessionFileAttribution) {
-	var record map[string]any
-	if json.Unmarshal(line, &record) != nil || stringValue(record["type"]) != "assistant" {
-		return
-	}
+	var operations []transcriptFileOperation
 	message, _ := record["message"].(map[string]any)
 	content, _ := message["content"].([]any)
 	for _, rawItem := range content {
@@ -206,84 +146,247 @@ func scanClaudeTranscriptLine(line []byte, agent SessionFileAgent, mtime int64, 
 		if tool == "Write" {
 			marker = "A"
 		}
-		recordSessionTranscriptPath(changes, stringValue(input["file_path"]), agent.CWD, agent, marker, mtime)
+		operations = append(operations, transcriptFileOperation{path: stringValue(input["file_path"]), marker: marker})
+	}
+	return operations
+})
+
+func applyClaudeFileOperations(changes map[string]*sessionFileAttribution, agent SessionFileAgent, mtime int64, operations []transcriptFileOperation) {
+	for _, operation := range operations {
+		recordSessionTranscriptPath(changes, operation.path, agent.CWD, agent, operation.marker, mtime)
 	}
 }
 
-func scanCodexTranscriptLine(line []byte, agent SessionFileAgent, mtime int64, changes map[string]*sessionFileAttribution) {
-	applyCodexTranscriptOperations(changes, agent, mtime, parseCodexTranscriptOperations(line))
-}
-
-type codexTranscriptPatch struct {
+type transcriptFileOperation struct {
 	path   string
 	marker string
 }
 
 type codexTranscriptOperations struct {
-	patches []codexTranscriptPatch
+	recordedCWD string
+	patches     []transcriptFileOperation
+	commands    []codexShellCommand
+}
+
+// codexShellCommand is one shell command and the workdir Codex recorded for it, if any.
+type codexShellCommand struct {
 	command string
 	cwd     string
 }
 
-type historicalCodexTranscript struct {
-	recordedCWD string
-	operations  []codexTranscriptOperations
-}
-
-func parseCodexTranscriptOperations(line []byte) codexTranscriptOperations {
+var codexFileOperations = tailfile.RegisterProjection(func(line []byte, record map[string]any) codexTranscriptOperations {
 	operations := codexTranscriptOperations{}
 	for _, match := range codexPatchHeader.FindAllStringSubmatch(string(line), -1) {
 		marker := map[string]string{"Add": "A", "Update": "M", "Delete": "D"}[match[1]]
-		operations.patches = append(operations.patches, codexTranscriptPatch{path: strings.Clone(match[2]), marker: marker})
-	}
-	var record map[string]any
-	if json.Unmarshal(line, &record) != nil {
-		return operations
+		operations.patches = append(operations.patches, transcriptFileOperation{path: strings.Clone(match[2]), marker: marker})
 	}
 	payload, _ := record["payload"].(map[string]any)
+	if stringValue(record["type"]) == "session_meta" {
+		operations.recordedCWD = strings.TrimSpace(stringValue(payload["cwd"]))
+	}
 	toolType := stringValue(payload["type"])
 	if toolType != "function_call" && toolType != "custom_tool_call" {
 		return operations
 	}
 	tool := stringValue(payload["name"])
+	if tool == "exec" && toolType == "custom_tool_call" {
+		operations.commands = codexCodeModeCommands(stringValue(payload["input"]))
+		return operations
+	}
 	if tool != "exec_command" && tool != "shell_command" && tool != "shell" {
 		return operations
 	}
 	arguments := codexArguments(payload["arguments"])
-	operations.command = stringValue(arguments["cmd"])
-	if operations.command == "" {
-		operations.command = stringValue(arguments["command"])
-	}
-	operations.cwd = stringValue(arguments["workdir"])
-	if operations.cwd == "" {
-		operations.cwd = stringValue(arguments["cwd"])
+	command := newCodexShellCommand(func(key string) string { return stringValue(arguments[key]) })
+	if command.command != "" {
+		operations.commands = append(operations.commands, command)
 	}
 	return operations
+})
+
+// newCodexShellCommand reads one command from Codex tool arguments, which name the command
+// "cmd" or "command" and its directory "workdir" or "cwd" depending on the tool.
+func newCodexShellCommand(field func(string) string) codexShellCommand {
+	command := codexShellCommand{command: field("cmd"), cwd: field("workdir")}
+	if command.command == "" {
+		command.command = field("command")
+	}
+	if command.cwd == "" {
+		command.cwd = field("cwd")
+	}
+	return command
 }
 
-func parseCodexTranscriptRecordedCWD(line []byte) string {
-	var record map[string]any
-	if json.Unmarshal(line, &record) != nil || stringValue(record["type"]) != "session_meta" {
-		return ""
+// codexCodeModeCommands reads the literal arguments of each tools.exec_command({...}) call in a
+// Codex code-mode "exec" script. Only string and template literals are read; a value computed
+// by script code (a variable or expression) cannot be known from the transcript and is skipped.
+func codexCodeModeCommands(script string) []codexShellCommand {
+	const call = "tools.exec_command("
+	commands := make([]codexShellCommand, 0)
+	for offset := 0; ; {
+		start := strings.Index(script[offset:], call)
+		if start < 0 {
+			return commands
+		}
+		offset += start + len(call)
+		fields, end := codexCodeModeObject(script, offset)
+		offset = end
+		command := newCodexShellCommand(func(key string) string { return fields[key] })
+		if command.command != "" {
+			commands = append(commands, command)
+		}
 	}
-	payload, _ := record["payload"].(map[string]any)
-	return strings.TrimSpace(stringValue(payload["cwd"]))
+}
+
+// codexCodeModeObject parses the object literal at offset and returns its literal-valued fields
+// and the offset after it. Keys may be bare identifiers or quoted strings.
+func codexCodeModeObject(script string, offset int) (map[string]string, int) {
+	fields := make(map[string]string)
+	index := codexSkipSpace(script, offset)
+	if index >= len(script) || script[index] != '{' {
+		return fields, index
+	}
+	index++
+	for {
+		index = codexSkipSpace(script, index)
+		for index < len(script) && script[index] == ',' {
+			index = codexSkipSpace(script, index+1)
+		}
+		if index >= len(script) {
+			return fields, index
+		}
+		if script[index] == '}' {
+			return fields, index + 1
+		}
+		key := ""
+		if quote := script[index]; quote == '"' || quote == '\'' {
+			key, index = codexStringLiteral(script, index)
+		} else {
+			keyStart := index
+			for index < len(script) && (script[index] == '_' || script[index] == '$' || script[index] >= 'a' && script[index] <= 'z' || script[index] >= 'A' && script[index] <= 'Z' || script[index] >= '0' && script[index] <= '9') {
+				index++
+			}
+			key = script[keyStart:index]
+			if key == "" {
+				// Not an object literal this reader understands, such as a spread.
+				return fields, codexSkipExpression(script, index)
+			}
+		}
+		index = codexSkipSpace(script, index)
+		if index >= len(script) || script[index] != ':' {
+			continue
+		}
+		index = codexSkipSpace(script, index+1)
+		valueStart := index
+		if index < len(script) && (script[index] == '"' || script[index] == '\'' || script[index] == '`') {
+			value, valueEnd := codexStringLiteral(script, index)
+			if next := codexSkipSpace(script, valueEnd); next < len(script) && (script[next] == ',' || script[next] == '}') {
+				fields[key] = value
+				index = valueEnd
+				continue
+			}
+		}
+		index = codexSkipExpression(script, valueStart)
+	}
+}
+
+func codexSkipSpace(script string, index int) int {
+	for index < len(script) && strings.ContainsRune(" \t\r\n", rune(script[index])) {
+		index++
+	}
+	return index
+}
+
+// codexSkipExpression advances to the next top-level ',' or '}' of the enclosing object.
+func codexSkipExpression(script string, index int) int {
+	depth := 0
+	for index < len(script) {
+		switch character := script[index]; character {
+		case '"', '\'', '`':
+			_, index = codexStringLiteral(script, index)
+			continue
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth == 0 {
+				return index
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				return index
+			}
+		}
+		index++
+	}
+	return index
+}
+
+// codexStringLiteral decodes the JavaScript string or template literal at index and returns the
+// offset after its closing quote. Template substitutions are kept as their ${...} source text,
+// which path resolution already refuses to interpret.
+func codexStringLiteral(script string, index int) (string, int) {
+	quote := script[index]
+	var value strings.Builder
+	for index++; index < len(script); index++ {
+		character := script[index]
+		if character == quote {
+			return value.String(), index + 1
+		}
+		if character != '\\' || index+1 >= len(script) {
+			value.WriteByte(character)
+			continue
+		}
+		index++
+		switch escaped := script[index]; escaped {
+		case 'n':
+			value.WriteByte('\n')
+		case 't':
+			value.WriteByte('\t')
+		case 'r':
+			value.WriteByte('\r')
+		case 'u':
+			if index+4 < len(script) {
+				if code, err := strconv.ParseUint(script[index+1:index+5], 16, 32); err == nil {
+					value.WriteRune(rune(code))
+					index += 4
+					continue
+				}
+			}
+			value.WriteByte(escaped)
+		case '\n':
+			// A backslash-newline continues the literal without adding a character.
+		default:
+			value.WriteByte(escaped)
+		}
+	}
+	return value.String(), index
 }
 
 func applyCodexTranscriptOperations(changes map[string]*sessionFileAttribution, agent SessionFileAgent, mtime int64, operations codexTranscriptOperations) {
+	// A command's recorded workdir is where its relative paths were applied; the transcript
+	// header directory is only the agent's start directory and is used when none was recorded.
+	commandDirectory := func(command codexShellCommand) string {
+		if recorded := resolveSessionTranscriptPath(command.cwd, agent.CWD); recorded != "" {
+			return recorded
+		}
+		return agent.CWD
+	}
+	// Patch text carried inside a single command applies in that command's workdir. A code-mode
+	// script with several commands has no single workdir for its patches.
+	patchDirectory := agent.CWD
+	if len(operations.commands) == 1 {
+		patchDirectory = commandDirectory(operations.commands[0])
+	}
 	for _, patch := range operations.patches {
-		recordSessionTranscriptPath(changes, patch.path, agent.CWD, agent, patch.marker, mtime)
+		recordSessionTranscriptPath(changes, patch.path, patchDirectory, agent, patch.marker, mtime)
 	}
-	if operations.command == "" {
-		return
-	}
-	cwd := operations.cwd
-	if cwd == "" {
-		cwd = agent.CWD
-	}
-	for path, markers := range scanShellChanges(operations.command, cwd) {
-		for _, marker := range markers {
-			recordSessionTranscriptPath(changes, path, cwd, agent, marker, mtime)
+	for _, command := range operations.commands {
+		cwd := commandDirectory(command)
+		for path, markers := range scanShellChanges(command.command, cwd) {
+			for _, marker := range markers {
+				recordSessionTranscriptPath(changes, path, cwd, agent, marker, mtime)
+			}
 		}
 	}
 }
@@ -526,69 +629,6 @@ func sessionFileAttributionsForRepo(changes map[string]*sessionFileAttribution, 
 	return result
 }
 
-func sessionFileTranscriptCWDs(agents []SessionFileAgent, roots []string) []string {
-	values := make([]string, 0, len(agents)+len(roots))
-	for _, agent := range agents {
-		if agent.CWD != "" {
-			values = append(values, agent.CWD)
-		}
-	}
-	values = append(values, roots...)
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		absolute, err := filepath.Abs(strings.TrimSpace(value))
-		if err != nil || absolute == "" || seen[absolute] {
-			continue
-		}
-		seen[absolute] = true
-		result = append(result, absolute)
-	}
-	return result
-}
-
-func collectSessionFileAttributions(ctx context.Context, agents []SessionFileAgent, roots []string, hours float64) map[string]*sessionFileAttribution {
-	cutoff := time.Now().Add(-time.Duration(hours * float64(time.Hour)))
-	changes := make(map[string]*sessionFileAttribution)
-	seenTranscripts := make(map[string]bool)
-	for _, agent := range agents {
-		if ctx.Err() != nil {
-			return changes
-		}
-		if agent.Kind != "claude" && agent.Kind != "codex" || agent.Transcript == "" {
-			continue
-		}
-		path, err := filepath.Abs(agent.Transcript)
-		if err != nil || seenTranscripts[path] {
-			continue
-		}
-		seenTranscripts[path] = true
-		for touchedPath, attribution := range mustScanSessionTranscript(ctx, path, agent, cutoff) {
-			mergeSessionFileAttribution(changes, touchedPath, attribution)
-		}
-	}
-	// A session can retain a clean repository after its Codex pane has exited. Enumerate the
-	// bounded archive once, parse each selected rollout once, and project its commands against the
-	// session CWDs that can supply their missing working directory.
-	if len(roots) > 0 && ctx.Err() == nil {
-		archiveRoot, err := HistoricalAttributionRoot()
-		if err == nil {
-			historical := collectHistoricalCodexAttributions(ctx, archiveRoot, sessionFileTranscriptCWDs(agents, roots), cutoff, seenTranscripts, func(path string) (io.ReadCloser, error) {
-				return os.Open(path)
-			})
-			for touchedPath, attribution := range historical {
-				mergeSessionFileAttribution(changes, touchedPath, attribution)
-			}
-		}
-	}
-	return changes
-}
-
-func mustScanSessionTranscript(ctx context.Context, path string, agent SessionFileAgent, cutoff time.Time) map[string]*sessionFileAttribution {
-	changes, _ := scanSessionTranscriptContext(ctx, path, agent, cutoff)
-	return changes
-}
-
 func mergeSessionFileAttribution(target map[string]*sessionFileAttribution, path string, incoming *sessionFileAttribution) {
 	if incoming == nil || defaultSessionFileExcluded(path) && !strings.Contains(path, string(os.PathSeparator)+".uploads"+string(os.PathSeparator)) {
 		return
@@ -627,320 +667,8 @@ func mergeSessionFileAttribution(target map[string]*sessionFileAttribution, path
 	}
 }
 
-type historicalCodexTranscriptCandidate struct {
-	path  string
-	mtime time.Time
-	info  os.FileInfo
-}
-
-type historicalCodexAttributionRecord struct {
-	info       os.FileInfo
-	transcript historicalCodexTranscript
-	weight     int64
-}
-
-type historicalCodexAttributionCache struct {
-	mu      sync.Mutex
-	records *cache.LRU[string, historicalCodexAttributionRecord]
-	bytes   int64
-}
-
-func newHistoricalCodexAttributionCache() *historicalCodexAttributionCache {
-	return &historicalCodexAttributionCache{
-		records: cache.NewLRU[string, historicalCodexAttributionRecord](maxHistoricalCodexAttributionCacheEntries),
-	}
-}
-
-var historicalCodexAttributions = newHistoricalCodexAttributionCache()
-
-type historicalCodexCandidateHeap []historicalCodexTranscriptCandidate
-
-func (candidates historicalCodexCandidateHeap) Len() int { return len(candidates) }
-
-func (candidates historicalCodexCandidateHeap) Less(i, j int) bool {
-	left, right := candidates[i], candidates[j]
-	if left.mtime.Equal(right.mtime) {
-		return left.path > right.path
-	}
-	return left.mtime.Before(right.mtime)
-}
-
-func (candidates historicalCodexCandidateHeap) Swap(i, j int) {
-	candidates[i], candidates[j] = candidates[j], candidates[i]
-}
-
-func (candidates *historicalCodexCandidateHeap) Push(value any) {
-	*candidates = append(*candidates, value.(historicalCodexTranscriptCandidate))
-}
-
-func (candidates *historicalCodexCandidateHeap) Pop() any {
-	last := len(*candidates) - 1
-	value := (*candidates)[last]
-	*candidates = (*candidates)[:last]
-	return value
-}
-
-func historicalCodexTranscriptCandidates(ctx context.Context, root string, cutoff time.Time) ([]historicalCodexTranscriptCandidate, bool) {
-	return historicalCodexTranscriptCandidatesWithWalker(ctx, root, cutoff, filepath.WalkDir)
-}
-
-func historicalCodexTranscriptCandidatesWithWalker(ctx context.Context, root string, cutoff time.Time, walk func(string, fs.WalkDirFunc) error) ([]historicalCodexTranscriptCandidate, bool) {
-	candidates := make(historicalCodexCandidateHeap, 0, maxHistoricalCodexFiles)
-	complete := true
-	err := walk(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
-			complete = false
-			return ctx.Err()
-		}
-		if walkErr != nil {
-			complete = false
-			return nil
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		if !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			return nil
-		}
-		info, infoErr := entry.Info()
-		if infoErr != nil {
-			complete = false
-			return nil
-		}
-		if !info.ModTime().Before(cutoff) {
-			candidate := historicalCodexTranscriptCandidate{path: path, mtime: info.ModTime(), info: info}
-			if len(candidates) < maxHistoricalCodexFiles {
-				heap.Push(&candidates, candidate)
-			} else if historicalCodexCandidateIsNewer(candidate, candidates[0]) {
-				candidates[0] = candidate
-				heap.Fix(&candidates, 0)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		complete = false
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return historicalCodexCandidateIsNewer(candidates[i], candidates[j])
-	})
-	return []historicalCodexTranscriptCandidate(candidates), complete && ctx.Err() == nil
-}
-
-func historicalCodexCandidateIsNewer(left, right historicalCodexTranscriptCandidate) bool {
-	if left.mtime.Equal(right.mtime) {
-		return left.path < right.path
-	}
-	return left.mtime.After(right.mtime)
-}
-
-func collectHistoricalCodexAttributions(ctx context.Context, archiveRoot string, cwds []string, cutoff time.Time, seen map[string]bool, openFile func(string) (io.ReadCloser, error)) map[string]*sessionFileAttribution {
-	return collectHistoricalCodexAttributionsWithCache(ctx, historicalCodexAttributions, archiveRoot, cwds, cutoff, seen, openFile)
-}
-
-func collectHistoricalCodexAttributionsWithCache(ctx context.Context, transcripts *historicalCodexAttributionCache, archiveRoot string, cwds []string, cutoff time.Time, seen map[string]bool, openFile func(string) (io.ReadCloser, error)) map[string]*sessionFileAttribution {
-	return collectHistoricalCodexAttributionsWithWalker(ctx, transcripts, archiveRoot, cwds, cutoff, seen, openFile, filepath.WalkDir)
-}
-
-func collectHistoricalCodexAttributionsWithWalker(ctx context.Context, transcripts *historicalCodexAttributionCache, archiveRoot string, cwds []string, cutoff time.Time, seen map[string]bool, openFile func(string) (io.ReadCloser, error), walk func(string, fs.WalkDirFunc) error) map[string]*sessionFileAttribution {
-	result := make(map[string]*sessionFileAttribution)
-	if len(cwds) == 0 || ctx.Err() != nil {
-		return result
-	}
-	candidates, _ := historicalCodexTranscriptCandidatesWithWalker(ctx, archiveRoot, cutoff, walk)
-	for _, candidate := range candidates {
-		if ctx.Err() != nil {
-			break
-		}
-		if seen[candidate.path] {
-			continue
-		}
-		transcript, complete := transcripts.scan(ctx, candidate, openFile)
-		if !complete {
-			continue
-		}
-		seen[candidate.path] = true
-		if recordedCWD := resolveSessionTranscriptPath(transcript.recordedCWD, ""); recordedCWD != "" {
-			changes := projectHistoricalCodexOperations(ctx, transcript.operations, recordedCWD, candidate.mtime.Unix())
-			for path, attribution := range historicalCodexChangesForRoots(changes, cwds) {
-				mergeSessionFileAttribution(result, path, attribution)
-			}
-			continue
-		}
-		for _, cwd := range cwds {
-			if ctx.Err() != nil {
-				return result
-			}
-			changes := projectHistoricalCodexOperations(ctx, transcript.operations, cwd, candidate.mtime.Unix())
-			if ctx.Err() != nil {
-				return result
-			}
-			if !historicalCodexChangesTouchRoot(changes, cwd) {
-				continue
-			}
-			for path, attribution := range changes {
-				mergeSessionFileAttribution(result, path, attribution)
-			}
-			break
-		}
-	}
-	return result
-}
-
-func (c *historicalCodexAttributionCache) scan(ctx context.Context, candidate historicalCodexTranscriptCandidate, openFile func(string) (io.ReadCloser, error)) (historicalCodexTranscript, bool) {
-	key := candidate.path
-	c.mu.Lock()
-	record, ok := c.records.Get(key)
-	if ok && sameTranscriptFile(record.info, candidate.info) {
-		c.mu.Unlock()
-		return record.transcript, true
-	}
-	if ok {
-		c.deleteLocked(key)
-	}
-	c.mu.Unlock()
-
-	if ctx.Err() != nil {
-		return historicalCodexTranscript{}, false
-	}
-	file, err := openFile(candidate.path)
-	if err != nil {
-		return historicalCodexTranscript{}, false
-	}
-	openedInfo := candidate.info
-	if statter, ok := file.(interface{ Stat() (os.FileInfo, error) }); ok {
-		openedInfo, err = statter.Stat()
-		if err != nil || !sameTranscriptFile(candidate.info, openedInfo) {
-			_ = file.Close()
-			return historicalCodexTranscript{}, false
-		}
-	}
-	transcript, weight, complete := scanHistoricalCodexOperations(ctx, file)
-	if statter, ok := file.(interface{ Stat() (os.FileInfo, error) }); ok {
-		after, statErr := statter.Stat()
-		complete = complete && statErr == nil && sameTranscriptFile(openedInfo, after)
-	}
-	_ = file.Close()
-	if !complete {
-		return historicalCodexTranscript{}, false
-	}
-	currentInfo, err := os.Stat(candidate.path)
-	if err != nil || !sameTranscriptFile(openedInfo, currentInfo) {
-		return historicalCodexTranscript{}, false
-	}
-	// Bound retained parsed operations by semantic weight; raw rollout size includes discarded UI and tool output.
-	c.set(key, historicalCodexAttributionRecord{info: currentInfo, transcript: transcript, weight: weight})
-	return transcript, true
-}
-
-func sameTranscriptFile(left, right os.FileInfo) bool {
-	return left != nil && right != nil && os.SameFile(left, right) && left.Size() == right.Size() && left.ModTime().Equal(right.ModTime())
-}
-
-func (c *historicalCodexAttributionCache) deleteLocked(key string) {
-	if record, ok := c.records.Peek(key); ok {
-		c.bytes -= record.weight
-	}
-	c.records.Delete(key)
-}
-
-func (c *historicalCodexAttributionCache) set(key string, record historicalCodexAttributionRecord) {
-	if record.info == nil || record.weight < 0 || record.weight > maxHistoricalCodexAttributionCacheBytes {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.deleteLocked(key)
-	for c.records.Len() >= maxHistoricalCodexAttributionCacheEntries || c.bytes+record.weight > maxHistoricalCodexAttributionCacheBytes {
-		keys := c.records.KeysLeastRecentFirst()
-		if len(keys) == 0 {
-			return
-		}
-		c.deleteLocked(keys[0])
-	}
-	c.records.Set(key, record)
-	c.bytes += record.weight
-}
-
-func scanHistoricalCodexOperations(ctx context.Context, source io.Reader) (historicalCodexTranscript, int64, bool) {
-	transcript := historicalCodexTranscript{operations: make([]codexTranscriptOperations, 0)}
-	var weight int64
-	complete := scanTranscriptLines(ctx, source, func(line []byte) {
-		if cwd := parseCodexTranscriptRecordedCWD(line); cwd != "" {
-			transcript.recordedCWD = cwd
-			weight += int64(len(cwd))
-		}
-		operations := parseCodexTranscriptOperations(line)
-		if len(operations.patches) == 0 && operations.command == "" {
-			return
-		}
-		transcript.operations = append(transcript.operations, operations)
-		weight += 128 + int64(len(operations.command)+len(operations.cwd)) + int64(len(operations.patches))*48
-		for _, patch := range operations.patches {
-			weight += int64(len(patch.path))
-		}
-	})
-	if !complete {
-		return historicalCodexTranscript{}, 0, false
-	}
-	return transcript, weight, true
-}
-
-type contextReader struct {
-	ctx    context.Context
-	source io.Reader
-}
-
-func (reader contextReader) Read(buffer []byte) (int, error) {
-	if err := reader.ctx.Err(); err != nil {
-		return 0, err
-	}
-	if len(buffer) > 64*1024 {
-		buffer = buffer[:64*1024]
-	}
-	return reader.source.Read(buffer)
-}
-
-func projectHistoricalCodexOperations(ctx context.Context, operations []codexTranscriptOperations, cwd string, mtime int64) map[string]*sessionFileAttribution {
-	changes := make(map[string]*sessionFileAttribution)
-	agent := SessionFileAgent{Kind: "codex", CWD: cwd}
-	for _, item := range operations {
-		if ctx.Err() != nil {
-			break
-		}
-		applyCodexTranscriptOperations(changes, agent, mtime, item)
-	}
-	return changes
-}
-
-func historicalCodexChangesTouchRoot(changes map[string]*sessionFileAttribution, root string) bool {
-	for path := range changes {
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			continue
-		}
-		relative, err := filepath.Rel(root, absolute)
-		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-			return true
-		}
-	}
-	return false
-}
-
-func historicalCodexChangesForRoots(changes map[string]*sessionFileAttribution, roots []string) map[string]*sessionFileAttribution {
-	result := make(map[string]*sessionFileAttribution)
-	for _, root := range roots {
-		for path, attribution := range changes {
-			if historicalCodexChangesTouchRoot(map[string]*sessionFileAttribution{path: attribution}, root) {
-				result[path] = attribution
-			}
-		}
-	}
-	return result
-}
-
-// HistoricalAttributionRoot preserves Differ's original home archive scope;
-// provider-specific stats roots do not silently change session history.
+// HistoricalAttributionRoot is the Codex archive the attribution index pre-indexes so a live
+// agent's transcript is usually prepared before Differ first asks for it.
 func HistoricalAttributionRoot() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

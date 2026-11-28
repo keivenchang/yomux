@@ -88,29 +88,33 @@ func TestSessionFilesProducerSubscribersReplayAndDisconnectIndependently(t *test
 
 func TestSessionFilesColdProducerCoalescesRealGitAndSurvivesFirstDisconnect(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	root := t.TempDir()
-	for _, args := range [][]string{{"init", "-q", "--initial-branch=main", root}, {"-C", root, "config", "user.name", "Fixture"}, {"-C", root, "config", "user.email", "fixture@example.invalid"}} {
-		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-			t.Fatalf("fixture git: %v %s", err, output)
+	root, held := t.TempDir(), t.TempDir()
+	for _, repo := range []string{root, held} {
+		for _, args := range [][]string{{"init", "-q", "--initial-branch=main", repo}, {"-C", repo, "config", "user.name", "Fixture"}, {"-C", repo, "config", "user.email", "fixture@example.invalid"}} {
+			if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				t.Fatalf("fixture git: %v %s", err, output)
+			}
 		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "note.py"), []byte("old\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{{"-C", root, "add", "note.py"}, {"-C", root, "commit", "-qm", "initial"}} {
-		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-			t.Fatalf("fixture git: %v %s", err, output)
+		if err := os.WriteFile(filepath.Join(repo, "note.py"), []byte("old\n"), 0600); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "note.py"), []byte("new\n"), 0600); err != nil {
-		t.Fatal(err)
+		for _, args := range [][]string{{"-C", repo, "add", "note.py"}, {"-C", repo, "commit", "-qm", "initial"}} {
+			if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				t.Fatalf("fixture git: %v %s", err, output)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(repo, "note.py"), []byte("new\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	service, err := finder.New(root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	pipe := filepath.Join(t.TempDir(), "held.jsonl")
+	// Git's diff opens the worktree attributes file, so a FIFO there holds the second
+	// repository's real Git work until the test supplies its end of file.
+	pipe := filepath.Join(held, ".gitattributes")
 	if err = syscall.Mkfifo(pipe, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -134,29 +138,29 @@ func TestSessionFilesColdProducerCoalescesRealGitAndSurvivesFirstDisconnect(t *t
 	}()
 
 	plan := newSessionFilesPlan(sessionFilesRequest{session: "1", sessionIdentity: "cold", hours: 24, fromRef: "HEAD", toRef: "current"})
-	agents := []finder.SessionFileAgent{{Kind: "codex", CWD: root, Transcript: pipe}}
+	roots := []string{root, held}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	first, second := make(chan *finder.Error, 1), make(chan *finder.Error, 1)
 	rows := make(chan bool, 16)
 	go func() {
-		_, err := srv.sharedSessionFilesProduce(ctx, plan, []string{root}, agents, func(map[string]any) error { rows <- true; return nil })
+		_, err := srv.sharedSessionFilesProduce(ctx, plan, roots, nil, func(map[string]any) error { rows <- true; return nil })
 		first <- err
 	}()
 	select {
 	case <-rows:
 	case <-time.After(5 * time.Second):
-		t.Fatal("cold Git repository did not stream before held attribution")
+		t.Fatal("cold Git repository did not stream before the held repository")
 	}
 	select {
 	case writer = <-writerReady:
 	case err := <-writerFailed:
 		t.Fatal(err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("attribution did not reach held source")
+		t.Fatal("Git did not reach the held repository")
 	}
 	go func() {
-		_, err := srv.sharedSessionFilesProduce(context.Background(), plan, []string{root}, agents, nil)
+		_, err := srv.sharedSessionFilesProduce(context.Background(), plan, roots, nil, nil)
 		second <- err
 	}()
 	key := plan.viewID + ":" + plan.request.sessionIdentity
@@ -190,6 +194,14 @@ func TestSessionFilesColdProducerCoalescesRealGitAndSurvivesFirstDisconnect(t *t
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("disconnect blocked")
+	}
+	// Git can open the attributes file again after this read; later opens see a regular file.
+	released := filepath.Join(t.TempDir(), "gitattributes")
+	if err = os.WriteFile(released, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Rename(released, pipe); err != nil {
+		t.Fatal(err)
 	}
 	if err = writer.Close(); err != nil {
 		t.Fatal(err)

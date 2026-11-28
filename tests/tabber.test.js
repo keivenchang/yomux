@@ -535,7 +535,7 @@ test('editor and Differ tab context menus offer Close through the shared close o
   };
   vm.createContext(context);
   const facade = fs.readFileSync('static_src/js/yomux/98_terminal_runtime_facade.js', 'utf8');
-  vm.runInContext(facade.slice(facade.indexOf('function paneFrameCloseLabel('), facade.indexOf('function paneFrameControlsHtml(')), context);
+  vm.runInContext(facade.slice(facade.indexOf('function paneTabCloseLabel('), facade.indexOf('function paneFrameControlsHtml(')), context);
   vm.runInContext(menuSource.slice(menuStart, menuEnd), context);
   context.appendTabActionCommands([], '__file_editor__/repo/file.txt');
   context.appendTabActionCommands([], '__differ__');
@@ -3955,7 +3955,10 @@ async function runTabberSuite() {
     assert.equal(api.terminalThemeSettingForGlobalMode('light'), 'light', 'light maps to light');
     assert.equal(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), false, '#261: the View theme toggle no longer pins the terminal palette (terminal follows the app)');
     // #10: a global-theme change re-themes live editors via the compartment swap.
-    assert.ok(/const editorThemeChanged = previousEditorSchemeId !== activeEditorScheme\(\)\.id;\s*const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;\s*if \(editorThemeChanged \|\| editorCursorColorChanged \|\| \(groupChanged\.editorTheme && fileEditorCursorColor === 'theme'\)\) \{[\s\S]*?refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
+    const settingsApply = source.slice(source.indexOf('function applySettingsPayload('), source.indexOf('function scheduleDeferredSettingsMetadataRefresh('));
+    const previousScheme = settingsApply.indexOf('const previousEditorScheme = activeEditorScheme()');
+    assert.ok(previousScheme >= 0 && previousScheme < settingsApply.indexOf('clientSettings = nextSettings'), 'capture the old palette before publishing the new settings');
+    assert.ok(/const editorThemeChanged = previousEditorScheme\.id !== activeEditorScheme\(\)\.id;\s*const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;\s*if \(editorThemeChanged \|\| editorCursorColorChanged \|\| \(groupChanged\.editorTheme && fileEditorCursorColor === 'theme'\)\) \{[\s\S]*?refreshOpenEditorThemePanels\(\)/.test(settingsApply), '#10: theme or cursor-color change re-themes open editors');
     // #12: Preferences field renamed. (Phase 0: the label is now i18n-keyed; en.json holds the text.)
     assert.ok(source.includes("preferenceSettingItem('appearance.theme'") && source.includes('label: explicitLabel ?? t(localeKeys.label, labelParams)'), '#12: the global theme field is i18n-keyed through the shared setting builder');
     assert.ok(source.includes("'appearance.date_time_hour_cycle': '24'") && source.includes("initialSetting('appearance.date_time_hour_cycle')"), 'date/time clock defaults through the shared setting fallback table');

@@ -2814,7 +2814,6 @@ function dockviewHeaderActionsHtml(item, slot = slotForItem(item)) {
       details: false,
       popout: false,
       expand: false,
-      close: false,
       minimize: true,
     });
   }
@@ -2825,7 +2824,6 @@ function dockviewHeaderActionsHtml(item, slot = slotForItem(item)) {
       details: false,
       popout: false,
       expand: false,
-      close: false,
       minimize: true,
     });
   }

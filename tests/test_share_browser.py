@@ -2,28 +2,36 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Scoped guest browsers co-edit through the production Go authority."""
 
-import re
+import base64
 import json
+import re
+import shlex
+import shutil
+import sys
 from io import BytesIO
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
 from PIL import Image
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import browser_auth_yaml, new_chrome_driver, remove_browser_test_new_document_scripts
-from tests.browser_helpers.browser_console import assert_only_expected_browser_http_error, assert_only_expected_browser_network_error
-from tests.browser_helpers.share_workspace import _button, _share_json
+from tests.browser_helpers.browser_console import assert_only_expected_browser_http_error, assert_only_expected_browser_network_error, read_browser_console_log
+from tests.browser_helpers.share_workspace import login_owner, _button, _share_json
 from tests.browser_helpers.native_keyboard import native_logical_key, native_editor_modifier
 from tests.browser_helpers.native_pointer import cdp_drag_hold, cdp_release
 from tests.browser_helpers.webdriver_lease import WebDriverLease, retire_all
+from tests.helpers.pdf_fixtures import preview_pdf
 from tests.tmux_runtime import run_isolated_tmux
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 
 pytestmark = pytest.mark.browser
+CREATE_SHARE_LABEL = 'Create New Share and Copy URL'
 
 
 def _assert_chat_sidebar_resize(driver):
@@ -73,7 +81,346 @@ def _guest_ready(driver):
 def _open_share_manager(driver):
     driver.find_element(By.CSS_SELECTOR, '.app-menu[data-app-menu="file"] > .app-menu-button').click()
     assert not driver.find_elements(By.CSS_SELECTOR, '.app-menu[data-app-menu="share"]')
-    WebDriverWait(driver, 5).until(lambda d: _button(d, '.app-menu[data-app-menu="file"]', 'YO!share')).click()
+    WebDriverWait(driver, 5).until(lambda d: _button(d, '.app-menu[data-app-menu="file"]', 'YO!Share')).click()
+
+
+def test_share_markdown_renders_referenced_images(browser, isolated_dev_server_factory, tmp_path):
+    server = isolated_dev_server_factory('share-markdown-images', tls=True, auth_bypass=False)
+    server.paths.auth_config_path.write_text(browser_auth_yaml(), encoding='utf-8')
+    (server.paths.config_dir / 'settings.yaml').write_bytes(b'general:\n  startup_tips: false\nupdates:\n  notify_level: none\n')
+    source = server.paths.workspace_dir / '2026.md'
+    source.write_text(
+        '# Shared notes\n\n![Overview][diagram]\n\n<img src="images/detail.png" alt="Detail">\n\n'
+        '[diagram]: images/overview%20chart.png\n', encoding='utf-8',
+    )
+    images = source.parent / 'images'
+    images.mkdir()
+    Image.new('RGB', (43, 29), '#004faa').save(images / 'overview chart.png')
+    Image.new('RGB', (57, 38), '#a0003a').save(images / 'detail.png')
+    login_owner(browser, server)
+    wait = WebDriverWait(browser, 15)
+    wait.until(lambda d: d.execute_script("return typeof openFileInEditor==='function' && !!window.YOmuxShare"))
+    browser.execute_async_script("""
+      openFileInEditor(arguments[0], '2026.md', {viewMode:'edit', userInitiated:true}).then(arguments[1]);
+    """, str(source))
+    _open_share_manager(browser)
+    wait.until(lambda d: _button(d, '.share-admin', CREATE_SHARE_LABEL)).click()
+    invite = wait.until(lambda d: d.execute_script("return document.querySelector('.share-invite input')?.value"))
+
+    guest = new_chrome_driver(profile_dir=tmp_path / 'markdown-image-guest')
+    lease = WebDriverLease.from_driver(guest)
+    try:
+        guest.get(invite)
+        WebDriverWait(guest, 15).until(_guest_ready)
+        sample = """
+          const previews = [...document.querySelectorAll('.file-editor-preview-pane-panel')];
+          return {assets: [...shareWorkspace.resources.values()].map(resource => Object.keys(resource.assets || {})),
+            previews: previews.map(preview => ({
+              text: preview.innerText,
+              images: [...preview.querySelectorAll('img')].map(image => [image.alt, image.naturalWidth]),
+            }))};
+        """
+        def decoded(driver):
+            state = driver.execute_script(sample)
+            return any(preview['images'] == [['Overview', 43], ['Detail', 57]] for preview in state['previews'])
+
+        try:
+            WebDriverWait(guest, 10).until(decoded)
+        except TimeoutException as error:
+            raise AssertionError(guest.execute_script(sample)) from error
+        assert guest.execute_script("return [...shareWorkspace.resources.values()].every(resource => !resource.label.endsWith('.png'))")
+    finally:
+        try:
+            guest.get('about:blank')
+        finally:
+            retired = retire_all([lease])
+            assert retired['proven_gone'], retired
+            browser.get('about:blank')
+
+
+@pytest.mark.skipif(sys.platform != 'linux' or not shutil.which('bwrap'), reason='requires Linux TeX sandbox')
+def test_share_tex_publishes_pdf_and_save_status_survives_redraw(browser, isolated_dev_server_factory, tmp_path, request):
+    server = isolated_dev_server_factory('share-tex', tls=True, auth_bypass=False)
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    server.paths.auth_config_path.write_text(browser_auth_yaml(), encoding='utf-8')
+    (server.paths.config_dir / 'settings.yaml').write_bytes(b'general:\n  startup_tips: false\nupdates:\n  notify_level: none\n')
+    source = server.paths.workspace_dir / 'shared.tex'
+    source.write_text('Shared TeX fixture\n', encoding='utf-8')
+    login_owner(browser, server)
+    wait = WebDriverWait(browser, 15)
+    wait.until(lambda d: d.execute_script("return typeof openFileInEditor==='function' && !!window.YOmuxShare"))
+    compiler = Path(_share_json(browser, '/api/tex/compiler')['body']['install_path'])
+    assert compiler.is_relative_to(server.paths.config_dir)
+    compiler.parent.mkdir(parents=True, exist_ok=True)
+    encoded = base64.b64encode(preview_pdf()).decode('ascii')
+    edited_pdf = base64.b64encode(preview_pdf(page_count=2)).decode('ascii')
+    sibling = source.with_name('private-sibling.dat')
+    sibling.write_bytes(b'Outside the collaborative TeX document')
+    compiler.write_bytes(f"""#!/bin/sh
+source=$(/bin/cat)
+case "$source" in
+  *Z*) test ! -r {shlex.quote(str(sibling))} || exit 31; pdf={edited_pdf} ;;
+  *) pdf={encoded} ;;
+esac
+printf %s "$pdf" | /usr/bin/base64 -d > "$3/texput.pdf"
+""".encode())
+    compiler.chmod(0o700)
+    item = browser.execute_async_script("""
+      openFileInEditor(arguments[0], 'shared.tex', {viewMode:'edit', userInitiated:true})
+        .then(arguments[1]);
+    """, str(source))
+    editor = wait.until(lambda d: d.execute_script("return panelNodes.get(arguments[0])?._cmView?.contentDOM", item))
+    editor.click()
+    native_logical_key(browser, 'x')
+    wait.until(lambda d: d.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return !panel.querySelector('.file-editor-save-panel').disabled;
+    """, item))
+    browser.execute_script("return panelNodes.get(arguments[0]).querySelector('.file-editor-save-panel')", item).click()
+    saved = wait.until(lambda d: d.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      const status = panel.querySelector('.file-editor-status-message').textContent;
+      return status.startsWith('saved (') && status;
+    """, item))
+    assert browser.execute_script("""
+      const item = arguments[0], panel = panelNodes.get(item);
+      renderFileEditorPanel(panel, item);
+      return panel.querySelector('.file-editor-status-message').textContent;
+    """, item) == saved
+    browser.execute_script("""
+      const originalFetch = window.fetch;
+      window.fetch = async (input, options) => {
+        if (input !== '/api/tex/preview') return originalFetch(input, options);
+        const body = JSON.parse(options.body);
+        if (!body.publish) return originalFetch(input, options);
+        window.__shareTexRequest = body;
+        await new Promise(resolve => { window.__releaseShareTex = resolve; });
+        return originalFetch(input, options);
+      };
+      window.addEventListener('pagehide', () => { window.fetch = originalFetch; }, {once:true});
+    """)
+    _open_share_manager(browser)
+    wait.until(lambda d: d.find_element(By.CSS_SELECTOR, '.share-admin input[data-share-resource$="shared.tex"]')).click()
+    wait.until(lambda d: _button(d, '.share-admin', CREATE_SHARE_LABEL)).click()
+    invite = wait.until(lambda d: d.execute_script("return document.querySelector('.share-invite input')?.value"))
+    guest = new_chrome_driver(profile_dir=tmp_path / 'tex-guest')
+    lease = WebDriverLease.from_driver(guest)
+    try:
+        guest.get(invite)
+        WebDriverWait(guest, 20).until(lambda d: d.execute_script("""
+          return document.querySelector('.file-editor-preview-pane-panel .file-editor-code-preview')
+            ?.textContent.includes('TeX fixture');
+        """))
+        body = wait.until(lambda d: d.execute_script("return window.__shareTexRequest"))
+        assert body == {'path': str(source), 'content': source.read_text(encoding='utf-8'), 'publish': True}
+        browser.execute_script("window.__releaseShareTex()")
+        def published_pdf(driver, pages):
+            url = WebDriverWait(driver, 20).until(lambda d: d.execute_script("""
+              const frame = [...document.querySelectorAll('.file-editor-preview-pane-panel iframe[data-pdf-ready="true"]')]
+                .find(node => node.getClientRects().length && node.contentWindow.PDFViewerApplication.pagesCount === arguments[0]
+                  && node.contentDocument.querySelector('.page canvas')?.width > 0);
+              return frame && new URL(frame.src).searchParams.get('file');
+            """, pages))
+            return driver.execute_async_script("""
+              const [url, done] = arguments;
+              fetch(url).then(async response => done({status: response.status,
+                pdf: btoa(String.fromCharCode(...new Uint8Array(await response.arrayBuffer())))}))
+                .catch(error => done({error: String(error)}));
+            """, url)
+
+        assert published_pdf(guest, 3) == {'status': 200, 'pdf': encoded}
+        browser.execute_async_script("""
+          openFileInEditor(arguments[0], 'shared.tex', {viewMode:'split', userInitiated:true})
+            .then(arguments[1]);
+        """, str(source))
+        assert published_pdf(browser, 3) == {'status': 200, 'pdf': encoded}
+        _share_mode(guest, 'edit')
+        _share_type(guest, 'Z')
+        WebDriverWait(guest, 10).until(lambda _: 'Z' in source.read_text(encoding='utf-8'))
+        assert published_pdf(browser, 2) == {'status': 200, 'pdf': edited_pdf}
+        _share_mode(guest, 'preview')
+        assert published_pdf(guest, 2) == {'status': 200, 'pdf': edited_pdf}
+        _open_share_manager(browser)
+        grant = _share_json(browser, '/api/share')['body']['shares'][0]
+        detail = _expand_share(browser, grant['guest']).find_element(By.CSS_SELECTOR, '.share-manager-detail')
+        revision = detail.get_dom_attribute('data-key')
+        added = source.with_name('opened-after-share.md')
+        added.write_text('# Opened later\n', encoding='utf-8')
+        browser.execute_async_script("""
+          openFileInEditor(arguments[0], 'opened-after-share.md', {viewMode:'edit', userInitiated:true})
+            .then(arguments[1]);
+        """, str(added))
+        wait.until(lambda d: d.execute_script("""
+          const row = [...arguments[0].querySelectorAll('.share-admin-picker label')]
+            .find(label => label.firstElementChild.textContent.endsWith('opened-after-share.md'));
+          return Boolean(row) && !row.control.checked;
+        """, detail))
+        assert detail.get_dom_attribute('data-key') == revision
+        assert not _guest_tab_row(guest, added.name)
+        _open_share_manager(browser)
+        _set_share_tab(browser, grant['guest'], added.name, True)
+        WebDriverWait(guest, 10).until(lambda d: _guest_tab_row(d, added.name))
+        browser.execute_async_script("""
+          removeOpenFile(arguments[0], {confirmDirty:false}).then(arguments[1]);
+        """, str(added))
+        assert _guest_tab_row(guest, added.name)
+        _set_share_tab(browser, grant['guest'], added.name, False, expect_removed=True)
+        WebDriverWait(guest, 10).until_not(lambda d: _guest_tab_row(d, added.name))
+        wait.until(lambda d: d.execute_script("""
+          const detail = document.querySelector('.share-manager-disclosure[open] .share-manager-detail');
+          return !!detail && !detail.textContent.includes('opened-after-share.md');
+        """))
+    finally:
+        retire_all([lease])
+
+
+def test_share_picker_removes_deleted_background_file(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('share-deleted', tls=True, auth_bypass=False)
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    server.paths.auth_config_path.write_text(browser_auth_yaml(), encoding='utf-8')
+    (server.paths.config_dir / 'settings.yaml').write_bytes(b'general:\n  startup_tips: false\nupdates:\n  notify_level: none\n')
+    source = server.paths.workspace_dir / 'sample.text'
+    source.write_bytes(b'The editor retains this text after deletion.\n')
+    login_owner(browser, server)
+    wait = WebDriverWait(browser, 15)
+    wait.until(lambda d: d.execute_script("return typeof openFileInEditor==='function' && !!window.YOmuxShare"))
+    item = browser.execute_async_script("""
+      openFileInEditor(arguments[0], 'sample.text', {viewMode:'edit', userInitiated:true})
+        .then(arguments[1]);
+    """, str(source))
+    assert item
+    _open_share_manager(browser)
+    wait.until(lambda d: d.execute_script("""
+      const [path, item] = arguments;
+      const picker = document.querySelector('.share-create-disclosure[open] .share-admin-picker');
+      const watch = serverWatchRootsState;
+      return picker?.textContent.includes('sample.text') && watch.registered &&
+        JSON.parse(watch.signature).files.includes(path) &&
+        clientEventTransportState.connected && clientEventDemandDescriptor().channels.includes('files') &&
+        !itemIsActivePaneTab(item);
+    """, str(source), item))
+    source.unlink()
+    wait.until(lambda d: d.execute_script("""
+      const state = fileState.get(arguments[0]);
+      const picker = document.querySelector('.share-create-disclosure[open] .share-admin-picker');
+      return state?.externalMissing && state.content.includes('retains this text') &&
+        !!picker && !picker.textContent.includes('sample.text');
+    """, str(source)))
+    assert_only_expected_browser_http_error(browser, path='/api/fs/read', status=404, query={'path': str(source)})
+
+
+def test_share_picker_retains_owner_path_after_grant(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('share-owner-path', tls=True, auth_bypass=False)
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    server.paths.auth_config_path.write_text(browser_auth_yaml(), encoding='utf-8')
+    source = server.paths.workspace_dir / 'sample.txt'
+    source.write_bytes(b'sample\n')
+    extra = server.paths.workspace_dir / 'extra.txt'
+    extra.write_bytes(b'extra\n')
+    login_owner(browser, server)
+    wait = WebDriverWait(browser, 15)
+    wait.until(lambda driver: driver.execute_script("return typeof openFileInEditor === 'function' && !!window.YOmuxShare"))
+    browser.execute_async_script("""
+      const [source, extra, done] = arguments;
+      (async () => {
+        await openFileInEditor(source, 'sample.txt', {viewMode: 'edit', userInitiated: true});
+        await openFileInEditor(extra, 'extra.txt', {viewMode: 'edit', userInitiated: true});
+      })().then(done);
+    """, str(source), str(extra))
+    _open_share_manager(browser)
+    selector = '.share-admin-picker tbody label'
+    wait.until(lambda driver: any(row.text == str(source) for row in driver.find_elements(By.CSS_SELECTOR, selector)))
+    draft_picker = '.share-create-disclosure[open]'
+    active_picker = '.share-manager-disclosure[open]'
+
+    def file_color(picker):
+        return browser.execute_script("""
+          const write = [...document.querySelectorAll(arguments[0] + ' input[data-share-resource]')]
+            .find(input => input.dataset.shareResource === arguments[1]);
+          const label = write.closest('tr').querySelector('label');
+          return {description: label.textContent, name: getComputedStyle(label).color,
+            normal: getComputedStyle(label.parentElement).color};
+        """, picker, str(source))
+
+    def check_color(picker, writable, guest=None):
+        colors = file_color(picker)
+        assert colors['description'] == (f'{source} (writable to {guest})' if writable else str(source))
+        if writable:
+            red, green, blue = (int(channel) for channel in colors['name'][4:-1].split(','))
+            assert colors['name'] != colors['normal'] and red > max(green, blue), colors
+        else:
+            assert colors['name'] == colors['normal'], colors
+
+    headers = browser.find_elements(By.CSS_SELECTOR, f'{draft_picker} .share-permission-table thead th')
+    assert [header.text for header in headers] == ['R', 'W', '']
+    assert [header.get_dom_attribute('aria-label') for header in headers[:2]] == ['Read access', 'Writable']
+    draft_write = browser.find_element(By.CSS_SELECTOR, f'{draft_picker} input[data-share-resource="{source}"]')
+    draft_selection = draft_write.find_element(By.XPATH, './ancestor::tr/td[1]/input')
+    geometry = browser.execute_script("""
+      const row = arguments[0].closest('tr');
+      const picker = row.closest('.share-admin-picker');
+      const original = picker.style.cssText;
+      picker.style.minInlineSize = '910px';
+      try {
+        return {alignment: getComputedStyle(row.cells[2]).textAlign,
+          widths: [14, 20].map(fontSize => {
+            picker.style.fontSize = fontSize + 'px';
+            return [...row.cells].map(cell => cell.getBoundingClientRect().width / fontSize);
+          })};
+      } finally {
+        picker.style.cssText = original;
+      }
+    """, draft_selection)
+    assert geometry['alignment'] == 'start', geometry
+    assert all(read == pytest.approx(1.5, abs=.1) and write == pytest.approx(1.5, abs=.1) and description > 40
+               for read, write, description in geometry['widths']), geometry
+    guest_name = browser.find_element(By.CSS_SELECTOR, f'{draft_picker} input[name=guest]')
+    draft_guest = guest_name.get_property('value')
+    for theme in ('dark', 'light'):
+        browser.execute_script("globalThemeMode = arguments[0]; applyGlobalThemeMode();", theme)
+        check_color(draft_picker, False)
+        draft_write.click()
+        check_color(draft_picker, True, draft_guest)
+        if theme == 'dark':
+            guest_name.clear()
+            guest_name.send_keys('RenamedGuest')
+            draft_guest = 'RenamedGuest'
+            check_color(draft_picker, True, draft_guest)
+        draft_selection.click()
+        check_color(draft_picker, False)
+        assert not draft_write.is_selected()
+        draft_write.click()
+        assert draft_selection.is_selected()
+        check_color(draft_picker, True, draft_guest)
+        draft_write.click()
+        assert draft_selection.is_selected()
+    created = _share_json(browser, '/api/share', {'guest': 'PathGuest', 'minutes': 5, 'limit': 1,
+        'resources': [{'kind': 'file', 'path': str(source), 'writable': False}]})
+    assert created['status'] == 201
+    assert [resource['label'] for resource in created['body']['share']['resources']] == [source.name]
+    _open_share_manager(browser)
+    active = _expand_share(browser, 'PathGuest')
+    rows = active.find_elements(By.CSS_SELECTOR, selector)
+    selected = [row.text for row in rows if browser.execute_script('return arguments[0].control.checked', row)]
+    assert selected == [str(source)]
+    for theme in ('light', 'dark'):
+        browser.execute_script("globalThemeMode = arguments[0]; applyGlobalThemeMode();", theme)
+        check_color(active_picker, False)
+        _toggle_host_permission(browser, str(source))
+        check_color(active_picker, True, 'PathGuest')
+        _toggle_host_permission(browser, str(source))
+        check_color(active_picker, False)
+    _toggle_host_permission(browser, str(extra))
+    resources = _share_json(browser, '/api/share')['body']['shares'][0]['resources']
+    assert {resource['label']: resource['writable'] for resource in resources} == {
+        'sample.txt': False, 'extra.txt': True,
+    }
+    _toggle_host_permission(browser, str(extra))
+    resources = _share_json(browser, '/api/share')['body']['shares'][0]['resources']
+    assert {resource['label']: resource['writable'] for resource in resources} == {
+        'sample.txt': False, 'extra.txt': False,
+    }
+
 
 def _guest_tab_row(driver, label=None, resource_id=None):
     return driver.execute_script("""
@@ -115,6 +462,42 @@ def _expand_share(driver, label):
     return row
 
 
+def _decide_terminal_write(driver, action):
+    selector = '.share-terminal-write-confirmation [role=dialog]'
+    dialog = WebDriverWait(driver, 5).until(lambda d: d.find_element(By.CSS_SELECTOR, selector))
+    assert dialog.get_attribute('aria-label') == 'Allow writable terminal access?'
+    assert 'full permissions of the operating system account' in dialog.text
+    assert 'read, change, or delete' in dialog.text
+    assert driver.switch_to.active_element.get_attribute('data-dialog-action') == 'cancel'
+    dialog.find_element(By.CSS_SELECTOR, f'[data-dialog-action="{action}"]').click()
+    assert not driver.find_elements(By.CSS_SELECTOR, selector)
+
+
+def _share_screenshot_masks(driver, region, selector):
+    style = driver.execute_script("""
+      const style = document.createElement('style');
+      style.textContent = arguments[0] + '::before { animation: none !important; }';
+      document.head.append(style);
+      return style;
+    """, selector)
+    try:
+        visible = Image.open(BytesIO(driver.get_screenshot_as_png())).convert('RGB').crop(region)
+        driver.execute_script("""
+          arguments[0].textContent += arguments[1] + ' { visibility: hidden !important; }';
+        """, style, selector)
+        hidden = Image.open(BytesIO(driver.get_screenshot_as_png())).convert('RGB').crop(region)
+    finally:
+        driver.execute_script("arguments[0].remove()", style)
+    return visible, hidden
+
+
+def _clipboard_has_url(driver, url):
+    return driver.execute_async_script("""
+      const [expected, done] = arguments;
+      navigator.clipboard.readText().then(text => done(text === expected), () => done(false));
+    """, url)
+
+
 def _toggle_host_permission(driver, label):
     selector = f'.share-manager-disclosure[open] input[data-share-resource="{label}"]'
     transition = driver.execute_script("""
@@ -123,6 +506,7 @@ def _toggle_host_permission(driver, label):
       return {checkbox, previous:checkbox.checked, revision:JSON.parse(detail.dataset.key)[0]};
     """, selector)
     transition['checkbox'].click()
+    assert not driver.find_elements(By.CSS_SELECTOR, '.share-terminal-write-confirmation')
     WebDriverWait(driver, 10).until(lambda d: d.execute_script("""
       const checkbox = document.querySelector(arguments[1]);
       const detail = checkbox?.closest('.share-manager-detail');
@@ -130,23 +514,117 @@ def _toggle_host_permission(driver, label):
         checkbox.checked !== arguments[2];
     """, transition['revision'], selector, transition['previous']))
 
-def _set_share_tab(driver, share, filename, checked):
+
+def test_share_creation_clipboard_and_terminal_confirmation(browser, isolated_dev_server_factory, request):
+    server = isolated_dev_server_factory('share-terminal-confirm', tls=True, auth_bypass=False, session_count=2)
+    request.addfinalizer(lambda: browser.get('about:blank'))
+    server.paths.auth_config_path.write_text(browser_auth_yaml(), encoding='utf-8')
+    (server.paths.config_dir / 'settings.yaml').write_bytes(b'general:\n  startup_tips: false\nupdates:\n  notify_level: none\n')
+    login_owner(browser, server)
+    wait = WebDriverWait(browser, 15)
+    wait.until(lambda d: d.execute_script("return !!window.YOmuxShare"))
+    _open_share_manager(browser)
+    draft = '.share-create-disclosure[open] .share-admin'
+
+    def terminal_rows(driver):
+        rows = driver.find_elements(By.CSS_SELECTOR, f'{draft} tbody tr')
+        return rows if len(rows) == 2 else False
+
+    for row in wait.until(terminal_rows):
+        row.find_element(By.CSS_SELECTOR, 'td:first-child input').click()
+    name = browser.find_element(By.CSS_SELECTOR, f'{draft} input[name=guest]').get_property('value')
+    browser.execute_script("""
+      window.__shareTestExec = document.execCommand;
+      document.execCommand = () => false;
+      const refused = () => Promise.reject(new DOMException('Permission denied', 'NotAllowedError'));
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true, value: {write: refused, writeText: refused},
+      });
+    """)
+    try:
+        _button(browser, draft, CREATE_SHARE_LABEL).click()
+        wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, '.share-manager-disclosure'))
+        wait.until(lambda d: 'copy failed' in d.find_element(By.CSS_SELECTOR, '.share-manager-body > [role=status]').text)
+        assert browser.find_element(By.CSS_SELECTOR, '.share-invite input').get_property('value').startswith('https://')
+        assert not browser.find_elements(By.CSS_SELECTOR, draft)
+    finally:
+        browser.execute_script("delete navigator.clipboard; document.execCommand = window.__shareTestExec; delete window.__shareTestExec;")
+    [grant] = _share_json(browser, '/api/share')['body']['shares']
+    first, second = [resource['label'] for resource in grant['resources']]
+    _expand_share(browser, name)
+    selector = f'.share-manager-disclosure[open] input[data-share-resource="{first}"]'
+    browser.find_element(By.CSS_SELECTOR, selector).click()
+    _decide_terminal_write(browser, 'cancel')
+    assert not browser.find_element(By.CSS_SELECTOR, selector).is_selected()
+    browser.find_element(By.CSS_SELECTOR, selector).click()
+    _decide_terminal_write(browser, 'allow')
+    wait.until(lambda d: _share_json(d, '/api/share')['body']['shares'][0].get('terminal_write_confirmed') is True)
+    browser.refresh()
+    wait.until(lambda d: d.execute_script("return !!window.YOmuxShare"))
+    _open_share_manager(browser)
+    wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, '.share-manager-disclosure'))
+    _expand_share(browser, name)
+    assert browser.find_element(By.CSS_SELECTOR, selector).is_selected()
+    _toggle_host_permission(browser, second)
+    _toggle_host_permission(browser, first)
+    _toggle_host_permission(browser, second)
+    _toggle_host_permission(browser, first)
+    browser.find_element(By.CSS_SELECTOR, '.share-create-disclosure > summary').click()
+    new_terminal = wait.until(terminal_rows)[0]
+    new_selection = new_terminal.find_element(By.CSS_SELECTOR, 'td:first-child input')
+    new_write = new_terminal.find_element(By.CSS_SELECTOR, 'input[data-share-resource]')
+    new_write.click()
+    _decide_terminal_write(browser, 'cancel')
+    assert not new_selection.is_selected() and not new_write.is_selected()
+    new_write.click()
+    _decide_terminal_write(browser, 'allow')
+    assert new_selection.is_selected() and new_write.is_selected()
+    terminal_label = new_terminal.find_element(By.TAG_NAME, 'label')
+    draft_name = browser.find_element(By.CSS_SELECTOR, f'{draft} input[name=guest]').get_property('value')
+    assert terminal_label.text == f'{new_write.get_dom_attribute("data-share-resource")} (executable by {draft_name})'
+    assert terminal_label.value_of_css_property('color') != new_terminal.value_of_css_property('color')
+    new_write.click()
+    assert new_selection.is_selected() and not new_write.is_selected()
+    assert terminal_label.text == new_write.get_dom_attribute('data-share-resource')
+    new_name = 'ClipboardGuest'
+    name_field = browser.find_element(By.CSS_SELECTOR, f'{draft} input[name=guest]')
+    name_field.clear()
+    name_field.send_keys(new_name)
+    browser.execute_cdp_cmd('Browser.grantPermissions', {
+        'origin': server.base_url, 'permissions': ['clipboardReadWrite', 'clipboardSanitizedWrite'],
+    })
+    try:
+        _button(browser, draft, CREATE_SHARE_LABEL).click()
+        invite = wait.until(lambda d: d.execute_script("""
+          const row = [...document.querySelectorAll('.share-manager-disclosure')].find(
+            candidate => candidate.querySelector('[data-share-name]').textContent === arguments[0]);
+          return row && !row.open && row.querySelector('.share-invite input')?.value;
+        """, new_name))
+        wait.until(lambda d: _clipboard_has_url(d, invite))
+    finally:
+        browser.execute_cdp_cmd('Browser.resetPermissions', {})
+
+def _set_share_tab(driver, share, filename, checked, *, expect_removed=False):
     row = _expand_share(driver, share)
     snapshot = """
       const detail = arguments[0].querySelector('.share-manager-detail');
       const label = [...detail.querySelectorAll('.share-admin-picker tbody label')]
-        .find(label => label.textContent.split('/').at(-1) === arguments[1]);
-      const input = label?.querySelector('input');
-      return input ? {input, checked: input.checked, disabled: input.disabled,
-        revision: JSON.parse(detail.dataset.key)[0]} : null;
+        .find(label => label.firstElementChild.textContent.split('/').at(-1) === arguments[1]);
+      const input = label?.control;
+      return {input: input ?? null, checked: input?.checked, disabled: input?.disabled,
+        revision: JSON.parse(detail.dataset.key)[0]};
     """
     before = driver.execute_script(snapshot, row, filename)
-    assert before and before['checked'] != checked and not before['disabled'], before
+    assert before['input'] and before['checked'] != checked and not before['disabled'], before
     before['input'].click()
 
     def settled(browser):
         state = browser.execute_script(snapshot, row, filename)
-        return state and state['revision'] > before['revision'] and not state['disabled'] and state['checked'] == checked
+        if state['revision'] <= before['revision']:
+            return False
+        if expect_removed:
+            return state['input'] is None
+        return state['input'] and not state['disabled'] and state['checked'] == checked
 
     WebDriverWait(driver, 10).until(settled, f'{filename} checkbox did not settle at {checked}')
 
@@ -185,10 +663,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
     other.write_text('digraph { other -> resource }\n', encoding='utf-8')
     guests, leases = [], []
     try:
-        browser.get(server.base_url + '/login')
-        browser.find_element(By.NAME, 'username').send_keys('keivenc')
-        browser.find_element(By.NAME, 'password').send_keys('random-password')
-        browser.find_element(By.CSS_SELECTOR, 'form[action="/login"] button[type="submit"]').click()
+        login_owner(browser, server)
         WebDriverWait(browser, 15).until(lambda d: d.execute_script("return typeof openFileInEditor==='function' && !!window.YOmuxShare"))
         opened = browser.execute_async_script("""
           const [path,other,done]=arguments;
@@ -240,7 +715,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
             try{return await shareRequest(url,options);}
             catch(error){if(error.status>=400)window.__shareAPIRequestErrors.push({url:String(url),status:error.status,message:error.message,body:options?.body||''});throw error;}
           };
-          window.__sharePatchResults=[];window.__shareManagerResults=[];window.__shareFetch=window.fetch;
+          window.__sharePatchResults=[];window.__shareManagerResults=[];window.__retiredShareDocuments=[];window.__shareFetch=window.fetch;
           window.fetch=async(url,options)=>{
             const parsed=new URL(url,location.href);
             const response=await window.__shareFetch(url,options);
@@ -249,6 +724,10 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
             }
             if(options?.method==='PATCH' && parsed.pathname==='/api/share' && parsed.searchParams.has('id'))
               window.__sharePatchResults.push({status:response.status,body:options.body,result:await response.clone().text()});
+            if (parsed.pathname === '/api/share/document' && parsed.searchParams.has('session') &&
+                response.status === 409 && (await response.clone().json()).error === 'document_session_changed') {
+              window.__retiredShareDocuments.push(parsed.href);
+            }
             return response;
           };
         """)
@@ -264,27 +743,27 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
             if (['auto', 'scroll'].includes(getComputedStyle(node).overflowY)) scrollOwners.push(node.className);
             if (node.classList.contains('share-manager-body')) break;
           }
-          const cells = [...dialog.querySelectorAll('tbody td:last-child input')];
+          const cells = [...dialog.querySelectorAll('tbody input[data-share-resource]')];
           const style = getComputedStyle(button);
           return {disclosure:dialog.parentElement.localName, action:button.textContent,
             actionBelow:box(button).top >= box(picker).bottom,
             styles:[style.borderTopStyle,style.backgroundColor,style.boxShadow,parseFloat(style.minHeight)], dropdowns:dialog.querySelectorAll('select').length,
             scrollOwners, pickerScrollHeight:picker.scrollHeight, pickerHeight:picker.clientHeight,
             rows:cells.map(node=>({label:node.dataset.shareResource, right:box(node).right,
-              selectionRight:box(node.closest('tr').cells[0].querySelector('label input')).right, checked:node.checked})),
+              selectionRight:box(node.closest('tr').cells[0].querySelector('input')).right, checked:node.checked})),
             aligned:cells.length>=4 && cells.every(node=>Math.abs(box(node).right-box(cells[0]).right)<1 &&
-              box(node).left>box(node.closest('tr').cells[0].querySelector('label input')).right && !node.checked),
+              box(node).left>box(node.closest('tr').cells[0].querySelector('input')).right && !node.checked),
             defaultRead:dialog.querySelectorAll('tbody tr td:first-child input:checked').length>=2};
         """)
-        assert geometry['disclosure'] == 'details' and geometry['action'] == 'Create New Share' and geometry['actionBelow'], geometry
-        assert geometry['styles'][0] == 'solid' and geometry['styles'][1] != 'rgba(0, 0, 0, 0)' and geometry['styles'][2] != 'none' and geometry['styles'][3] >= 40, geometry
+        assert geometry['disclosure'] == 'details' and geometry['action'] == CREATE_SHARE_LABEL and geometry['actionBelow'], geometry
+        assert geometry['styles'][:3] == ['solid', 'rgba(0, 0, 0, 0)', 'none'] and geometry['styles'][3] >= 26, geometry
         assert len(geometry['scrollOwners']) == 1 and 'share-manager-body' in geometry['scrollOwners'][0], geometry
         assert geometry['pickerScrollHeight'] <= geometry['pickerHeight'] + 2, geometry
         assert geometry['aligned'] and geometry['dropdowns'] == 0 and geometry['defaultRead'], geometry
         selected = browser.find_elements(By.CSS_SELECTOR, '.share-admin tbody td:first-child input:checked')
         for checkbox in selected:
             checkbox.click()
-        _button(browser, '.share-admin', 'Create New Share').click()
+        _button(browser, '.share-admin', CREATE_SHARE_LABEL).click()
         assert browser.find_element(By.CSS_SELECTOR, '.share-create-error').text == 'Select at least one tab to share.'
         for checkbox in selected:
             checkbox.click()
@@ -309,6 +788,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         browser.execute_script("const pane=document.querySelector('.share-manager-body');pane.style.removeProperty('max-height');pane.scrollTop=0;")
         browser.save_screenshot(str(tmp_path / 'host-share-dialog.png'))
         limit = browser.find_element(By.CSS_SELECTOR, '.share-admin input[name="limit"]')
+        assert [cell.text for cell in browser.find_elements(By.CSS_SELECTOR, '.share-admin thead th')] == ['R', 'W', '']
         assert browser.find_element(By.CSS_SELECTOR, '.share-admin input[name=minutes]').get_dom_attribute('max') == '1445'
         limit.clear(); limit.send_keys('2')
         for selected_path, permission in ((path, 'W'), (other, 'RO')):
@@ -317,15 +797,29 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
             if not selected.is_selected():
                 selected.click()
             if permission == 'W':
-                row.find_element(By.CSS_SELECTOR, 'td:last-child input').click()
+                row.find_element(By.CSS_SELECTOR, 'input[data-share-resource]').click()
+                assert not browser.find_elements(By.CSS_SELECTOR, '.share-terminal-write-confirmation')
         terminals=[row for row in browser.find_elements(By.CSS_SELECTOR,'.share-admin tbody tr') if row.find_element(By.TAG_NAME,'span').text not in {str(path),str(other)}]
         assert len(terminals)==2
         for row,permission in zip(terminals,('RO','W')):
             row.find_element(By.CSS_SELECTOR,'td:first-child input').click()
             if permission == 'W':
-                row.find_element(By.CSS_SELECTOR,'td:last-child input').click()
+                checkbox = row.find_element(By.CSS_SELECTOR,'input[data-share-resource]')
+                checkbox.click()
+                assert not checkbox.is_selected()
+                _decide_terminal_write(browser, 'cancel')
+                assert not checkbox.is_selected()
+                checkbox.click()
+                _decide_terminal_write(browser, 'allow')
+                assert checkbox.is_selected()
+        other_terminal = terminals[0].find_element(By.CSS_SELECTOR, 'input[data-share-resource]')
+        other_terminal.click()
+        assert not browser.find_elements(By.CSS_SELECTOR, '.share-terminal-write-confirmation')
+        assert other_terminal.is_selected()
+        other_terminal.click()
+        assert not other_terminal.is_selected()
         assert not browser.find_elements(By.NAME, 'terminal-write')
-        _button(browser, '.share-admin', 'Create New Share').click()
+        _button(browser, '.share-admin', CREATE_SHARE_LABEL).click()
         first = WebDriverWait(browser, 10).until(lambda d: d.find_element(By.CSS_SELECTOR, '.share-manager-disclosure'))
         assert not first.get_dom_attribute('open')
         assert first.find_element(By.CSS_SELECTOR, '[data-share-name]').text == default_name
@@ -335,18 +829,19 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         assert not first.find_element(By.CSS_SELECTOR, '.share-manager-detail').is_displayed()
         url = first.find_element(By.CSS_SELECTOR, '.share-invite input[type=url]').get_attribute('value')
         assert not browser.find_elements(By.CSS_SELECTOR, '.share-admin, .share-create-disclosure[open]')
-        copy = first.find_element(By.CSS_SELECTOR, '.share-invite .file-editor-primary-action')
-        copy_style = browser.execute_script("const button=arguments[0],style=getComputedStyle(button);return {label:button.textContent,background:style.backgroundColor,shadow:style.boxShadow,height:button.getBoundingClientRect().height}", copy)
-        assert copy_style['label'] == f'Copy URL to share w/ {default_name}' and copy_style['background'] != 'rgba(0, 0, 0, 0)' and copy_style['shadow'] != 'none' and 24 <= copy_style['height'] <= 32, copy_style
+        copy = first.find_element(By.CSS_SELECTOR, '.share-invite button.share-invite-copy')
+        assert copy.text == f'Copy URL to share w/ {default_name}'
         assert browser.execute_script("""
-          const button = arguments[0], input = button.nextElementSibling;
-          if (input?.type !== 'url') return false;
+          const button = arguments[0], input = button.previousElementSibling;
+          if (input?.type !== 'url' || button.classList.contains('file-editor-primary-action') ||
+              !button.firstElementChild?.matches('svg[data-menu-icon="copy"]')) return false;
           const buttonBox = button.getBoundingClientRect(), inputBox = input.getBoundingClientRect();
           const style = getComputedStyle(input), text = document.createElement('canvas').getContext('2d');
           text.font = style.font;
           const available = input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-          return style.textOverflow === 'ellipsis' && text.measureText(input.value).width > available
-            && buttonBox.right <= inputBox.left && inputBox.width > 0
+          return getComputedStyle(button).backgroundColor === 'rgba(0, 0, 0, 0)'
+            && style.textOverflow === 'ellipsis' && text.measureText(input.value).width > available
+            && inputBox.right <= buttonBox.left && inputBox.width > 0
             && Math.abs((buttonBox.top + buttonBox.bottom) - (inputBox.top + inputBox.bottom)) < 2;
         """, copy)
         assert browser.execute_script(r"""
@@ -355,19 +850,18 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
           if (stop?.textContent !== 'Stop Sharing') return false;
           const timer = countdown.getBoundingClientRect(), button = stop.getBoundingClientRect();
           const stopStyle = getComputedStyle(stop);
-          const [red, green, blue] = stopStyle.backgroundColor.match(/\d+/g).map(Number);
-          return red > green && red > blue && parseFloat(stopStyle.borderRadius) <= 4 &&
+          const [red, green, blue] = stopStyle.borderTopColor.match(/\d+/g).map(Number);
+          return stopStyle.backgroundColor === 'rgba(0, 0, 0, 0)' &&
+            red > green && red > blue && parseFloat(stopStyle.borderRadius) <= 4 &&
             button.width > 0 && button.left >= timer.right && button.top <= timer.bottom && button.bottom >= timer.top;
         """, first)
         browser.execute_cdp_cmd('Browser.grantPermissions', {
             'origin': server.base_url, 'permissions': ['clipboardReadWrite', 'clipboardSanitizedWrite'],
         })
         try:
+            browser.execute_async_script("navigator.clipboard.writeText('clipboard sentinel').then(arguments[0]);")
             copy.click()
-            assert browser.execute_async_script("""
-              const [expected, done] = arguments;
-              navigator.clipboard.readText().then(text => done(text === expected), () => done(false));
-            """, url)
+            WebDriverWait(browser, 8).until(lambda d: _clipboard_has_url(d, url))
             assert not first.get_dom_attribute('open')
         finally:
             browser.execute_cdp_cmd('Browser.resetPermissions', {})
@@ -383,6 +877,15 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
             assert not driver.find_elements(By.CSS_SELECTOR, '.file-editor-review-panel:not([hidden])')
         assert guests[0].title == 'YOmux - keivenc - ' + default_name
         assert guests[1].title == 'YOmux - keivenc - ' + default_name + ' 2'
+        # A guest's writable Tabber rows end in a red "(writable)"; read-only rows add nothing.
+        guest_rows = WebDriverWait(guests[0], 10).until(lambda d: d.execute_script("""
+          const rows = [...document.querySelectorAll('.tabber-normal-row .tabber-normal-primary')]
+            .map(node => [node.textContent.trim(), node.querySelector('.tabber-share-access') && getComputedStyle(node.querySelector('.tabber-share-access')).color]);
+          return rows.length === 4 ? rows : null;
+        """))
+        rows = dict(guest_rows)
+        assert rows['shared.md (writable)'] == 'rgb(220, 38, 38)' and rows['other.dot'] is None, guest_rows
+        assert sum(name.endswith(' (writable)') for name in rows) == 2, guest_rows
         assert guests[1].execute_async_script("""
           const done = arguments[0];
           YOmuxShare.post(shareWorkspace.base + 'chat', {text:'second guest color'}).then(() => done(true), () => done(false));
@@ -413,6 +916,9 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         browser.execute_script('selectSession(arguments[0], {userInitiated:true})', opened['item'])
         browser.execute_script("window.__shareHoldAdmin=false;for(const release of window.__shareAdminHeld.splice(0))release();")
         WebDriverWait(browser, 15).until(lambda d: d.execute_script("return !!panelNodes.get(arguments[0])?._shareConnection && fileState.get(arguments[1]).content.includes('one') && fileState.get(arguments[1]).content.includes('two')", opened['item'], str(path)))
+        # The owner's own Tabber never marks shared rows.
+        assert not browser.execute_script("return buildTabberNormalRows().some(row => row.tabber.normalNameHtml?.includes('tabber-share-access'))")
+        _share_mode(browser, 'edit')
         assert browser.execute_async_script("""
           const id = new URL(arguments[0]).pathname.split('/').pop(), done = arguments[1];
           YOmuxShare.post('/api/share/chat?id=' + encodeURIComponent(id), {text:'owner color'}).then(() => done(true), () => done(false));
@@ -423,14 +929,38 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         """)
         for driver in (browser, guests[0]):
             WebDriverWait(driver, 10).until(lambda d: d.execute_script("""
-              const expected = new Map([['keivenc: ', '215'], [arguments[0] + ': ', '35'], [arguments[0] + ' 2: ', '155']]);
+              const expected = new Map([[arguments[0] + ': ', '180'], [arguments[0] + ' 2: ', '60']]);
+              const colors = new Set();
+              let ownerMatches = false;
               for (const author of document.querySelectorAll('.share-sidebar-chat .share-chat-author')) {
-                if (getComputedStyle(author).getPropertyValue('--share-participant-hue').trim() === expected.get(author.textContent)) {
+                const style = getComputedStyle(author);
+                if (author.textContent === 'keivenc: ') {
+                  ownerMatches ||= style.color === 'rgb(168, 85, 247)';
+                }
+                if (style.getPropertyValue('--share-participant-offset').trim() === expected.get(author.textContent)) {
+                  colors.add(style.color);
                   expected.delete(author.textContent);
                 }
               }
-              return expected.size === 0;
+              return ownerMatches && expected.size === 0 && colors.size === 2 && !colors.has('rgb(168, 85, 247)');
             """, default_name))
+            assert driver.execute_script("""
+              const authors = [...document.querySelectorAll('.share-sidebar-chat .share-chat-author')];
+              const owner = authors.find(node => node.textContent === 'keivenc: ');
+              const guest = authors.find(node => node.textContent === arguments[0] + ': ');
+              const probe = document.createElement('span');
+              probe.style.color = 'var(--active-accent)';
+              document.body.append(probe);
+              const before = getComputedStyle(guest).color;
+              try {
+                applyActiveColor('orange');
+                const accent = getComputedStyle(probe).color, guestColor = getComputedStyle(guest).color;
+                return getComputedStyle(owner).color === accent && guestColor !== accent && guestColor !== before;
+              } finally {
+                applyActiveColor('purple');
+                probe.remove();
+              }
+            """, default_name)
         assert guests[0].execute_async_script("""
           const done = arguments[0];
           const resource = [...shareWorkspace.resources.values()].find(value => value.label === 'shared.md');
@@ -451,41 +981,42 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
               view.dispatch({selection: {anchor: arguments[1] < 0 ? Math.min(last.to, last.from + 1) : arguments[1]}});
             """, editor, offset)
         for driver, name, offset in [(guests[0], 'keivenc', 2), (browser, default_name, -1)]:
-            caret_position = """
-              const matching = [...document.querySelectorAll('.cm-editor .share-remote-caret')]
-                .filter(node => (node.dataset.shareCaretName || node.title) === arguments[0] && node.getClientRects().length);
-              if (matching.length !== 1) return false;
-              const [caret] = matching;
+            selector = f'.cm-editor .share-remote-caret[data-share-caret-name={json.dumps(name)}]'
+            find_caret = """
+              const selectCaret = selector => {
+                const matches = [...document.querySelectorAll(selector)].filter(node => node.getClientRects().length);
+                return matches.length === 1 ? matches[0] : null;
+              };
+            """
+            caret_position = find_caret + """
+              const caret = selectCaret(arguments[0]);
+              if (!caret) return false;
               const view = YOmuxCodeMirror.EditorView.findFromDOM(caret.closest('.cm-editor'));
               const last = view.state.doc.line(view.state.doc.lines);
               if (view.posAtDOM(caret) !== (arguments[1] < 0 ? Math.min(last.to, last.from + 1) : arguments[1])) return false;
               const {left, bottom, width, height} = caret.getBoundingClientRect();
               const x = Math.round(left + 1), y = Math.round(bottom - .45 * parseFloat(getComputedStyle(caret).fontSize));
               return !caret.textContent && width === 0 && height === 0
-                ? {x, y, caret, scale: devicePixelRatio} : false;
+                ? {x, y, scale: devicePixelRatio} : false;
             """
-            caret_point = WebDriverWait(driver, 10).until(lambda d: d.execute_script(caret_position, name, offset))
-            x, y, caret, scale = (caret_point[key] for key in ('x', 'y', 'caret', 'scale'))
+            caret_point = WebDriverWait(driver, 10).until(lambda d: d.execute_script(caret_position, selector, offset))
+            x, y, scale = (caret_point[key] for key in ('x', 'y', 'scale'))
             px, py = round(x * scale), round(y * scale)
             region = (px - 1, py - 2, px + 2, py + 3)
-            visible = Image.open(BytesIO(driver.get_screenshot_as_png())).convert('RGB').crop(region)
-            driver.execute_script("arguments[0].style.visibility='hidden'", caret)
-            try:
-                hidden = Image.open(BytesIO(driver.get_screenshot_as_png())).convert('RGB').crop(region)
-            finally:
-                driver.execute_script("arguments[0].style.removeProperty('visibility')", caret)
+            visible, hidden = _share_screenshot_masks(driver, region, selector)
             assert max(abs(a - b) for before, after in zip(visible.getdata(), hidden.getdata()) for a, b in zip(before, after)) >= 30, (name, x, y)
-            scroll_geometry = """
-              const scroller = arguments[0].closest('.cm-scroller');
-              return [scroller.scrollLeft, scroller.scrollTop, scroller.scrollWidth, scroller.scrollHeight];
+            scroll_geometry = find_caret + """
+              const scroller = selectCaret(arguments[0])?.closest('.cm-scroller');
+              return scroller && [scroller.scrollLeft, scroller.scrollTop, scroller.scrollWidth, scroller.scrollHeight];
             """
             driver.execute_cdp_cmd('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': 2, 'y': 2})
-            before = driver.execute_script(scroll_geometry, caret)
-            label = WebDriverWait(driver, 10).until(lambda d: d.execute_script("""
-              const [name, caret, last] = arguments;
+            before = WebDriverWait(driver, 10).until(lambda d: d.execute_script(scroll_geometry, selector))
+            label = WebDriverWait(driver, 10).until(lambda d: d.execute_script(find_caret + """
+              const [name, selector, last] = arguments;
+              const caret = selectCaret(selector);
               const label = [...document.querySelectorAll('.share-caret-label:not([hidden])')].find(node => node.textContent === name);
               const author = [...document.querySelectorAll('.share-sidebar-chat .share-chat-author')].find(node => node.textContent === name + ': ');
-              if (!label || !author || caret.matches(':hover')) return false;
+              if (!label || !author || !caret || caret.matches(':hover')) return false;
               const rect = label.getBoundingClientRect(), anchor = caret.getBoundingClientRect();
               const color = getComputedStyle(author).color;
               const style = getComputedStyle(label), caretStyle = getComputedStyle(caret);
@@ -493,29 +1024,39 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
               const halfLine = parseFloat(caretStyle.lineHeight) / 2;
               const center = anchor.top - .4 * fontSize + (last ? -halfLine : halfLine);
               const gap = rect.left >= anchor.left ? rect.left - anchor.left : anchor.left - rect.right;
-              return getComputedStyle(author).getPropertyValue('--share-participant-hue').trim() === (name === 'keivenc' ? '215' : '35')
+              return style.opacity === '0.85'
                 && color === getComputedStyle(caret).color && color === style.backgroundColor
-                && svgColorContrastRatio(style.color, style.backgroundColor) >= 4.5
-                && parseFloat(style.borderLeftWidth) >= 2
-                && svgColorContrastRatio(style.borderLeftColor, style.backgroundColor) >= 4.5
+                && style.color === 'rgb(255, 255, 255)'
+                && style.textShadow.includes('rgb(0, 0, 0)')
+                && [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth]
+                  .every(width => width === '1px')
+                && style.borderLeftColor === style.color
                 && style.paddingTop === '0px' && style.paddingLeft === '4px'
                 && Math.abs(gap - 6) <= 1
                 && rect.width > 0 && rect.height > 0 && rect.left >= 0
                 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight
-                && {element:label, bounds:[rect.left, rect.top, rect.right, rect.bottom].map(n=>Math.round(n * devicePixelRatio)),
+                && {bounds:[rect.left, rect.top, rect.right, rect.bottom].map(n=>Math.round(n * devicePixelRatio)),
                     center:(rect.top + rect.bottom) / 2, expectedCenter:center, anchor:anchor.top, last};
-            """, name, caret, offset < 0))
+            """, name, selector, offset < 0))
             assert abs(label['center'] - label['expectedCenter']) <= 1, (name, label)
-            visible = Image.open(BytesIO(driver.get_screenshot_as_png())).convert('RGB').crop(tuple(label['bounds']))
-            driver.execute_script("arguments[0].style.visibility='hidden'", label['element'])
-            try:
-                hidden = Image.open(BytesIO(driver.get_screenshot_as_png())).convert('RGB').crop(tuple(label['bounds']))
-            finally:
-                driver.execute_script("arguments[0].style.removeProperty('visibility')", label['element'])
+            assert driver.execute_script("""
+              const label = [...document.querySelectorAll('.share-caret-label:not([hidden])')]
+                .find(node => node.textContent === arguments[0]);
+              const wasLight = document.body.classList.contains('theme-light');
+              document.body.classList.add('theme-light');
+              try {
+                const style = getComputedStyle(label);
+                return style.color === 'rgb(0, 0, 0)' && style.opacity === '0.85' &&
+                  style.textShadow.includes('rgb(255, 255, 255)');
+              }
+              finally { document.body.classList.toggle('theme-light', wasLight); }
+            """, name)
+            visible, hidden = _share_screenshot_masks(driver, tuple(label['bounds']), '.share-caret-label')
             assert max(abs(a - b) for before_pixel, after_pixel in zip(visible.getdata(), hidden.getdata()) for a, b in zip(before_pixel, after_pixel)) >= 30
-            assert driver.execute_script(scroll_geometry, caret) == before
-            surface, previous, priority, participant_color = driver.execute_script("""
-              const [caret, selector] = arguments;
+            assert driver.execute_script(scroll_geometry, selector) == before
+            surface, previous, priority, participant_color = WebDriverWait(driver, 10).until(lambda d: d.execute_script(find_caret + """
+              const caret = selectCaret(arguments[0]), selector = arguments[1];
+              if (!caret) return false;
               const surface = caret.closest('.file-editor-panel').querySelector(selector);
               const previous = surface.style.getPropertyValue('background-color');
               const priority = surface.style.getPropertyPriority('background-color');
@@ -523,15 +1064,17 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
               surface.style.setProperty('background-color', color, 'important');
               window.dispatchEvent(new Event('resize'));
               return [surface, previous, priority, color];
-            """, caret, '.cm-editor' if driver is browser else '.file-editor-preview-pane-panel')
+            """, selector, '.cm-editor' if driver is browser else '.file-editor-preview-pane-panel'))
             try:
                 WebDriverWait(driver, 5).until(lambda d: d.execute_script("""
-                  const [label, surface, participant] = arguments;
+                  const [name, surface, participant] = arguments;
+                  const label = [...document.querySelectorAll('.share-caret-label:not([hidden])')].find(node => node.textContent === name);
+                  if (!label) return false;
                   const style = getComputedStyle(label);
                   return participant === getComputedStyle(surface).backgroundColor
                     && style.backgroundColor !== participant
-                    && svgColorContrastRatio(style.color, style.backgroundColor) >= 4.5;
-                """, label['element'], surface, participant_color))
+                    && style.color === 'rgb(255, 255, 255)';
+                """, name, surface, participant_color))
             finally:
                 driver.execute_script("""
                   arguments[0].style.setProperty('background-color', arguments[1], arguments[2]);
@@ -541,7 +1084,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         native_logical_key(guests[0], 'z', modifiers=(native_editor_modifier(guests[0]),))
         WebDriverWait(guests[0], 10).until(lambda _: 'one' not in path.read_text() and 'two' in path.read_text())
         browser.execute_script("setFileEditorViewMode(arguments[0],'split',arguments[1])",str(path),opened['item'])
-        WebDriverWait(browser,10).until(lambda d:d.execute_script("const panel=panelNodes.get(arguments[0]);const preview=panel.querySelector('.file-editor-preview-pane-panel');return preview && preview.textContent.includes('shared') && !preview.querySelector('[contenteditable=true]') && !panel._pmView",opened['item']))
+        WebDriverWait(browser,10).until(lambda d:d.execute_script("const panel=panelNodes.get(arguments[0]);return panel._pmView?.editable && panel._pmView.dom.textContent.includes('shared')",opened['item']))
         browser.execute_script("""
           window.__hostPendingFetch=[];window.__hostHold=true;window.__hostFetch=window.fetch;
           window.fetch=(url,options)=>window.__hostHold && String(url).includes('/api/share/document') && options?.method==='POST' ? new Promise((resolve,reject)=>window.__hostPendingFetch.push(()=>window.__hostFetch(url,options).then(resolve,reject))) : window.__hostFetch(url,options);
@@ -568,8 +1111,12 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         assert '127.0.0.1' in browser.find_element(By.CSS_SELECTOR, '[data-share-peers]').text
         WebDriverWait(browser, 10).until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '[data-share-peers] .share-peer-connected')) == 1)
         assert browser.find_element(By.CSS_SELECTOR, '.share-manager-disclosure[open] [data-share-count]').text == '1 / 2 guests'
+        summary = browser.find_element(By.CSS_SELECTOR, '.share-manager-disclosure[open] summary')
+        assert not summary.find_element(By.CSS_SELECTOR, '.share-connected-indicator').is_displayed()
+        summary.find_element(By.CSS_SELECTOR, '[data-share-name]').click()
+        assert summary.find_element(By.CSS_SELECTOR, '[data-share-connected-label]').text == 'Connected'
         assert browser.execute_script(r"""
-          const marker = document.querySelector('.share-manager-disclosure[open] .share-connected-indicator');
+          const marker = document.querySelector('.share-manager-disclosure:not([open]) .share-connected-indicator:not([hidden])');
           const play = marker?.querySelector('.agent-window-status-dot--play');
           const animation = play?.getAnimations()[0];
           if (!animation || marker.hidden) return false;
@@ -585,6 +1132,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
           animation.play();
           return play.getBoundingClientRect().width > 0 && shape.startsWith('polygon(') && g > r && g > b && high > low;
         """)
+        _expand_share(browser, default_name)
         peer_rows = browser.find_elements(By.CSS_SELECTOR, '[data-share-peers] tbody tr')
         disconnected_peer = next(row for row in peer_rows if default_name + ' 2' in row.text)
         connected_peer = next(row for row in peer_rows if default_name in row.text and default_name + ' 2' not in row.text)
@@ -633,14 +1181,14 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         assert name.is_displayed()
         name.clear()
         name.send_keys(' ' + default_name.lower() + ' ')
-        _button(browser, '.share-admin', 'Create New Share').click()
+        _button(browser, '.share-admin', CREATE_SHARE_LABEL).click()
         WebDriverWait(browser, 10).until(lambda d: 'already in use' in d.find_element(By.CSS_SELECTOR, '.share-admin [role=status]').text)
         assert name.is_displayed()
         assert_only_expected_browser_network_error(browser, url=server.base_url + '/api/share', reason='status of 409', count=1)
         name.clear()
         name.send_keys('Second guest')
         next(row for row in browser.find_elements(By.CSS_SELECTOR, '.share-admin tbody tr') if row.text == str(path)).find_element(By.CSS_SELECTOR, 'td:first-child input').click()
-        _button(browser, '.share-admin', 'Create New Share').click()
+        _button(browser, '.share-admin', CREATE_SHARE_LABEL).click()
         WebDriverWait(browser, 10).until(lambda d: not d.find_elements(By.CSS_SELECTOR, '.share-admin'))
         WebDriverWait(browser, 10).until(lambda d: d.execute_script("""
           const pane = document.querySelector('.share-manager-body');
@@ -680,7 +1228,13 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         editor = WebDriverWait(guest, 10).until(_share_editor)
         _share_mode(guest, 'preview')
         assert not editor.is_displayed()
-        WebDriverWait(guest, 5).until(lambda d: not d.find_elements(By.CSS_SELECTOR, '.share-caret-label:not([hidden])'))
+        WebDriverWait(guest, 10).until(lambda d: d.execute_script("""
+          const rendered = selector => [...document.querySelectorAll(selector)]
+            .filter(node => node.getClientRects().length);
+          return rendered('.share-rich-caret[data-share-caret-name="keivenc"]').length === 1 &&
+            rendered('.share-remote-caret[data-share-caret-name="keivenc"]').length === 0 &&
+            rendered('.share-caret-label:not([hidden])').filter(node => node.textContent === 'keivenc').length === 1;
+        """))
         WebDriverWait(guest, 10).until(lambda d: 'host' in d.find_element(By.CSS_SELECTOR, '.file-editor-preview-pane-panel').text)
         _share_mode(guest, 'split')
         layout = guest.execute_script("""
@@ -765,7 +1319,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
                 WebDriverWait(guest, 10).until(lambda d: d.execute_script("""
                   return [...shareWorkspace.resources.values()].some(item => item.label === arguments[0]) === arguments[1];
                 """, filename, checked))
-        _toggle_host_permission(browser, 'shared.md')
+        _toggle_host_permission(browser, str(path))
         WebDriverWait(guest, 10).until(lambda d: d.execute_script("""
           return [...shareWorkspace.resources.values()].some(item => item.label === 'shared.md' && item.writable);
         """))
@@ -857,6 +1411,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         WebDriverWait(guest, 10).until(lambda _: 'resizedproof' in screen.get_property('textContent').splitlines())
         base=url.split('#')[0]+'/'
         _expand_share(browser, default_name)
+        assert not guest.execute_script("return shareWorkspace.resources.get(arguments[0])?.writable", readonly['id'])
         _toggle_host_permission(browser, readonly['label'])
         WebDriverWait(guest, 5).until(lambda d: d.execute_script("return shareWorkspace.resources.get(arguments[0])?.writable", readonly['id']))
         _toggle_host_permission(browser, readonly['label'])
@@ -909,7 +1464,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         _select_guest_tab(guest, 'shared.md')
         _share_mode(guest, 'edit')
         WebDriverWait(guest, 10).until(_share_editor)
-        _toggle_host_permission(browser, 'shared.md')
+        _toggle_host_permission(browser, str(path))
         WebDriverWait(guest, 10).until(lambda d: d.execute_script("return [...shareWorkspace.resources.values()].some(resource=>resource.label==='shared.md' && !resource.writable) && [...document.querySelectorAll('.file-editor-panel .cm-editor')].some(root=>root.getClientRects().length && YOmuxCodeMirror.EditorView.findFromDOM(root).state.readOnly)"))
         _share_mode(guest, 'split')
         read_only = guest.find_element(By.CSS_SELECTOR, '.file-editor-panel .cm-content')
@@ -918,14 +1473,46 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         assert _share_json(guest, base + markdown['id'], {'updates': []})['status'] == 403
         assert _share_json(guest, base + markdown['id'] + '?permission=' + str(markdown['permission_revision']), {'updates': []})['status'] == 409
         assert guest.find_element(By.CSS_SELECTOR, '.share-sidebar-chat').is_displayed()
-        _toggle_host_permission(browser, 'shared.md')
+        _toggle_host_permission(browser, str(path))
         WebDriverWait(guest, 10).until(_share_editor)
         _share_type(guest, 'upgraded')
         WebDriverWait(guest, 10).until(lambda _: 'upgraded' in path.read_text())
-        path.write_text('external editor\n', encoding='utf-8')
-        _select_guest_tab(guest, 'shared.md')
-        _share_type(guest, 'draft')
-        WebDriverWait(guest, 10).until(lambda d: 'paused' in d.find_element(By.CSS_SELECTOR, '.file-editor-status-message').text.lower())
+        # Hold the actual draft POST and background readers so a clean poll
+        # cannot import the external text before the conflicting draft arrives.
+        for driver, endpoint, host_path in (
+            (browser, '/api/share/document', str(path)),
+            (guest, urlsplit(base + markdown['id']).path, None),
+        ):
+            driver.execute_script("""
+              const [endpoint, hostPath] = arguments;
+              const original = window.fetch;
+              const gate = window.__shareConflict = {reads: [], writes: []};
+              gate.restore = () => {
+                window.fetch = original;
+                for (const release of [...gate.reads.splice(0), ...gate.writes.splice(0)]) release();
+              };
+              window.fetch = (input, options) => {
+                const url = new URL(String(input), location.href);
+                if (url.pathname !== endpoint || (hostPath && url.searchParams.get('path') !== hostPath)) {
+                  return original(input, options);
+                }
+                const write = options?.method === 'POST' && JSON.parse(options.body).updates?.length > 0;
+                if (!hostPath && options?.method === 'POST' && !write) return original(input, options);
+                return new Promise((resolve, reject) => {
+                  (write ? gate.writes : gate.reads).push(() => original(input, options).then(resolve, reject));
+                });
+              };
+            """, endpoint, host_path)
+        try:
+            _share_type(guest, 'draft')
+            WebDriverWait(browser, 10).until(lambda d: d.execute_script("return window.__shareConflict.reads.length > 0"))
+            WebDriverWait(guest, 10).until(lambda d: d.execute_script("return window.__shareConflict.writes.length > 0"))
+            path.write_text('external editor\n', encoding='utf-8')
+            guest.execute_script("window.__shareConflict.writes.shift()()")
+            WebDriverWait(guest, 10).until(lambda d: 'paused' in d.find_element(By.CSS_SELECTOR, '.file-editor-status-message').text.lower())
+        finally:
+            for driver in (browser, guest):
+                driver.execute_script("window.__shareConflict.restore()")
         assert path.read_bytes() == b'external editor\n'
         def journaled_draft(driver):
             drafts = _share_json(driver, '/api/share/recovery')['body']['drafts']
@@ -953,7 +1540,7 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
                 !document.querySelector('.share-sidebar-chat');
             """))
         notice = guest.find_element(By.ID, 'shareAccessNotice')
-        assert 'expired or ended' in notice.text and 'YO!share → New Share' in notice.text
+        assert 'expired or ended' in notice.text and 'YO!Share → New Share' in notice.text
         assert not guest.find_element(By.CSS_SELECTOR, '.topbar').is_displayed()
         assert not guest.find_elements(By.CSS_SELECTOR, '#sessionButtons .app-menu')
         patch_failures = browser.execute_script("return window.__sharePatchResults.filter(result=>result.status!==200)")
@@ -963,7 +1550,18 @@ def test_scoped_guests_coedit_chat_reconnect_switch_and_recover(browser, isolate
         api_failures = browser.execute_script("return window.__shareAPIRequestErrors")
         assert not api_failures, api_failures
         WebDriverWait(browser, 10).until(lambda d: not d.find_elements(By.CSS_SELECTOR, '.share-sidebar-conversations, .share-sidebar-chat'))
-        assert_only_expected_browser_network_error(browser,url=server.base_url+'/api/share/chat?id='+grant_id,reason='status of 410',count=None)
+        retired_documents = browser.execute_script("return window.__retiredShareDocuments")
+        expected = [(server.base_url + '/api/share/chat?id=' + grant_id, 410)]
+        expected.extend((url, 409) for url in retired_documents)
+        unexpected = [
+            entry for entry in read_browser_console_log(browser)
+            if entry.get('level') in {'WARNING', 'SEVERE'}
+            and not (entry.get('source') == 'network' and any(
+                entry['message'].startswith(url + ' - Failed to load resource:')
+                and f'status of {status}' in entry['message'] for url, status in expected
+            ))
+        ]
+        assert not unexpected, unexpected
         fresh = _share_json(browser, '/api/share', {'guest':'RestartGuest','minutes':5,'limit':1,'resources':[{'kind':'file','path':str(path),'writable':False}]})
         assert fresh['status'] == 201, fresh
         fresh_url = fresh['body']['url']

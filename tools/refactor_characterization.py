@@ -17,7 +17,8 @@ from typing import Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BASELINE_COMMIT = "e68c0d709a7780ea4896685288c14ec44febec30"
+# A tree ID rather than a commit, so rewording or squashing history keeps the baseline readable.
+BASELINE_TREE = "f53c9b3f89ce952527d22a6ba19cc8304db30187"
 MANIFEST_VERSION = 1
 DEFAULT_MANIFEST = REPO_ROOT / "tests/fixtures/refactor_characterization/v1.json"
 
@@ -316,7 +317,7 @@ def manifest_snapshot(captured: dict[str, object]) -> dict[str, object]:
 
 def compare(expected: dict[str, object], actual: dict[str, object]) -> dict[str, object]:
     differences = {}
-    baseline = capture(git_source(BASELINE_COMMIT))
+    baseline = capture(git_source(BASELINE_TREE))
     for category, expected_values in baseline["inventories"].items():
         actual_values = actual["inventories"].get(category, [])
         removed = sorted(set(expected_values) - set(actual_values))
@@ -331,14 +332,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("capture-baseline", "verify-baseline", "compare-worktree"))
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     args = parser.parse_args(argv)
-    baseline = capture(git_source(BASELINE_COMMIT))
+    baseline = capture(git_source(BASELINE_TREE))
     if args.command == "capture-baseline":
         print(json.dumps(manifest_snapshot(baseline), sort_keys=True, separators=(",", ":")))
         return 0
     expected = json.loads(args.manifest.read_text(encoding="utf-8"))
     if args.command == "verify-baseline":
         equal = expected == manifest_snapshot(baseline)
-        print(json.dumps({"equal": equal, "baseline": BASELINE_COMMIT}, sort_keys=True))
+        print(json.dumps({"equal": equal, "baseline": BASELINE_TREE}, sort_keys=True))
         return 0 if equal else 1
     result = compare(expected, capture(worktree_source()))
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

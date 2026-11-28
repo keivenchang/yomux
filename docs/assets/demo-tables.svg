@@ -1,0 +1,179 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="320" viewBox="0 0 720 320" role="img" aria-labelledby="title desc">
+  <title id="title">The same table in Markdown and HTML ViewEdit</title>
+  <desc id="desc">First plans.md: right-clicking a table cell in ViewEdit opens the table menu, Insert row below adds a row, and typing fills it in the page and the Markdown source. Then plans.html with the same table: typing a new Team price on the rendered page changes the matching td element in the HTML source.</desc>
+  <style>
+    svg { --cycle: 12s; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .md-mono, .html-mono { font-family: ui-monospace, monospace; }
+    .part-md { opacity: 1; }
+    .part-html { opacity: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .part-md { animation: part-md 24s step-end infinite; }
+      .part-html { animation: part-html 24s step-end infinite; }
+    }
+    /* Opacity, not visibility, hides a part: a child that sets its own visibility would show through. plans.md plays for 12s, then plans.html for 12s. Each part loops every 12s, so it starts fresh when shown. */
+    @keyframes part-md { 0% { opacity: 1; } 50%, 100% { opacity: 0; } }
+    @keyframes part-html { 0% { opacity: 0; } 50%, 100% { opacity: 1; } }
+
+    .md-mono { font-family: ui-monospace, monospace; }
+    .md-menu, .md-new-row, .md-filled, .md-pointer { opacity: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .md-menu { animation: md-menu var(--cycle) step-end infinite; }
+      .md-hover { animation: md-hover var(--cycle) step-end infinite; }
+      .md-new-row { animation: md-new-row var(--cycle) step-end infinite; }
+      .md-filled { animation: md-filled var(--cycle) step-end infinite; }
+      .md-pointer { animation: md-pointer var(--cycle) ease-in-out infinite; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .md-menu { opacity: 1; }
+      .md-new-row, .md-filled { opacity: 1; }
+    }
+    /* Right-click at 2s, Insert row below at 5s, the row appears at 5.5s, typing fills it at 7.5s. */
+    @keyframes md-menu { 0% { opacity: 0; } 17% { opacity: 1; } 45%, 100% { opacity: 0; } }
+    @keyframes md-hover { 0% { opacity: 0; } 34% { opacity: 1; } 45%, 100% { opacity: 0; } }
+    @keyframes md-new-row { 0% { opacity: 0; } 46%, 100% { opacity: 1; } }
+    @keyframes md-filled { 0% { opacity: 0; } 62%, 100% { opacity: 1; } }
+    @keyframes md-pointer {
+      0%, 6% { opacity: 0; transform: translate(640px, 300px); }
+      10% { opacity: 1; transform: translate(640px, 300px); }
+      16%, 18% { opacity: 1; transform: translate(502px, 142px); }
+      30%, 42% { opacity: 1; transform: translate(532px, 152px); }
+      50%, 100% { opacity: 0; transform: translate(532px, 152px); }
+    }
+
+
+    .html-mono { font-family: ui-monospace, monospace; }
+    .html-old { visibility: visible; }
+    .html-new { visibility: hidden; }
+    .html-pointer { opacity: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .html-old { animation: html-old var(--cycle) step-end infinite; }
+      .html-new { animation: html-new var(--cycle) step-end infinite; }
+      .html-pointer { animation: html-pointer var(--cycle) ease-in-out infinite; }
+      .html-blink { animation: html-blink 1.2s step-end infinite; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .html-old { visibility: hidden; }
+      .html-new { visibility: visible; }
+    }
+    /* The pointer clicks the Team price at 2s, the new price is typed at 4s, hold to 10s. */
+    @keyframes html-old { 0% { visibility: visible; } 40%, 100% { visibility: hidden; } }
+    @keyframes html-new { 0% { visibility: hidden; } 40%, 100% { visibility: visible; } }
+    @keyframes html-blink { 50% { opacity: 0; } }
+    @keyframes html-pointer {
+      0%, 5% { opacity: 0; transform: translate(640px, 280px); }
+      10% { opacity: 1; transform: translate(640px, 280px); }
+      20%, 28% { opacity: 1; transform: translate(590px, 152px); }
+      34%, 100% { opacity: 0; transform: translate(590px, 152px); }
+    }
+
+  </style>
+  <rect width="720" height="320" rx="12" fill="#11161d"/>
+  <g class="part-md">
+
+  <!-- Source -->
+  <rect x="12" y="12" width="348" height="296" rx="8" fill="#1b222d"/>
+  <rect x="352" y="12" width="8" height="296" fill="#1b222d"/>
+  <text x="28" y="38" font-size="12" font-weight="700" fill="#aab7ca">plans.md · source</text>
+  <g class="md-mono" font-size="12" fill="#cad6e6" style="white-space: pre">
+    <text x="28" y="70" fill="#9db7f9">## Plans</text>
+    <text x="28" y="98">| Plan    | Price |</text>
+    <text x="28" y="118" fill="#8998ad">| ------- | ----- |</text>
+    <text x="28" y="138">| Starter | $9    |</text>
+    <text x="28" y="158">| Team    | $29   |</text>
+    <g class="md-new-row">
+      <rect x="22" y="164" width="328" height="20" rx="3" fill="#304530"/>
+      <text x="28" y="178">|         |       |</text>
+    </g>
+    <g class="md-filled">
+      <rect x="22" y="164" width="328" height="20" rx="3" fill="#304530"/>
+      <text x="28" y="178">| Pro     | $49   |</text>
+    </g>
+  </g>
+  <!-- Rendered page -->
+  <rect x="360" y="12" width="348" height="296" rx="8" fill="#f4f6fa"/>
+  <rect x="360" y="12" width="8" height="296" fill="#f4f6fa"/>
+  <line x1="360" y1="12" x2="360" y2="308" stroke="#3a4759"/>
+  <g transform="translate(50 0)">
+    <text x="330" y="38" font-size="12" font-weight="700" fill="#5b6778">plans.md · ViewEdit</text>
+  <text x="330" y="76" font-size="20" font-weight="700" fill="#1b222d">Plans</text>
+  <g font-size="13" fill="#1b222d">
+    <rect x="330" y="90" width="230" height="26" fill="#e6ebf2" stroke="#d5dce6"/>
+    <rect x="330" y="116" width="230" height="26" fill="#ffffff" stroke="#d5dce6"/>
+    <rect x="330" y="142" width="230" height="26" fill="#ffffff" stroke="#d5dce6"/>
+    <line x1="450" y1="90" x2="450" y2="168" stroke="#d5dce6"/>
+    <text x="340" y="108" font-weight="700">Plan</text><text x="460" y="108" font-weight="700">Price</text>
+    <text x="340" y="134">Starter</text><text x="460" y="134">$9</text>
+    <text x="340" y="160">Team</text><text x="460" y="160">$29</text>
+    <g class="md-new-row">
+      <rect x="330" y="168" width="230" height="26" fill="#ffffff" stroke="#d5dce6"/>
+      <line x1="450" y1="168" x2="450" y2="194" stroke="#d5dce6"/>
+    </g>
+    <g class="md-filled"><text x="340" y="186">Pro</text><text x="460" y="186">$49</text></g>
+  </g>
+  </g>
+  <!-- Context menu -->
+  <g class="md-menu" font-size="11" transform="translate(12 0)">
+    <rect x="458" y="54" width="230" height="234" rx="6" fill="#1f2834" stroke="#3a4759"/>
+    <g fill="#edf1f7">
+      <text x="474" y="76">⇤  Insert column left</text>
+      <text x="474" y="96">⇥  Insert column right</text>
+      <text x="474" y="116">⤒  Insert row above</text>
+      <rect class="md-hover" x="462" y="124" width="222" height="20" rx="4" fill="#304530" opacity="0"/>
+      <text x="474" y="138">⤓  Insert row below</text>
+    </g>
+    <line x1="466" y1="148" x2="680" y2="148" stroke="#3a4759"/>
+    <g fill="#cad6e6">
+      <text x="490" y="166">Align column left</text>
+      <text x="490" y="186">Center column</text>
+      <text x="490" y="206">Align column right</text>
+      <text x="474" y="226">✓</text><text x="490" y="226">Default column alignment</text>
+    </g>
+    <line x1="466" y1="236" x2="680" y2="236" stroke="#3a4759"/>
+    <g fill="#ff8a8a">
+      <text x="474" y="256">Delete row</text>
+      <text x="474" y="276">Delete column</text>
+    </g>
+  </g>
+  <path class="md-pointer" d="M0 0 L0 16 L4 12 L8 20 L11 19 L7 11 L13 11 Z" fill="#1b222d" stroke="#ffffff" stroke-width="1"/>
+</g>
+  <g class="part-html">
+
+  <!-- Source -->
+  <rect x="12" y="12" width="348" height="296" rx="8" fill="#1b222d"/>
+  <rect x="352" y="12" width="8" height="296" fill="#1b222d"/>
+  <text x="28" y="38" font-size="12" font-weight="700" fill="#aab7ca">plans.html · source</text>
+  <g class="html-mono" font-size="11" fill="#cad6e6">
+    <text x="28" y="70"><tspan fill="#9db7f9">&lt;h2&gt;</tspan>Plans<tspan fill="#9db7f9">&lt;/h2&gt;</tspan></text>
+    <text x="28" y="94" fill="#9db7f9">&lt;table&gt;</text>
+    <text x="36" y="114"><tspan fill="#9db7f9">&lt;tr&gt;&lt;th&gt;</tspan>Plan<tspan fill="#9db7f9">&lt;/th&gt;&lt;th&gt;</tspan>Price<tspan fill="#9db7f9">&lt;/th&gt;&lt;/tr&gt;</tspan></text>
+    <text x="36" y="134"><tspan fill="#9db7f9">&lt;tr&gt;&lt;td&gt;</tspan>Starter<tspan fill="#9db7f9">&lt;/td&gt;&lt;td&gt;</tspan>$9<tspan fill="#9db7f9">&lt;/td&gt;&lt;/tr&gt;</tspan></text>
+    <text x="36" y="154" class="html-old"><tspan fill="#9db7f9">&lt;tr&gt;&lt;td&gt;</tspan>Team<tspan fill="#9db7f9">&lt;/td&gt;&lt;td&gt;</tspan>$29<tspan fill="#9db7f9">&lt;/td&gt;&lt;/tr&gt;</tspan></text>
+    <g class="html-new">
+      <rect x="22" y="140" width="328" height="20" rx="3" fill="#304530"/>
+      <text x="36" y="154"><tspan fill="#9db7f9">&lt;tr&gt;&lt;td&gt;</tspan>Team<tspan fill="#9db7f9">&lt;/td&gt;&lt;td&gt;</tspan><tspan fill="#edf1f7">$25</tspan><tspan fill="#9db7f9">&lt;/td&gt;&lt;/tr&gt;</tspan></text>
+    </g>
+    <text x="28" y="178" fill="#9db7f9">&lt;/table&gt;</text>
+  </g>
+  <text x="28" y="290" font-size="11" fill="#8998ad">The source follows every edit on the page.</text>
+  <!-- Rendered page: the same table as the Markdown example -->
+  <rect x="360" y="12" width="348" height="296" rx="8" fill="#f4f6fa"/>
+  <rect x="360" y="12" width="8" height="296" fill="#f4f6fa"/>
+  <line x1="360" y1="12" x2="360" y2="308" stroke="#3a4759"/>
+  <g transform="translate(50 0)">
+    <text x="330" y="38" font-size="12" font-weight="700" fill="#5b6778">plans.html · ViewEdit</text>
+  <text x="330" y="76" font-size="20" font-weight="700" fill="#1b222d">Plans</text>
+  <g font-size="13" fill="#1b222d">
+    <rect x="330" y="90" width="230" height="26" fill="#e6ebf2" stroke="#d5dce6"/>
+    <rect x="330" y="116" width="230" height="26" fill="#ffffff" stroke="#d5dce6"/>
+    <rect x="330" y="142" width="230" height="26" fill="#ffffff" stroke="#d5dce6"/>
+    <line x1="450" y1="90" x2="450" y2="168" stroke="#d5dce6"/>
+    <text x="340" y="108" font-weight="700">Plan</text><text x="460" y="108" font-weight="700">Price</text>
+    <text x="340" y="134">Starter</text><text x="460" y="134">$9</text>
+    <text x="340" y="160">Team</text>
+    <text x="460" y="160" class="html-old">$29</text>
+    <g class="html-new"><text x="460" y="160">$25</text><rect class="html-blink" x="483" y="147" width="2" height="17" fill="#3d7a00"/></g>
+  </g>
+  </g>
+  <path class="html-pointer" d="M0 0 L0 16 L4 12 L8 20 L11 19 L7 11 L13 11 Z" fill="#1b222d" stroke="#ffffff" stroke-width="1"/>
+</g>
+</svg>

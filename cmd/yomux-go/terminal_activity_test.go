@@ -63,7 +63,7 @@ func TestAgentConversationActivityIgnoresTmuxRedraw(t *testing.T) {
 	if err := os.Chtimes(path, modified, modified); err != nil {
 		t.Fatal(err)
 	}
-	conversationTS := agentConversationActivityTS(map[string]any{"kind": "codex", "transcript": path})
+	conversationTS := (&server{}).agentConversationActivityTS(map[string]any{"kind": "codex", "transcript": path})
 	if conversationTS != 1700000000 {
 		t.Fatalf("conversation timestamp included file touch or metadata: %v", conversationTS)
 	}
@@ -77,7 +77,7 @@ func TestAgentConversationActivityIgnoresTmuxRedraw(t *testing.T) {
 		if writeErr != nil || closeErr != nil {
 			t.Fatal(writeErr, closeErr)
 		}
-		if got := agentConversationActivityTS(map[string]any{"kind": "codex", "transcript": path}); got != conversationTS {
+		if got := (&server{}).agentConversationActivityTS(map[string]any{"kind": "codex", "transcript": path}); got != conversationTS {
 			t.Fatalf("%s instructions refreshed conversation age: %v", role, got)
 		}
 	}

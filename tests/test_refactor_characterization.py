@@ -12,7 +12,7 @@ from tools import refactor_characterization as characterization
 def test_checked_in_manifest_reproduces_from_frozen_git_blobs():
     expected = json.loads(characterization.DEFAULT_MANIFEST.read_text(encoding="utf-8"))
     actual = characterization.manifest_snapshot(
-        characterization.capture(characterization.git_source(characterization.BASELINE_COMMIT))
+        characterization.capture(characterization.git_source(characterization.BASELINE_TREE))
     )
 
     assert actual == expected
@@ -32,8 +32,10 @@ def test_manifest_covers_every_required_characterization_domain():
 
 
 def test_comparator_reports_exact_category_additions_and_removals():
-    baseline = characterization.capture(characterization.git_source(characterization.BASELINE_COMMIT))
-    texts = {path: characterization.git_source(characterization.BASELINE_COMMIT).text(path) for path in characterization.ALL_INPUTS}
+    baseline_source = characterization.git_source(characterization.BASELINE_TREE)
+    baseline = characterization.capture(baseline_source)
+    # Gate lanes also read tools/test_plan.py, which is not a fingerprinted input.
+    texts = {path: baseline_source.text(path) for path in (*characterization.ALL_INPUTS, "tools/test_plan.py")}
     texts["yomux_lib/http_routes.py"] = texts["yomux_lib/http_routes.py"].replace('Route("GET",', 'Route("PATCH",', 1)
     changed = characterization.capture(characterization.Source("synthetic", lambda path: texts.get(path, "")))
 

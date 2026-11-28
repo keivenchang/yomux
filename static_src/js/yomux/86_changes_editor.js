@@ -312,10 +312,6 @@ function relocalizeFileEditorPanel(panel, item) {
   renderFileEditorPanel(panel, item, {updateActiveFile: false, captureViewState: false});
   reconfigureCodeMirrorPanelLocale(panel);
   relocalizeVirtualPanelChrome(panel);
-  panel.querySelectorAll('[data-pane-close]').forEach(button => {
-    button.title = paneFrameCloseLabel(item);
-    button.setAttribute('aria-label', button.title);
-  });
   setFileEditorLocalizedLabel(panel, '.file-editor-toolbar', 'editor.toolbar.aria', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-mode-control-panel', 'editor.mode.aria', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-preview-font-panel', 'common.previewFontSize', {title: false});
@@ -668,6 +664,14 @@ function focusFileEditorPanelIfReady(panel, item) {
   if (!pendingFileEditorFocus.has(item) || focusedPanelItem !== item) return false;
   if (fileEditorStateForItem(fileItemPath(item), item)?.loading) return false;
   const mode = editorViewModeFor(fileItemPath(item), item);
+  const focused = document.activeElement;
+  if ((mode === 'split' || mode === 'preview') &&
+      focused?.matches?.('.file-editor-html-preview, .html-viewedit-input') && panel?.contains(focused)) {
+    // The user's preview focus supersedes the earlier deferred focus request.
+    pendingFileEditorFocus.delete(item);
+    explicitFileEditorFocus.delete(item);
+    return true;
+  }
   if (panel?._guestTerminal) panel.querySelector('.share-screen').focus({preventScroll: true});
   else if (mode === 'preview' && panel?._pmView) panel._pmView.focus();
   else if (panel?._cmView && mode !== 'preview') {

@@ -4,16 +4,11 @@
 package finder
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"io"
-	"io/fs"
-	"os"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func isolateSessionFilesTestHome(t *testing.T) {
@@ -21,527 +16,125 @@ func isolateSessionFilesTestHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 }
 
-func TestHistoricalCodexTranscriptCandidatesSelectNewestBoundedSet(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions", "2026", "09", "23")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cutoff := time.Now().Add(-time.Hour)
-	base := time.Now().Add(-time.Minute)
-	newest := filepath.Join(archive, "rollout-zzz.jsonl")
-	for index := 0; index <= maxHistoricalCodexFiles; index++ {
-		name := fmt.Sprintf("rollout-%03d.jsonl", index)
-		if index == maxHistoricalCodexFiles {
-			name = "rollout-zzz.jsonl"
-		}
-		path := filepath.Join(archive, name)
-		if err := os.WriteFile(path, []byte(`{"type":"response_item"}`+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		modified := base.Add(time.Duration(index) * time.Second)
-		if err := os.Chtimes(path, modified, modified); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	transcripts, complete := historicalCodexTranscriptCandidates(context.Background(), archive, cutoff)
-	if !complete {
-		t.Fatal("complete test archive reported an incomplete scan")
-	}
-	if len(transcripts) != maxHistoricalCodexFiles {
-		t.Fatalf("selected historical transcript count = %d, want %d", len(transcripts), maxHistoricalCodexFiles)
-	}
-	if len(transcripts) == 0 || transcripts[0].path != newest {
-		t.Fatalf("newest transcript was excluded from bounded selection: first=%q newest=%q", transcripts[0].path, newest)
-	}
-}
-
-func TestHistoricalCodexTranscriptCandidateTieBreaksByPath(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	modified := time.Now().Add(-time.Minute)
-	for index := 0; index <= maxHistoricalCodexFiles; index++ {
-		path := filepath.Join(archive, fmt.Sprintf("rollout-%03d.jsonl", index))
-		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(path, modified, modified); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	candidates, complete := historicalCodexTranscriptCandidates(context.Background(), archive, time.Time{})
-	if !complete || len(candidates) != maxHistoricalCodexFiles {
-		t.Fatalf("candidate window = %d entries, complete=%t; want %d complete entries", len(candidates), complete, maxHistoricalCodexFiles)
-	}
-	if got, want := filepath.Base(candidates[0].path), "rollout-000.jsonl"; got != want {
-		t.Fatalf("first tied candidate = %q, want %q", got, want)
-	}
-	if got, want := filepath.Base(candidates[len(candidates)-1].path), "rollout-255.jsonl"; got != want {
-		t.Fatalf("last tied candidate = %q, want %q", got, want)
-	}
-}
-
-func TestHistoricalCodexTranscriptIsOpenedOnceAcrossSessionCWDs(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions", "2026", "09", "23")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	firstCWD := filepath.Join(t.TempDir(), "first")
-	secondCWD := filepath.Join(t.TempDir(), "second")
-	for _, cwd := range []string{firstCWD, secondCWD} {
-		if err := os.MkdirAll(cwd, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	transcript := []byte(`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add note.txt"}}}` + "\n")
-	path := filepath.Join(archive, "rollout-current.jsonl")
-	if err := os.WriteFile(path, transcript, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	modified := time.Now()
-	if err := os.Chtimes(path, modified, modified); err != nil {
-		t.Fatal(err)
-	}
-	explicitTranscript := []byte(`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add explicit.txt","workdir":"` + secondCWD + `"}}}` + "\n")
-	explicitPath := filepath.Join(archive, "rollout-explicit.jsonl")
-	if err := os.WriteFile(explicitPath, explicitTranscript, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	explicitModified := modified.Add(-time.Second)
-	if err := os.Chtimes(explicitPath, explicitModified, explicitModified); err != nil {
-		t.Fatal(err)
-	}
-	openCalls := 0
-	parsedBytes := 0
-	openFile := func(path string) (io.ReadCloser, error) {
-		openCalls++
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		parsedBytes += len(data)
-		return io.NopCloser(bytes.NewReader(data)), nil
-	}
-	transcripts := newHistoricalCodexAttributionCache()
-	walkCalls := 0
-	archiveVisits := 0
-	walk := func(root string, visit fs.WalkDirFunc) error {
-		walkCalls++
-		return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-			archiveVisits++
-			return visit(path, entry, err)
-		})
-	}
-	collect := func(cwds []string) map[string]*sessionFileAttribution {
-		return collectHistoricalCodexAttributionsWithWalker(context.Background(), transcripts, archive, cwds, time.Now().Add(-time.Hour), map[string]bool{}, openFile, walk)
-	}
-	changes := collect([]string{firstCWD, secondCWD})
-	wantParsedBytes := len(transcript) + len(explicitTranscript)
-	if openCalls != 2 || parsedBytes != wantParsedBytes {
-		t.Fatalf("historical archive reads = %d, parsed bytes = %d, want two opens and %d bytes", openCalls, parsedBytes, wantParsedBytes)
-	}
-	if walkCalls != 1 || archiveVisits != 3 {
-		t.Fatalf("historical archive enumeration = %d walks, %d visits; want one walk and three visits for two CWDs", walkCalls, archiveVisits)
-	}
-	if changes[filepath.Join(firstCWD, "note.txt")] == nil {
-		t.Fatalf("historical relative edit was not assigned to the first matching CWD: %#v", changes)
-	}
-	if changes[filepath.Join(secondCWD, "note.txt")] != nil {
-		t.Fatalf("relative edit was incorrectly duplicated into another CWD: %#v", changes)
-	}
-	if changes[filepath.Join(secondCWD, "explicit.txt")] == nil {
-		t.Fatalf("explicit workdir edit did not select its matching CWD: %#v", changes)
-	}
-	firstPath := filepath.Join(firstCWD, "note.txt")
-	changes[firstPath].windows[0]["kind"] = "caller mutation"
-	cachedChanges := collect([]string{firstCWD, secondCWD})
-	if openCalls != 2 || parsedBytes != wantParsedBytes || cachedChanges[firstPath] == nil {
-		t.Fatalf("unchanged historical scan reopened transcripts: opens=%d bytes=%d changes=%#v", openCalls, parsedBytes, cachedChanges)
-	}
-	if walkCalls != 2 || archiveVisits != 6 {
-		t.Fatalf("second historical collection enumeration = %d walks, %d visits; want one walk for this collection", walkCalls, archiveVisits)
-	}
-	if got := stringValue(cachedChanges[firstPath].windows[0]["kind"]); got != "codex" {
-		t.Fatalf("caller mutation changed cached historical attribution: kind=%q", got)
-	}
-	thirdCWD := filepath.Join(t.TempDir(), "third")
-	if err := os.MkdirAll(thirdCWD, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	otherCWDChanges := collect([]string{thirdCWD, firstCWD, secondCWD})
-	if openCalls != 2 || parsedBytes != wantParsedBytes || otherCWDChanges[filepath.Join(thirdCWD, "note.txt")] == nil {
-		t.Fatalf("new CWD projection reopened or missed cached transcripts: opens=%d bytes=%d changes=%#v", openCalls, parsedBytes, otherCWDChanges)
-	}
-	updatedTranscript := append(transcript, []byte(`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add newer.txt"}}}`+"\n")...)
-	if err := os.WriteFile(path, updatedTranscript, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	updatedTime := modified.Add(time.Second)
-	if err := os.Chtimes(path, updatedTime, updatedTime); err != nil {
-		t.Fatal(err)
-	}
-	updatedChanges := collect([]string{firstCWD, secondCWD})
-	if openCalls != 3 || updatedChanges[filepath.Join(firstCWD, "newer.txt")] == nil {
-		t.Fatalf("updated transcript was not rescanned: opens=%d changes=%#v", openCalls, updatedChanges)
-	}
-}
-
-func TestHistoricalCodexRecordedCWDWinsOverFallbackOrder(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	firstCWD := filepath.Join(t.TempDir(), "first")
-	recordedCWD := filepath.Join(t.TempDir(), "recorded")
-	for _, cwd := range []string{firstCWD, recordedCWD} {
-		if err := os.MkdirAll(cwd, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	path := filepath.Join(archive, "rollout-recorded.jsonl")
-	transcript := strings.Join([]string{
-		`{"type":"session_meta","payload":{"cwd":"` + recordedCWD + `"}}`,
-		`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add note.txt"}}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(transcript), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	changes := collectHistoricalCodexAttributionsWithCache(
-		context.Background(), newHistoricalCodexAttributionCache(), archive,
-		[]string{firstCWD, recordedCWD}, time.Time{}, map[string]bool{},
-		func(path string) (io.ReadCloser, error) { return os.Open(path) },
-	)
-	if changes[filepath.Join(recordedCWD, "note.txt")] == nil {
-		t.Fatalf("recorded CWD attribution missing: %#v", changes)
-	}
-	if changes[filepath.Join(firstCWD, "note.txt")] != nil {
-		t.Fatalf("fallback CWD won over recorded transcript CWD: %#v", changes)
-	}
-}
-
-func TestHistoricalCodexRecordedCWDOutsideSessionRootsIsIgnored(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sessionCWD := filepath.Join(t.TempDir(), "session")
-	otherCWD := filepath.Join(t.TempDir(), "other")
-	for _, cwd := range []string{sessionCWD, otherCWD} {
-		if err := os.MkdirAll(cwd, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	path := filepath.Join(archive, "rollout-other-session.jsonl")
-	transcript := strings.Join([]string{
-		`{"type":"session_meta","payload":{"cwd":"` + otherCWD + `"}}`,
-		`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add note.txt"}}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(transcript), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	changes := collectHistoricalCodexAttributionsWithCache(
-		context.Background(), newHistoricalCodexAttributionCache(), archive,
-		[]string{sessionCWD}, time.Time{}, map[string]bool{},
-		func(path string) (io.ReadCloser, error) { return os.Open(path) },
-	)
-	if len(changes) != 0 {
-		t.Fatalf("unrelated recorded CWD leaked into session attribution: %#v", changes)
-	}
-}
-
-func TestHistoricalCodexExplicitWorkdirSurvivesUnrelatedRecordedCWD(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sessionCWD := filepath.Join(t.TempDir(), "session")
-	otherCWD := filepath.Join(t.TempDir(), "other")
-	for _, cwd := range []string{sessionCWD, otherCWD} {
-		if err := os.MkdirAll(cwd, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	path := filepath.Join(archive, "rollout-explicit.jsonl")
-	transcript := strings.Join([]string{
-		`{"type":"session_meta","payload":{"cwd":"` + otherCWD + `"}}`,
-		`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add note.txt","workdir":"` + sessionCWD + `"}}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(transcript), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	changes := collectHistoricalCodexAttributionsWithCache(
-		context.Background(), newHistoricalCodexAttributionCache(), archive,
-		[]string{sessionCWD}, time.Time{}, map[string]bool{},
-		func(path string) (io.ReadCloser, error) { return os.Open(path) },
-	)
-	if changes[filepath.Join(sessionCWD, "note.txt")] == nil {
-		t.Fatalf("explicit workdir attribution missing: %#v", changes)
-	}
-}
-
-func TestHistoricalCodexFailedOpenDoesNotConsumeCandidate(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cwd := t.TempDir()
-	path := filepath.Join(archive, "rollout-retry.jsonl")
-	if err := os.WriteFile(path, []byte(`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add note.txt"}}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	seen := map[string]bool{}
-	cache := newHistoricalCodexAttributionCache()
-	failed := collectHistoricalCodexAttributionsWithCache(context.Background(), cache, archive, []string{cwd}, time.Time{}, seen, func(string) (io.ReadCloser, error) {
-		return nil, os.ErrPermission
-	})
-	if len(failed) != 0 || seen[path] {
-		t.Fatalf("failed candidate was consumed: changes=%#v seen=%#v", failed, seen)
-	}
-	retried := collectHistoricalCodexAttributionsWithCache(context.Background(), cache, archive, []string{cwd}, time.Time{}, seen, func(path string) (io.ReadCloser, error) {
-		return os.Open(path)
-	})
-	if retried[filepath.Join(cwd, "note.txt")] == nil || !seen[path] {
-		t.Fatalf("retry did not consume the completed candidate: changes=%#v seen=%#v", retried, seen)
-	}
-}
-
-func TestHistoricalCodexAttributionCacheReusesFullCandidateWindow(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cwd := t.TempDir()
-	openCalls := 0
-	openFile := func(path string) (io.ReadCloser, error) {
-		openCalls++
-		return os.Open(path)
-	}
-	transcripts := newHistoricalCodexAttributionCache()
-	for index := 0; index < maxHistoricalCodexFiles; index++ {
-		path := filepath.Join(archive, fmt.Sprintf("rollout-%02d.jsonl", index))
-		transcript := []byte(fmt.Sprintf(`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add note-%02d.txt"}}}`+"\n", index))
-		if err := os.WriteFile(path, transcript, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		modified := time.Unix(1_700_000_000+int64(index), 0)
-		if err := os.Chtimes(path, modified, modified); err != nil {
-			t.Fatal(err)
-		}
-	}
-	collect := func() {
-		t.Helper()
-		collectHistoricalCodexAttributionsWithCache(context.Background(), transcripts, archive, []string{cwd}, time.Unix(1_600_000_000, 0), map[string]bool{}, openFile)
-	}
-	collect()
-	collect()
-	if openCalls != maxHistoricalCodexFiles {
-		t.Fatalf("repeated scan reopened cached candidate window: opens=%d, want %d", openCalls, maxHistoricalCodexFiles)
-	}
-}
-
-func TestHistoricalCodexAttributionCacheKeepsEmptyTranscriptReads(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(archive, "rollout-empty.jsonl")
-	if err := os.WriteFile(path, []byte(`{"type":"message","payload":{"text":"no file operation"}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cwd := t.TempDir()
-	openCalls := 0
-	openFile := func(path string) (io.ReadCloser, error) {
-		openCalls++
-		return os.Open(path)
-	}
-	transcripts := newHistoricalCodexAttributionCache()
-	collect := func() {
-		t.Helper()
-		collectHistoricalCodexAttributionsWithCache(context.Background(), transcripts, archive, []string{cwd}, time.Time{}, map[string]bool{}, openFile)
-	}
-	collect()
-	collect()
-	if openCalls != 1 {
-		t.Fatalf("unchanged no-operation transcript opened %d times, want one", openCalls)
-	}
-}
-
-func TestHistoricalCodexAttributionCacheKeepsLargeLowWeightTranscript(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cwd := t.TempDir()
-	path := filepath.Join(archive, "rollout-large.jsonl")
-	largeLine := append([]byte("{\"type\":\"message\",\"payload\":{\"text\":\""), []byte(strings.Repeat("x", 2*1024*1024))...)
-	largeLine = append(largeLine, []byte("\"}}\n")...)
-	operationLine := []byte("{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"git add note.txt\",\"workdir\":\"" + cwd + "\"}}}\n")
-	transcript := append(largeLine, operationLine...)
-	if err := os.WriteFile(path, transcript, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	openCalls := 0
-	openFile := func(path string) (io.ReadCloser, error) {
-		openCalls++
-		return os.Open(path)
-	}
-	transcripts := newHistoricalCodexAttributionCache()
-	collect := func() map[string]*sessionFileAttribution {
-		t.Helper()
-		return collectHistoricalCodexAttributionsWithCache(context.Background(), transcripts, archive, []string{cwd}, time.Time{}, map[string]bool{}, openFile)
-	}
-	for iteration := 0; iteration < 2; iteration++ {
-		changes := collect()
-		if changes[filepath.Join(cwd, "note.txt")] == nil {
-			t.Fatalf("large transcript attribution is missing on collection %d", iteration+1)
-		}
-	}
-	if openCalls != 1 || transcripts.records.Len() != 1 || transcripts.bytes == 0 {
-		t.Fatalf("large low-weight transcript cache = opens:%d records:%d bytes:%d; want one open and one bounded entry", openCalls, transcripts.records.Len(), transcripts.bytes)
-	}
-}
-
-func TestHistoricalCodexAttributionCacheBoundsRetainedBytes(t *testing.T) {
-	transcripts := newHistoricalCodexAttributionCache()
-	halfBudget := int64(maxHistoricalCodexAttributionCacheBytes / 2)
-	cacheInfo := func(name string, modified time.Time) os.FileInfo {
-		t.Helper()
-		path := filepath.Join(t.TempDir(), name)
-		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(path, modified, modified); err != nil {
-			t.Fatal(err)
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return info
-	}
-	base := time.Unix(1_700_000_000, 0)
-	transcripts.set("first", historicalCodexAttributionRecord{info: cacheInfo("first", base), weight: halfBudget})
-	transcripts.set("second", historicalCodexAttributionRecord{info: cacheInfo("second", base.Add(time.Second)), weight: halfBudget})
-	transcripts.records.Get("first")
-	transcripts.set("third", historicalCodexAttributionRecord{info: cacheInfo("third", base.Add(2*time.Second)), weight: halfBudget})
-	if transcripts.bytes != maxHistoricalCodexAttributionCacheBytes || transcripts.records.Len() != 2 {
-		t.Fatalf("cache retained bytes/records = %d/%d, want %d/2", transcripts.bytes, transcripts.records.Len(), maxHistoricalCodexAttributionCacheBytes)
-	}
-	if _, ok := transcripts.records.Peek("first"); !ok {
-		t.Fatal("cache evicted a recently read transcript")
-	}
-	if _, ok := transcripts.records.Peek("second"); ok {
-		t.Fatal("cache retained the least recently used transcript")
-	}
-	transcripts.set("oversized", historicalCodexAttributionRecord{weight: maxHistoricalCodexAttributionCacheBytes + 1})
-	if transcripts.bytes != maxHistoricalCodexAttributionCacheBytes || transcripts.records.Len() != 2 {
-		t.Fatalf("oversized record changed cache bounds: bytes=%d records=%d", transcripts.bytes, transcripts.records.Len())
-	}
-}
-
-type interruptedTranscriptReader struct {
-	data []byte
-	done bool
-}
-
-func (r *interruptedTranscriptReader) Read(buffer []byte) (int, error) {
-	if !r.done {
-		r.done = true
-		return copy(buffer, r.data), nil
-	}
-	return 0, io.ErrUnexpectedEOF
-}
-
-func TestHistoricalCodexTranscriptReadErrorIsNotCached(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "sessions")
-	if err := os.MkdirAll(archive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cwd := t.TempDir()
-	transcript := []byte(`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":{"cmd":"git add note.txt"}}}` + "\n")
-	path := filepath.Join(archive, "rollout-current.jsonl")
-	if err := os.WriteFile(path, transcript, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
+// indexSessionFileAgents attaches an attribution index that has fully prepared each agent's
+// transcript. Production always queries this index; there is no direct transcript scan.
+func indexSessionFileAgents(t *testing.T, service *Service, agents ...SessionFileAgent) *AttributionIndex {
+	t.Helper()
+	index, err := OpenAttributionIndex(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate := historicalCodexTranscriptCandidate{path: path, mtime: info.ModTime(), info: info}
-	cache := newHistoricalCodexAttributionCache()
-	openCalls := 0
-	openFile := func(path string) (io.ReadCloser, error) {
-		openCalls++
-		if openCalls == 1 {
-			return io.NopCloser(&interruptedTranscriptReader{data: transcript}), nil
+	t.Cleanup(func() {
+		if closeErr := index.Close(); closeErr != nil {
+			t.Error(closeErr)
 		}
-		return io.NopCloser(bytes.NewReader(transcript)), nil
+	})
+	for _, agent := range agents {
+		_, _, complete, indexErr := index.index(context.Background(), AttributionSource{Path: agent.Transcript, Kind: agent.Kind}, 8<<20, 4096)
+		if indexErr != nil || !complete {
+			t.Fatalf("index %s: complete=%t err=%v", agent.Transcript, complete, indexErr)
+		}
 	}
-	if got, complete := cache.scan(context.Background(), candidate, openFile); complete || len(got.operations) != 0 {
-		t.Fatalf("partial transcript operations = %#v, want empty", got)
+	index.progress = AttributionProgress{State: "ready"}
+	service.SetAttributionIndex(index)
+	return index
+}
+
+func TestCodexPatchAndCommandPathsPreferRecordedWorkdirOverAgentDirectory(t *testing.T) {
+	start := filepath.Join(t.TempDir(), "yomux-checkout")
+	workdir := filepath.Join(t.TempDir(), "worked-repo")
+	changes := make(map[string]*sessionFileAttribution)
+	agent := SessionFileAgent{Kind: "codex", CWD: start}
+	applyCodexTranscriptOperations(changes, agent, 1, codexTranscriptOperations{
+		patches:  []transcriptFileOperation{{path: "patched.txt", marker: "M"}},
+		commands: []codexShellCommand{{command: "git add staged.txt", cwd: workdir}},
+	})
+	applyCodexTranscriptOperations(changes, agent, 1, codexTranscriptOperations{
+		patches:  []transcriptFileOperation{{path: "unrecorded.txt", marker: "A"}},
+		commands: []codexShellCommand{{command: "true", cwd: "sub"}},
+	})
+	for _, want := range []string{
+		filepath.Join(workdir, "patched.txt"),
+		filepath.Join(workdir, "staged.txt"),
+		filepath.Join(start, "sub", "unrecorded.txt"),
+	} {
+		if changes[want] == nil {
+			t.Fatalf("attributions = %v, want %s", attributionPaths(changes), want)
+		}
 	}
-	if got, complete := cache.scan(context.Background(), candidate, openFile); !complete || projectHistoricalCodexOperations(context.Background(), got.operations, cwd, info.ModTime().Unix())[filepath.Join(cwd, "note.txt")] == nil {
-		t.Fatalf("complete retry did not produce the historical file attribution: %#v", got)
-	}
-	if openCalls != 2 {
-		t.Fatalf("transcript open calls = %d, want failed read and uncached retry", openCalls)
+	if len(changes) != 3 {
+		t.Fatalf("attributions = %v, want exactly three paths", attributionPaths(changes))
 	}
 }
 
-func TestHistoricalCodexScanStopsWhenContextCancelsDuringLargeLine(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	reader := &cancelAfterChunkReader{cancel: cancel, data: []byte(strings.Repeat("x", 256*1024))}
-	_, _, complete := scanHistoricalCodexOperations(ctx, reader)
-	if complete {
-		t.Fatal("large transcript scan completed after cancellation")
+func attributionPaths(changes map[string]*sessionFileAttribution) []string {
+	paths := make([]string, 0, len(changes))
+	for path := range changes {
+		paths = append(paths, path)
 	}
-	if ctx.Err() != context.Canceled {
-		t.Fatalf("scan context error = %v, want cancellation", ctx.Err())
+	return paths
+}
+
+// Real Codex code-mode "exec" records from ~/.codex/sessions (2026-11-26). Only identifiers,
+// timestamps, and absolute paths are redacted; the workdir is substituted per test. The first
+// uses a bare workdir key and the second a quoted one, as current Codex writes both.
+const codexCodeModeBareWorkdirRecord = `{"timestamp":"2026-11-26T19:11:04.919Z","ordinal":9312,"type":"response_item","payload":{"type":"custom_tool_call","id":"ctc_redacted","status":"completed","call_id":"call_redacted","name":"exec","input":"text(await tools.exec_command({cmd:\"if rg -n '^(<<<<<<<|=======|>>>>>>>)' acceptance/utils/tests/test_ci_coverage.py; then exit 1; fi && git add acceptance/utils/tests/test_ci_coverage.py && GIT_EDITOR=true git -c commit.gpgsign=true rebase --continue && /opt/tools/bin/clean-commit.sh && python3 /opt/tools/bin/git-delivery-preflight.py --delivery-base origin/main && git status --short --branch && git log --oneline --decorate --max-count=4\",workdir:\"__WORKDIR__\",yield_time_ms:1000,max_output_tokens:1000}))\n","internal_chat_message_metadata_passthrough":{"turn_id":"redacted","create_time":1795720261.7341475}},"metadata":{"history_sequence":4076,"sampled_through_sequence":4074,"client_authored":false,"model_search_state":"search_mcp"}}`
+
+const codexCodeModeQuotedWorkdirRecord = `{"timestamp":"2026-11-26T19:32:40.656Z","ordinal":9922,"type":"response_item","payload":{"type":"custom_tool_call","id":"ctc_redacted","status":"completed","call_id":"call_redacted","name":"exec","input":"const r = await tools.exec_command({cmd:\"git diff --check && git add -- acceptance/utils/tests/test_browser_smoke.py && git diff --cached --check && git diff --cached -- acceptance/utils/tests/test_browser_smoke.py && git commit -S --signoff -m \\\"test: fix browser smoke ActionChains import\\\"\",\"workdir\":\"__WORKDIR__\",\"yield_time_ms\":1000,\"max_output_tokens\":2000});\ntext(JSON.stringify(r));\n","internal_chat_message_metadata_passthrough":{"turn_id":"redacted","create_time":1795721558.5467267}},"metadata":{"history_sequence":4346,"sampled_through_sequence":4342,"client_authored":false,"model_search_state":"search_mcp"}}`
+
+func TestCodexCodeModeExecAttributesCommandsLikeExecCommand(t *testing.T) {
+	start := filepath.Join(t.TempDir(), "yomux-checkout")
+	workdir := filepath.Join(t.TempDir(), "parser-toolkits")
+	agent := SessionFileAgent{Kind: "codex", CWD: start}
+	for record, want := range map[string]string{
+		codexCodeModeBareWorkdirRecord:   filepath.Join(workdir, "acceptance", "utils", "tests", "test_ci_coverage.py"),
+		codexCodeModeQuotedWorkdirRecord: filepath.Join(workdir, "acceptance", "utils", "tests", "test_browser_smoke.py"),
+	} {
+		line := []byte(strings.ReplaceAll(record, "__WORKDIR__", workdir))
+		changes := make(map[string]*sessionFileAttribution)
+		applyCodexTranscriptOperations(changes, agent, 1, codexFileOperations.Read(nil, line))
+		if len(changes) != 1 || changes[want] == nil || changes[want].status != "M" {
+			t.Fatalf("code-mode attributions = %v, want only %s", attributionPaths(changes), want)
+		}
+
+		// The same command in the older function_call format attributes identically.
+		operations := codexFileOperations.Read(nil, line)
+		legacy, err := json.Marshal(codexExecRecordForTest(operations.commands[0].command, operations.commands[0].cwd))
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacyChanges := make(map[string]*sessionFileAttribution)
+		applyCodexTranscriptOperations(legacyChanges, agent, 1, codexFileOperations.Read(nil, legacy))
+		if len(legacyChanges) != 1 || legacyChanges[want] == nil || legacyChanges[want].status != changes[want].status {
+			t.Fatalf("function_call attributions = %v, want the code-mode result %s", attributionPaths(legacyChanges), want)
+		}
 	}
 }
 
-func TestActiveSessionTranscriptScanStopsOnCancellationAndDiscardsPartialResults(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cwd := t.TempDir()
-	line := []byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"partial.txt"}}]}}` + "\n")
-	reader := cancelAfterChunkReader{cancel: cancel, data: append(line, []byte(strings.Repeat("x", 256*1024))...)}
-	changes, complete := scanSessionTranscriptReader(ctx, &reader, SessionFileAgent{Kind: "claude", CWD: cwd}, time.Now().Unix())
-	if complete || changes != nil {
-		t.Fatalf("cancelled active transcript scan = (%#v, complete=%t), want no partial result", changes, complete)
+func TestCodexCodeModeCommandsReadOnlyLiteralArguments(t *testing.T) {
+	script := "const dir = '/x';\n" +
+		"await tools.exec_command({cmd:`git rm old.txt`, workdir:'/repo/a', yield_time_ms:1000});\n" +
+		"await tools.exec_command({cmd, workdir});\n" +
+		"await tools.exec_command({cmd:i===2?\"git add a\":\"git add b\", workdir:\"/repo/b\"});\n" +
+		"await tools.exec_command({\n  \"cmd\": \"git mv \\\"a b.txt\\\" c.txt\",\n  max_output_tokens: f({x: [1, 2]}),\n  \"workdir\": \"/repo/\\u0063\"\n});\n" +
+		"await tools.exec_command(args);\n"
+	got := codexCodeModeCommands(script)
+	want := []codexShellCommand{
+		{command: "git rm old.txt", cwd: "/repo/a"},
+		{command: `git mv "a b.txt" c.txt`, cwd: "/repo/c"},
 	}
-	if ctx.Err() != context.Canceled {
-		t.Fatalf("scan context error = %v, want cancellation", ctx.Err())
+	if len(got) != len(want) {
+		t.Fatalf("commands = %#v, want %#v", got, want)
 	}
-}
-
-func TestActiveSessionTranscriptScanDiscardsPartialResultsOnReadError(t *testing.T) {
-	cwd := t.TempDir()
-	line := []byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"partial.txt"}}]}}` + "\n")
-	reader := &interruptedTranscriptReader{data: line}
-	changes, complete := scanSessionTranscriptReader(context.Background(), reader, SessionFileAgent{Kind: "claude", CWD: cwd}, time.Now().Unix())
-	if complete || changes != nil {
-		t.Fatalf("failed active transcript scan = (%#v, complete=%t), want no partial result", changes, complete)
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("command %d = %#v, want %#v", index, got[index], want[index])
+		}
 	}
 }
 
-type cancelAfterChunkReader struct {
-	cancel context.CancelFunc
-	data   []byte
-	done   bool
-}
-
-func (reader *cancelAfterChunkReader) Read(buffer []byte) (int, error) {
-	if reader.done {
-		return 0, io.EOF
-	}
-	reader.done = true
-	count := copy(buffer, reader.data)
-	reader.cancel()
-	return count, nil
+func codexExecRecordForTest(command, workdir string) map[string]any {
+	return map[string]any{"type": "response_item", "payload": map[string]any{
+		"type": "function_call", "name": "exec_command", "arguments": map[string]any{"cmd": command, "workdir": workdir},
+	}}
 }

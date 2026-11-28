@@ -34,7 +34,7 @@ function normalPaneControlsAreVisible(item) {
   const actions = '.dockview-pane-header-actions';
   return !visible(document.querySelector(`.dockview-pane-tab[data-pane-tab="${key}"]`))
     && visible(document.querySelector(`${actions} [data-pane-minimize="${key}"]`))
-    && visible(document.querySelector(`${actions} [data-pane-close="${key}"]`));
+    && !document.querySelector(`${actions} [data-pane-close]`);
 }
 """
 
@@ -332,8 +332,8 @@ def normal_tabber_journey(driver, tmux, sessions, file_path=None):
           return {item, active:group.activePanel?.id, groupHeader:group.header.hidden, slot:slotForItem(item),
             selected:[...tabberNormalSelections], tab:state(tab), header:state(header),
             minimize:state(header?.querySelector(`[data-pane-minimize="${key}"]`)),
-            close:state(header?.querySelector(`[data-pane-close="${key}"]`)),
-            headerActions:[...header?.querySelectorAll('button[data-pane-close], button[data-pane-minimize]') || []].map(button => ({...button.dataset}))};
+            close:state(header?.querySelector('[data-pane-close]')),
+            headerActions:[...header?.querySelectorAll('button') || []].map(button => ({...button.dataset}))};
         }),
         twoLineClass: row.classList.contains('tabber-normal-row'),
         secondLine: description.top >= title.bottom, dateVisible: date.width > 0 && dateElement.textContent.trim().endsWith('ago'),

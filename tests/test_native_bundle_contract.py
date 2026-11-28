@@ -438,7 +438,7 @@ def test_release_context_collects_pinned_git_facts_with_clean_environment(monkey
         ("rev-parse", "HEAD"): revision + "\n",
         ("tag", "--points-at", revision): "unrelated\nv1.2.3\n",
         ("show", revision + ":version.yaml"): 'version: "1.2.3"\n',
-        ("show", "-s", "--format=%s", revision): "Release YOmux 1.2.3\n",
+        ("show", "-s", "--format=%s", revision): "YOmux 1.2.3 Faster startup and Finder fixes\n",
         ("cat-file", "-t", "refs/tags/v1.2.3"): "tag\n",
         ("for-each-ref", "--format=%(contents:subject)", "refs/tags/v1.2.3"): "YOmux 1.2.3\n",
     }
@@ -452,7 +452,7 @@ def test_release_context_collects_pinned_git_facts_with_clean_environment(monkey
     monkeypatch.setattr(contract.subprocess, "run", git)
     context = contract.repository_release_context(tmp_path)
     assert context == {"revision": revision, "head_version_source": 'version: "1.2.3"\n',
-                       "commit_subject": "Release YOmux 1.2.3",
+                       "commit_subject": "YOmux 1.2.3 Faster startup and Finder fixes",
                        "tags": {"v1.2.3": {"type": "tag", "subject": "YOmux 1.2.3"}}}
 
 
@@ -503,7 +503,7 @@ def test_declared_release_context_is_bound_to_declared_revision_without_git(monk
     monkeypatch.setenv("YOMUX_TEST_REVISION", "a" * 40)
     context = {"revision": ("b" if case == "revision" else "a") * 40,
                "head_version_source": 'version: "1.2.3"\n',
-               "commit_subject": "Release YOmux 1.2.3", "tags": {}}
+               "commit_subject": "YOmux 1.2.3 Faster startup and Finder fixes", "tags": {}}
     if case == "tag":
         context["tags"]["v1.2.3"] = {"subject": "missing type"}
     monkeypatch.setenv("YOMUX_TEST_RELEASE_CONTEXT", "" if case == "missing" else json.dumps(context))

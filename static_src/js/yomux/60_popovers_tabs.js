@@ -327,7 +327,6 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
-if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
 if (fileExplorerPathCopy) fileExplorerPathCopy.addEventListener('click', event => copyCurrentFileExplorerPath({button: event.currentTarget}));
 bindFileExplorerPathInput(fileExplorerPath);
 bindFileExplorerHeaderActions(fileExplorer);
@@ -547,7 +546,7 @@ function createHoverPopover(options) {
     ? options.stillActive(event) !== false
     : popoverStillActive(anchor, popover()));
   const markState = state => {
-    if (!anchor.dataset) return;
+    if (options.reflectState === false || !anchor.dataset) return;
     if (state) anchor.dataset.popoverHoverState = state;
     else delete anchor.dataset.popoverHoverState;
   };
@@ -1335,30 +1334,6 @@ function popoverPathHtml(path, display = path) {
     : esc(display);
 }
 
-function sessionPopoverSubtitleHtml(session, info, fallback = '', description) {
-  const summary = sessionWorkSummary(session, info);
-  const git = summary.git;
-  const pr = pullRequestWithUrl(git, displayPullRequest(info));
-  const chips = [];
-  if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
-  if (summary.graphBacked && summary.pullRequests.length > 1) chips.push(`<span class="popover-chip">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`);
-  else if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
-  const text = description ?? (pr?.number
-    ? shortText(pr.title || pr.description || '', 220)
-    : String(fallback || ''));
-  const textHtml = text ? `<span class="popover-subtitle-text">${esc(text)}</span>` : '';
-  return `<div class="popover-subtitle">${chips.join('')}${textHtml}</div>`;
-}
-
-function sessionBranchValueHtml(session, info) {
-  const git = sessionWorkSummary(session, info).git;
-  if (!git?.branch) return '';
-  const branchHtml = isDefaultBranch(git)
-    ? defaultBranchBadgeHtml(session, info)
-    : branchLinkHtml(git, git.branch);
-  return `${branchHtml}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
-}
-
 function pullRequestPopoverRowHtml(session, pr) {
   const prParts = [pullRequestNumberChipLinkHtml(session, pr), pullRequestAuthorHtml(pr)].filter(Boolean);
   const checks = pullRequestChecksHtml(pr);
@@ -1494,7 +1469,7 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   </div>`;
 }
 
-function sessionPopoverWindowMetadataItems(session, info, agentRows) {
+function sessionPopoverWindowMetadataItems(agentRows, subtitle, sessionGit, subject) {
   const agents = Array.isArray(agentRows) ? agentRows : [];
   if (!agents.length) return [];
   return agents.map(agent => {
@@ -1502,68 +1477,79 @@ function sessionPopoverWindowMetadataItems(session, info, agentRows) {
     const paths = pathEntries.map(item => item.path).filter(Boolean);
     const git = typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null);
     const path = paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || ''));
-    const meta = {
-      window: String(agent?.window ?? ''),
-      window_index: agentWindowIndex(agent),
-      window_name: String(agent?.window_name || ''),
-      path,
-      paths,
-      path_entries: pathEntries,
-      git,
-    };
-    const html = windowMetadataRowsHtml(meta);
-    return html ? {agent, meta, html} : null;
+    const html = popoverPathRowsHtml(paths.length ? paths : [path], git) + popoverGitRowsHtml(git, {
+      subtitle,
+      subject: samePopoverCheckout(git, sessionGit) ? subject : currentBranchSubject(git),
+    });
+    return html ? {agent, git, html} : null;
   }).filter(Boolean);
 }
 
-function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null, metadataItems = null) {
-  const agents = Array.isArray(agentRows) ? agentRows : sessionPopoverSortedAgentWindows(session, info, autoPayload);
+function sessionPopoverAgentWindowHtml(agents, items) {
   if (!agents.length) {
     return `<div class="session-agent-list empty"><div class="session-agent-empty">${esc(t('yoagent.emptyPerSession'))}</div></div>`;
   }
   const nowSeconds = Date.now() / 1000;
-  const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(session, info, agents);
   const metadataByWindow = new Map(items.map(item => [agentWindowIndex(item.agent), item]));
-  const sharedMetadata = items.length > 1 && items.length === agents.length && new Set(items.map(item => sessionWindowMetadataSignature(item.meta))).size === 1;
+  const sharedMetadata = items.length > 1 && items.length === agents.length && new Set(items.map(item => item.html)).size === 1;
   const rows = agents.map(agent => {
     const row = sessionPopoverAgentWindowRowHtml(agent, nowSeconds);
     const item = metadataByWindow.get(agentWindowIndex(agent));
     const transcriptHtml = agentTranscriptRowsHtml(agent);
     if ((!item || sharedMetadata) && !transcriptHtml) return row;
     const metadataHtml = item && !sharedMetadata ? item.html : '';
-    return `<div class="session-agent-window-block">${row}<div class="session-window-metadata">${metadataHtml}${transcriptHtml}</div></div>`;
+    return `<div class="session-agent-window-block">${row}<div class="session-window-metadata">${transcriptHtml}${metadataHtml}</div></div>`;
   }).join('');
   const sharedRows = sharedMetadata ? `<div class="session-window-metadata-list shared">${items[0].html}</div>` : '';
   const metadataClass = items.length ? ' has-window-metadata' : '';
   return `<div class="session-agent-list${metadataClass}">${rows}${sharedRows}</div>`;
 }
 
-function sessionWindowMetadataSignature(row) {
-  const git = row?.git || {};
-  const paths = Array.isArray(row?.paths) ? row.paths.join('\u0001') : (row?.path || '');
-  return [paths, git.root || '', git.branch || '', git.worktree?.path || ''].join('\u0000');
+function samePopoverCheckout(left, right) {
+  return Boolean(left?.branch && left.branch === right?.branch && repoRootKey(left.root) === repoRootKey(right.root));
 }
 
-function windowMetadataBranchHtml(git) {
-  if (!git?.branch) return '';
-  return `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
+function popoverPathRowsHtml(displayPaths, git = {}, {showMissingPath = false} = {}) {
+  git = git || {};
+  const paths = new Map();
+  const addPath = (label, path, display = path) => {
+    if (path) paths.set(repoRootKey(path), popoverRow(t(label), popoverPathHtml(path, display)));
+  };
+  for (const path of displayPaths) addPath('common.field.path', path);
+  if (!paths.has(repoRootKey(git.root))) addPath('popover.repo', git.root);
+  if (git.worktree?.path) {
+    const worktree = git.worktree;
+    addPath('popover.worktree', worktree.path, worktreeDisplayText({...worktree, name: worktree.path}));
+  }
+
+  if (!paths.size && showMissingPath) return popoverRow(t('common.field.path'), esc(t('common.notAvailable')));
+  return [...paths.values()].join('');
 }
 
-function worktreePopoverValueHtml(worktree) {
-  return popoverPathHtml(worktree.path, worktreeDisplayText(worktree));
-}
-
-function windowMetadataRowsHtml(row) {
-  if (!row) return '';
-  const git = row.git || {};
+function popoverGitRowsHtml(git, {subtitle = '', branchHtml, subject = ''} = {}) {
+  if (!git) return '';
   const rows = [];
-  const paths = Array.isArray(row.paths) ? row.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
-  const displayPaths = paths.length ? paths : (row.path ? [String(row.path)] : []);
-  for (const path of displayPaths) rows.push(popoverRow(t('common.field.path'), popoverPathHtml(path)));
-  if (git.branch) rows.push(popoverRow(t('common.field.branch'), windowMetadataBranchHtml(git)));
-  if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), popoverPathHtml(git.root)));
-  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
-  if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (git.branch) {
+    const name = branchHtml || branchLinkHtml(git, git.branch);
+    const upstream = git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : '';
+    rows.push(popoverRow(t('common.field.branch'), name + upstream));
+  }
+  const subtitleKey = normalizeBranchSubjectText(gitHeadSubject({head: subtitle}));
+  const head = gitHeadValueHtml(git);
+  const headIsHash = /^[0-9a-f]{7,40}$/i.test(head);
+  const rawHeadSubject = gitHeadSubject(git);
+  const headSubject = headIsHash && rawHeadSubject === head ? subject : rawHeadSubject;
+  const headSubjectKey = normalizeBranchSubjectText(headSubject);
+  if (headIsHash) {
+    const detail = headSubject && headSubjectKey !== subtitleKey ? ` · ${esc(headSubject)}` : '';
+    rows.push(popoverRow('HEAD', head + detail));
+  } else if (head && headSubjectKey !== subtitleKey) {
+    rows.push(popoverRow('HEAD', head));
+  }
+  const subjectKey = normalizeBranchSubjectText(subject);
+  if (subjectKey && subjectKey !== subtitleKey && subjectKey !== headSubjectKey) {
+    rows.push(popoverRow(t('common.descriptionShort'), `<div class="popover-desc">${esc(subject)}</div>`));
+  }
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return rows.join('');
 }
@@ -1592,34 +1578,34 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const requests = summary.pullRequests.map(pr => pullRequestWithUrl(git, pr)).filter(Boolean);
   const branch = git?.other_branches?.branches?.find(branch => branch.current);
   const linear = summary.linearIssues;
-  const description = sessionWorkDescription(session, info, 220);
-  const title = `${tmuxSessionDescriptorLabel(sessionLabel(session))} · ${projectDirName(session, info)}`;
+  const sessionName = sessionLabel(session);
+  const projectName = projectDirName(session, info);
+  const sessionTitle = tmuxSessionDescriptorLabel(sessionName);
+  const title = projectName === sessionName ? sessionTitle : `${sessionTitle} · ${projectName}`;
   const fullPath = panelFullPath(session, info);
-  const subtitle = description || git?.branch || fullPath || t('git.noCheckout');
-  const subtitleHtml = sessionPopoverSubtitleHtml(session, info, subtitle, options.description);
+  const pr = displayPullRequest(info);
+  const description = options.description ?? (pr?.number
+    ? shortText(pr.title || pr.description || '', 220)
+    : sessionWorkDescription(session, info, 220));
+  const subtitle = [projectName, sessionName, git?.branch, shortBranch(git?.branch)].includes(description) ? '' : description;
   const rows = [];
   const autoPayload = autoApproveStates.get(session);
   const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload, options.windowIndex);
-  const detailState = options.windowIndex == null ? state
-    : sessionAgentWindowStateForSummary(agentWindowStatusSummary(agentRows, session, {info}))
-      || stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
-  const stateHtml = `${sessionStateHtml(detailState)} <span class="meta-muted">${esc(detailState.reason)}</span>`;
-  const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
-  const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
-  const agentValue = agentKind
-    ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}`
-    : (autoText || `<span data-locale-text-key="agent.notDetected">${esc(t('agent.notDetected'))}</span>`);
-  const displayPath = fullPath || t('common.notAvailable');
-  const windowMetadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
-  const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows, windowMetadataItems);
+  const autoText = autoEnabled ? t('yolo.on') : (autoApproveEnabledElsewhere(autoPayload) ? t('yolo.elsewhere') : '');
+  if (!agentRows.length) {
+    const detailState = options.windowIndex == null ? state : stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
+    const stateHtml = `${sessionStateHtml(detailState)} <span class="meta-muted">${esc(detailState.reason)}</span>`;
+    const agentValue = [agentKind && agentName(agentKind), autoText].filter(Boolean).join(' · ') || esc(t('agent.notDetected'));
+    rows.push(popoverPairRow(t('common.stateLabel'), stateHtml, t('common.agentLabel'), agentValue));
+  }
+  const subject = requests.length ? '' : currentBranchSubject(git);
+  const windowMetadataItems = sessionPopoverWindowMetadataItems(agentRows, subtitle, git, subject);
+  const agentWindowsHtml = sessionPopoverAgentWindowHtml(agentRows, windowMetadataItems);
   const perWindowMetadata = Boolean(windowMetadataItems.length);
-  if (!perWindowMetadata) rows.push(popoverPairRow(t('common.stateLabel'), stateHtml, t('common.agentLabel'), agentValue));
+  if (!perWindowMetadata) rows.push(popoverPathRowsHtml([fullPath], git, {showMissingPath: true}));
+  if (agentRows.length && autoText) rows.push(popoverRow(t('common.agentLabel'), esc(autoText)));
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
-  if (!perWindowMetadata) {
-    rows.push(popoverRow(t('common.field.path'), popoverPathHtml(fullPath, displayPath)));
-    if (git?.branch) rows.push(popoverRow(t('common.field.branch'), sessionBranchValueHtml(session, info)));
-  }
   let linearValue = '';
   let linearDesc = '';
   if (linear.length) {
@@ -1631,23 +1617,24 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   for (const pr of requests) rows.push(popoverRow(t('common.pullRequestShort'), pullRequestPopoverRowHtml(session, pr)));
   for (const issue of branch?.github_issues || []) rows.push(popoverRow('GitHub', githubIssueLinkHtml(issue)));
   if (!requests.length && git?.github_repo?.provider) rows.push(popoverRow(t('popover.repo'), hostedRepositoryLinkHtml(git.github_repo)));
-  const subject = currentBranchSubject(git);
-  if (subject && !requests.length) rows.push(popoverRow(t('common.descriptionShort'), `<div class="popover-desc">${esc(subject)}</div>`));
-  if (!perWindowMetadata && git?.root && git.root !== fullPath) rows.push(popoverRow(t('popover.repo'), popoverPathHtml(git.root)));
-  // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
-  if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
-  if (!perWindowMetadata && gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
+  if (!perWindowMetadata) {
+    rows.push(popoverGitRowsHtml(git, {
+      subtitle,
+      branchHtml: isDefaultBranch(git) ? defaultBranchBadgeHtml(session, info) : '',
+      subject,
+    }));
+  }
+  const currentBranchShown = !perWindowMetadata || windowMetadataItems.some(item => samePopoverCheckout(item.git, git));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
       <div>
         <div class="popover-title">${esc(title)}</div>
-        ${subtitleHtml}
+        ${subtitle ? `<div class="popover-subtitle"><span class="popover-subtitle-text">${esc(subtitle)}</span></div>` : ''}
       </div>
     </div>
     ${agentWindowsHtml}
     ${rows.join('')}
-    ${otherBranchesHtml(session, info)}
+    ${otherBranchesHtml(session, info, git, currentBranchShown)}
   </div>`;
 }
 
@@ -1800,13 +1787,15 @@ function branchUpdatedText(branch) {
   return branch?.updated || '';
 }
 
-function otherBranchesHtml(session, info) {
-  const git = sessionWorkSummary(session, info).git;
+function otherBranchesHtml(session, info, git, currentBranchShown) {
   const inventory = git?.other_branches || {};
-  const branches = branchesNewestCommitFirst(inventory.branches);
-  if (!branches.length) {
-    return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div><div class="meta-muted">${esc(t('branch.none'))}</div></div>`;
-  }
+  const branches = branchesNewestCommitFirst(inventory.branches)
+    .filter(branch => !(currentBranchShown && branch.current && branch.name === git?.branch));
+  const hiddenCount = Number(inventory.hidden_count || 0);
+  if (!branches.length && !hiddenCount) return '';
+  const title = currentBranchShown
+    ? tPlural('info.count.branch', branches.length + hiddenCount)
+    : t('branch.all');
   const items = branches.map(branch => {
     const pr = pullRequestForBranch(git, branch, info);
     const branchLink = branchListBranchHtml(session, git, branch);
@@ -1819,10 +1808,10 @@ function otherBranchesHtml(session, info) {
       ${branchListSubjectHtml(branch, pr)}
     </div>`;
   }).join('');
-  const hidden = Number(inventory.hidden_count || 0) > 0
-    ? `<div class="meta-muted">${esc(t('branch.more', {count: inventory.hidden_count}))}</div>`
+  const hidden = hiddenCount > 0
+    ? `<div class="meta-muted">${esc(t('branch.more', {count: hiddenCount}))}</div>`
     : '';
-  return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div>${items}${hidden}</div>`;
+  return `<div class="branch-list"><div class="branch-list-title">${esc(title)}</div>${items}${hidden}</div>`;
 }
 
 function dragPayload(event) {

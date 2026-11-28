@@ -10,6 +10,47 @@ const {
 } = require('./browser_helpers/layout_test_helper');
 const {runEditorPreviewSuite} = require('./browser_helpers/editor_preview_suite');
 
+test('HTML visual source edits preserve surrounding bytes at every text boundary', () => {
+  const js = fs.readFileSync('static_src/js/yomux/89_preview_renderers.js', 'utf8');
+  const [patch, boundary] = vm.runInNewContext(sourceBetween(js, 'function htmlViewEditPatch', 'function installHtmlViewEdit') +
+    '\n[htmlViewEditPatch, htmlViewEditDeletionBoundary]');
+  const prefix = "<!DOCTYPE HTML><!-- keep --><HTML lang=en><P title='exact'>";
+  const suffix = '</P><hr/><SCRIPT type=application/json>{}</SCRIPT></HTML>';
+  const replacement = [['', ''], ['z', 'z'], ['<>&', '&lt;&gt;&amp;'], ['\r\n', '<br>'], ['x\ny', 'x<br>y']];
+  for (const raw of ['', 'x', 'ab cd', '  a\tb  ', 'first\nsecond']) {
+    const source = prefix + raw + suffix;
+    for (let start = 0; start <= raw.length; start++) {
+      for (let end = start; end <= raw.length; end++) {
+        for (const [value, encoded] of replacement) {
+          const edit = patch({from: prefix.length}, start, end, value, false);
+          const {from, to, insert} = edit.changes;
+          assert.equal(source.slice(0, from) + insert + source.slice(to),
+            prefix + raw.slice(0, start) + encoded + raw.slice(end) + suffix);
+          assert.equal(edit.caret, from + encoded.length);
+          assert.equal(edit.structural, encoded.includes('<br>'));
+        }
+      }
+    }
+  }
+  const atom = {from: 4, offsets: [0, 1, undefined, 8, 9]};
+  assert.equal(patch(atom, 2, 3, '', false), null);
+  assert.equal(patch(atom, 1, 2, 'a', false), null);
+  assert.equal(patch(atom, 1, 3, '', false).changes.to, 12);
+  assert.equal(patch({from: 4}, 0, 0, '\n', true).changes.insert, '\n');
+  const afterRule = patch({from: 4, wrap: true}, 0, 0, '<', false);
+  assert.equal(afterRule.changes.insert, '<p>&lt;</p>');
+  assert.equal(afterRule.caret, 11);
+  for (const grapheme of ['é', 'e\u0301', '😀', '👩‍💻', '🇺🇸']) {
+    const text = 'a' + grapheme + 'b';
+    const end = 1 + grapheme.length;
+    assert.equal(boundary(text, 1, false), end);
+    assert.equal(boundary(text, end, true), 1);
+    assert.equal(boundary(text, 0, true), 0);
+    assert.equal(boundary(text, text.length, false), text.length);
+  }
+  assert.equal(boundary('afjb', 1, false, atom.offsets), 3, 'a multi-character reference is one source atom');
+});
+
 test('file merges retain compatible changes and keep line endings exact', () => {
   const source = fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
   const merge = vm.runInNewContext(sourceBetween(source, 'function diffRowsForLines', 'function fileCompareLineHtml') + '\nmergeOpenFileText');
@@ -28,6 +69,78 @@ test('file merges retain compatible changes and keep line endings exact', () => 
   const insertions = merge('a\nb\n', 'a\nleft\nb\n', 'a\nright\nb\n');
   assert.equal(insertions.useDraft, 'a\nleft\nb\n');
   assert.equal(insertions.useDisk, 'a\nright\nb\n');
+});
+
+test('Markdown and HTML Split preview deadlines keep the latest draft with or without sharing', () => {
+  const source = fs.readFileSync('static_src/js/yomux/92_codemirror_editor.js', 'utf8');
+  const timers = [];
+  const renders = [];
+  const context = vm.createContext({
+    performance: {now: () => 100},
+    setTimeout(callback, delay) { return timers.push({callback, delay}); },
+    previewKindForPath: path => path.endsWith('.html') ? 'html' : 'markdown',
+    fileEditorPanelPreviewPane: panel => panel.pane,
+    fileEditorPanelMode: () => 'split',
+    fileEditorPanelState: panel => panel.state,
+    fileEditorStateWritable: state => state.writable !== false,
+    previewScrollUserOwnsElementNow: () => false,
+    renderFileEditorPreviewSurface(_panel, _pane, _path, text) { renders.push(text); },
+  });
+  vm.runInContext(sourceBetween(source, 'function codeMirrorSplitPreviewDelay', 'function commitCodeMirrorSource'), context);
+  for (const [length, lines, expected] of [[300, 10, 0], [16000, 700, 60], [291587, 3141, 125],
+    [290000, 10800, 250], [700000, 18000, 400]]) {
+    for (const shared of [false, true]) {
+      for (const [path, minimumDelay] of [['year.md', 0], ['test.html', 50]]) {
+        const doc = {length, lines, toString: () => 'first'};
+        const panel = {_cmPath: path, _cmView: {state: {doc}}, pane: {},
+          state: {kind: 'text', content: 'saved', _shareActive: shared}};
+        assert(context.scheduleCodeMirrorSplitPreview(panel, path));
+        const timer = timers.at(-1);
+        assert.equal(timer.delay, Math.max(expected, minimumDelay), path);
+        panel._cmView.state.doc = {...doc, toString: () => 'latest'};
+        if (path.endsWith('.html')) assert.equal(context.codeMirrorSplitPreviewText(panel, path, panel.state), 'latest');
+        assert(context.scheduleCodeMirrorSplitPreview(panel, path));
+        assert.equal(timers.at(-1), timer, 'later input keeps the scheduled deadline');
+        timer.callback();
+        assert.equal(renders.at(-1), 'latest');
+        assert.equal(panel.state.content, 'saved');
+        assert.equal(context.codeMirrorSplitPreviewText(panel, path, panel.state), 'latest');
+      }
+    }
+  }
+});
+
+test('Markdown source anchors skip unmatched lists without rescanning source text', () => {
+  const source = fs.readFileSync('static_src/js/yomux/88_markdown_preview.js', 'utf8');
+  const context = vm.createContext({document: {createElement: () => ({dataset: {}})}});
+  vm.runInContext(sourceBetween(source, 'function markdownTextWithSourceAnchors', 'const MARKDOWN_PREVIEW_BLOCKED_TAGS'), context);
+  let normalizations = 0;
+  const normalize = context.markdownInlinePlainText;
+  context.markdownInlinePlainText = text => { normalizations += 1; return normalize(text); };
+  const blocks = [];
+  const lines = [];
+  const addBlock = (tagName, nodeValue) => {
+    const block = {tagName, nodeType: 1, dataset: {}, childNodes: [{nodeType: 3, nodeValue}],
+      appendChild(anchor) { this.anchor = anchor; }};
+    blocks.push(block);
+    return block;
+  };
+  for (let day = 0; day < 80; day++) {
+    lines.push('  ### Day', '', '- first item', '- second item', '');
+    addBlock('H3', 'Day');
+    addBlock('UL', 'first item\nsecond item');
+  }
+  lines.push('---', '', '| Name | Value |', '| --- | --- |', '| A | B |', '', '**End**');
+  const rule = addBlock('HR', '');
+  const table = addBlock('TABLE', 'Name Value A B');
+  const end = addBlock('P', 'End');
+  context.applyMarkdownSourceLines({querySelectorAll: () => blocks}, lines.join('\n'));
+  for (let day = 0; day < 80; day++) {
+    assert.equal(blocks[day * 2].anchor.dataset.sourceLine, String(day * 5 + 1));
+    assert.equal(blocks[day * 2 + 1].anchor, undefined);
+  }
+  assert.deepEqual([rule, table, end].map(block => block.dataset.sourceLine), ['401', '403', '407']);
+  assert(normalizations <= lines.length + blocks.length, `normalized ${normalizations} lines and blocks`);
 });
 
 test('numbered Markdown task labels are a post-parse presentation transform', () => {

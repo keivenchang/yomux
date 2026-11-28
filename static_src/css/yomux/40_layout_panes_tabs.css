@@ -1896,7 +1896,7 @@ body.theme-light .pane-tab-close {
   min-width: 0;
   padding-inline: var(--space-3);
 }
-.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-popout):not(.pane-expand) {
+.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-popout):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
   padding-inline: var(--space-3);
@@ -1954,7 +1954,6 @@ body.theme-light .pane-tab-close {
 .tabs .panel-tab-overflow:focus-visible .pane-actions-dots {
   color: currentColor;
 }
-.tabs .pane-close,
 .tabs .pane-detail-toggle,
 .tabs .pane-minimize,
 .tabs .pane-popout,
@@ -1964,12 +1963,6 @@ body.theme-light .pane-tab-close {
   min-width: min(20px, var(--pane-tab-height));
   max-width: min(20px, var(--pane-tab-height));
   padding: 0;
-}
-.tabs .pane-close::before {
-  transform: translate(-50%, -50%) rotate(45deg);
-}
-.tabs .pane-close::after {
-  transform: translate(-50%, -50%) rotate(-45deg);
 }
 .tabs .pane-minimize::before {
   transform: translate(-50%, calc(-50% + 2px)) rotate(0deg);

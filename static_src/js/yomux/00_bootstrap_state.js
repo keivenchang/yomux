@@ -150,6 +150,7 @@ function applyAgentAvailabilityPayload(payload = {}) {
       if (name) availableAgents.add(name);
     });
   }
+  if (payload.agentAuth || Array.isArray(payload.availableAgents)) syncDescriptionModelAvailability();
   return true;
 }
 const accessRole = bootstrap.accessRole || 'admin';
@@ -200,7 +201,6 @@ const fileExplorer = document.getElementById('fileExplorer');
 const fileExplorerTree = document.getElementById('fileExplorerTree');
 const fileExplorerPath = document.getElementById('fileExplorerPath');
 const fileExplorerPathCopy = document.getElementById('fileExplorerPathCopy');
-const fileExplorerClose = document.getElementById('fileExplorerClose');
 const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileExplorerExpanded = new Set();
@@ -383,6 +383,12 @@ const EDITOR_SCHEMES = {
     diff: {addFg: '#859900', removeFg: '#dc322f'},
   },
 };
+function addLightEditorPaperScheme(baseId, id, label, colors) {
+  const base = EDITOR_SCHEMES[baseId];
+  EDITOR_SCHEMES[id] = {...base, id, label, bg: base.previewBg, gutterBg: base.previewBg, ...colors};
+}
+addLightEditorPaperScheme('github-light', 'github-light-cream', 'GitHub Light Cream', {activeLine: '#f4e8c7'});
+addLightEditorPaperScheme('solarized-light', 'solarized-light-paper', 'Solarized Light Paper', {fg: '#53686f'});
 const EDITOR_SCHEME_IDS = Object.keys(EDITOR_SCHEMES);
 function previewRendererStrategy(specification) {
   return Object.freeze({
@@ -1838,8 +1844,6 @@ function fileExplorerLabel() {
 function applyFileExplorerStaticLabels() {
   const label = fileExplorerLabel();
   fileExplorer?.setAttribute('aria-label', label);
-  fileExplorerClose?.setAttribute('title', t('finder.close', {name: label}));
-  applyPlatformControlClass(fileExplorerClose, 'close');
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();

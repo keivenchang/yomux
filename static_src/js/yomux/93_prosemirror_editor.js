@@ -1,5 +1,6 @@
 const prosemirrorLoadPromise = {value: null};
 const PROSEMIRROR_SERIALIZE_DELAY_MS = 1250;
+const PROSEMIRROR_EXPLICIT_SPACE = '&#32;';
 
 // ProseMirror owns every descendant of EditorView.dom. After mount, visual metadata must flow
 // through schema DOM output, transactions, decorations, or an isolated node view that ignores its
@@ -58,13 +59,10 @@ function loadProseMirrorApi() {
   if (window.YOmuxProseMirror) return Promise.resolve(window.YOmuxProseMirror);
   if (prosemirrorLoadPromise.value) return prosemirrorLoadPromise.value;
   const asset = bootstrap.proseMirrorAssetUrl || '/static/prosemirror.js';
-  const promise = new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = asset;
-    script.onload = () => window.YOmuxProseMirror ? resolve(window.YOmuxProseMirror) : reject(new Error('ProseMirror bundle did not initialize'));
-    script.onerror = () => reject(new Error(`Unable to load ${asset}`));
-    document.head.appendChild(script);
-  });
+  const promise = loadLazyScript(asset).then(() => {
+    if (!window.YOmuxProseMirror) throw new Error('ProseMirror bundle did not initialize');
+    return window.YOmuxProseMirror;
+  }, error => { throw new Error(`Unable to load ${asset}: ${error.message}`, {cause: error}); });
   prosemirrorLoadPromise.value = promise;
   promise.catch(() => {
     if (prosemirrorLoadPromise.value === promise) prosemirrorLoadPromise.value = null;
@@ -86,13 +84,14 @@ function prosemirrorCodeBlockDom(node) {
   ];
 }
 
-function prosemirrorTexMathNodeView(node) {
+function prosemirrorTexMathNodeView(node, panel, getPos) {
   const dom = document.createElement(node.isBlock ? 'div' : 'span');
   dom.setAttribute('data-tex-source', node.attrs.source);
   const math = markdownTexMathAt(node.attrs.source);
   if (math) renderTexMathSource(dom, math);
   else dom.textContent = node.attrs.source;
-  return {dom, ignoreMutation: () => true};
+  const destroy = bindProseMirrorSourceSelection(panel, dom, getPos, 'Math');
+  return {dom, destroy, ignoreMutation: () => true};
 }
 
 function prosemirrorMarkdownSchema(api) {
@@ -116,6 +115,10 @@ function prosemirrorMarkdownSchema(api) {
       tight: {default: false},
       bullet: {default: '*'},
     },
+  });
+  nodes = nodes.update('ordered_list', {
+    ...nodes.get('ordered_list'),
+    attrs: {...nodes.get('ordered_list').attrs, tight: {default: false}, delimiter: {default: '.'}},
   });
   nodes = nodes.update('image', {
     ...nodes.get('image'),
@@ -224,6 +227,13 @@ function prosemirrorMarkdownSchema(api) {
   });
 }
 
+function prosemirrorInlineCodeEnd(tokens, index) {
+  const token = tokens[index];
+  if (token.type !== 'html_inline' || !/^<code(?:\s[^>]*)?>$/i.test(token.content.trim())) return -1;
+  return tokens.findIndex((candidate, candidateIndex) => candidateIndex > index &&
+    candidate.type === 'html_inline' && /^<\/code\s*>$/i.test(candidate.content.trim()));
+}
+
 function prosemirrorMarkdownParser(api, schema) {
   const parser = api.defaultMarkdownParser;
   const tokenizer = new api.MarkdownIt({html: true, breaks: false});
@@ -234,6 +244,7 @@ function prosemirrorMarkdownParser(api, schema) {
     if (!silent) {
       const token = state.push('tex_math', '', 0);
       token.meta = {source: math.raw};
+      token.mathOffset = state.pos;
     }
     state.pos += math.raw.length;
     return true;
@@ -253,6 +264,11 @@ function prosemirrorMarkdownParser(api, schema) {
     token.block = true;
     token.map = [startLine, nextLine];
     token.meta = {source: math.raw};
+    const last = state.eMarks[nextLine - 1];
+    token.mathColumns = [
+      start - state.src.lastIndexOf('\n', start - 1) - 1,
+      state.src.slice(state.src.lastIndexOf('\n', last - 1) + 1, last).trimEnd().length,
+    ];
     state.line = nextLine;
     return true;
   }, {alt: ['paragraph', 'reference', 'blockquote', 'list']});
@@ -265,6 +281,7 @@ function prosemirrorMarkdownParser(api, schema) {
       return template.content.firstElementChild;
     };
     const imageAttrs = html => {
+      if (!/^<img(?:\s|\/?>)/i.test(html)) return null;
       const image = htmlElement(html);
       if (!image || image.tagName !== 'IMG' || !image.getAttribute('src')) return null;
       return {
@@ -287,19 +304,16 @@ function prosemirrorMarkdownParser(api, schema) {
         const token = tokens[index];
         const html = String(token.content || '').trim();
         const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
-        if (token.type === 'html_inline' && /^<code(?:\s[^>]*)?>$/i.test(html)) {
-          const closeIndex = tokens.findIndex((candidate, candidateIndex) => candidateIndex > index
-            && candidate.type === 'html_inline' && /^<\/code\s*>$/i.test(String(candidate.content || '').trim()));
-          if (closeIndex > index) {
-            const content = tokens.slice(index + 1, closeIndex).map(child => {
-              if (child.type === 'text' || child.type === 'code_inline' || child.type === 'html_inline') return child.content;
-              if (child.type === 'softbreak' || child.type === 'hardbreak') return '\n';
-              return child.markup || child.content || '';
-            }).join('');
-            normalized.push({...token, type: 'code_inline', tag: 'code', nesting: 0, content, markup: ''});
-            index = closeIndex;
-            continue;
-          }
+        const codeEnd = prosemirrorInlineCodeEnd(tokens, index);
+        if (codeEnd > index) {
+          const content = tokens.slice(index + 1, codeEnd).map(child => {
+            if (child.type === 'text' || child.type === 'code_inline' || child.type === 'html_inline') return child.content;
+            if (child.type === 'softbreak' || child.type === 'hardbreak') return '\n';
+            return child.markup || child.content || '';
+          }).join('');
+          normalized.push({...token, type: 'code_inline', tag: 'code', nesting: 0, content, markup: ''});
+          index = codeEnd;
+          continue;
         }
         if (token.type === 'bullet_list_open' || token.type === 'ordered_list_open') listTokens.push(token);
         if (token.type === 'list_item_open') {
@@ -307,8 +321,7 @@ function prosemirrorMarkdownParser(api, schema) {
           listItemTokens.push(token);
         }
         if (token.type === 'inline' && listItemDepth > 0) {
-          const firstText = token.children?.find(child => child.type === 'text');
-          const taskMarker = String(firstText?.content || token.content || '').match(/^\[[ xX]\](?:\s+|$)/);
+          const taskMarker = String(token.content || '').match(/^\[[ xX]\](?:\s+|$)/);
           if (taskMarker) {
             const listItemToken = listItemTokens[listItemTokens.length - 1];
             listItemToken.meta = {
@@ -397,6 +410,13 @@ function prosemirrorMarkdownParser(api, schema) {
           token.nesting = 1;
           detailsDepth += 1;
         }
+        if (token.type === 'inline') {
+          if (token.content === PROSEMIRROR_EXPLICIT_SPACE) token.children = [];
+          else if (token.children?.[0]?.content === ' ' &&
+              ['<br>', '<!--'].some(tag => token.content.startsWith(PROSEMIRROR_EXPLICIT_SPACE + tag))) {
+            token.children.shift();
+          }
+        }
         if (token.children) token.children = normalizeHtmlTokens(token.children, tokenLine);
         normalized.push(token);
         if (token.type === 'list_item_close') {
@@ -420,12 +440,14 @@ function prosemirrorMarkdownParser(api, schema) {
     const tokens = normalizeHtmlTokens(markdownItParse(parseSource, environment));
     // markdown-it collapses extra blank lines. Preserve the additional empty paragraphs that
     // ViewEditor creates with consecutive Enter presses so a later source sync cannot erase them.
+    const sourceLines = String(source).split('\n');
     const spacedTokens = [];
     const spacingFrames = [{end: null, type: ''}];
     for (const token of tokens) {
       if (token.type === 'details_close') {
         spacedTokens.push(token);
-        if (spacingFrames.length > 1) spacingFrames.pop();
+        const frame = spacingFrames.length > 1 ? spacingFrames.pop() : null;
+        if (frame?.opener.map && token.map) frame.opener.map = [frame.opener.map[0], token.map[1]];
         const parent = spacingFrames[spacingFrames.length - 1];
         if (Array.isArray(token.map)) parent.end = token.map[1];
         parent.type = 'details';
@@ -434,13 +456,13 @@ function prosemirrorMarkdownParser(api, schema) {
       const spacing = spacingFrames[spacingFrames.length - 1];
       const topLevelBlock = token.level === spacingFrames.length - 1 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block', 'tex_math_block'].includes(token.type));
       const blockStart = topLevelBlock && Array.isArray(token.map) ? token.map[0] : null;
-      if (blockStart !== null && spacing.end !== null) {
+      if (blockStart !== null) {
         let visibleGapLines = 0;
-        for (let line = spacing.end; line < blockStart; line += 1) {
+        for (let line = spacing.end ?? 0; line < blockStart; line += 1) {
           if (!ignoredCommentLines.has(line)) visibleGapLines += 1;
         }
         const emptyParagraphs = ['hr', 'markdown_comment_block', 'markdown_literal_block', 'tex_math_block'].includes(token.type)
-          || ['hr', 'markdown_comment_block'].includes(spacing.type)
+          || spacing.type === 'hr'
           ? 0
           : Math.max(0, visibleGapLines - 1);
         for (let index = 0; index < emptyParagraphs; index += 1) {
@@ -454,14 +476,19 @@ function prosemirrorMarkdownParser(api, schema) {
       spacedTokens.push(token);
       if (topLevelBlock && Array.isArray(token.map)) {
         spacing.end = token.map[1];
+        if (['bullet_list_open', 'ordered_list_open'].includes(token.type)) {
+          while (spacing.end > blockStart && !sourceLines[spacing.end - 1]?.trim()) spacing.end--;
+          token.map = [blockStart, spacing.end];
+        }
         spacing.type = token.type;
       }
-      if (token.type === 'details_open') spacingFrames.push({end: Array.isArray(token.map) ? token.map[1] : null, type: 'details_open'});
+      if (token.type === 'details_open') spacingFrames.push({end: Array.isArray(token.map) ? token.map[1] : null,
+        type: 'details_open', opener: token});
     }
-    const sourceLines = String(source).split('\n');
     while (sourceLines.length && ignoredCommentLines.has(sourceLines.length - 1)) sourceLines.pop();
-    const trailingNewlines = (sourceLines.join('\n').match(/\n+$/) || [''])[0].length;
-    const trailingEmptyParagraphs = Math.max(0, trailingNewlines - 1);
+    const visibleSource = sourceLines.join('\n');
+    const trailingNewlines = (visibleSource.match(/\n+$/) || [''])[0].length;
+    const trailingEmptyParagraphs = visibleSource.trim() ? Math.max(0, trailingNewlines - 1) : trailingNewlines;
     for (let index = 0; index < trailingEmptyParagraphs; index += 1) {
       spacedTokens.push(
         {type: 'paragraph_open', tag: 'p', nesting: 1, level: 0, map: null, block: true, children: null, content: ''},
@@ -469,20 +496,50 @@ function prosemirrorMarkdownParser(api, schema) {
         {type: 'paragraph_close', tag: 'p', nesting: -1, level: 0, map: null, block: true, children: null, content: ''},
       );
     }
-    environment.yomuxTopLevelSourceLines = spacedTokens
-      .filter(token => token.level === 0 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block', 'tex_math_block'].includes(token.type)))
-      .map(token => Array.isArray(token.map) ? Number(token.map[0]) + 1 : null);
+    const blocks = spacedTokens.filter(token => token.level === 0 && (token.nesting === 1 ||
+      ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block', 'tex_math_block'].includes(token.type)));
+    environment.yomuxTopLevelSourceRanges = blocks.map(token => token.map || null);
+    environment.yomuxTopLevelSourceLines = blocks.map(token => token.map ? token.map[0] + 1 : null);
+    environment.yomuxListItemSourceLines = spacedTokens.filter(token => token.type === 'list_item_open')
+      .map(token => token.map ? token.map[0] + 1 : null);
+    environment.yomuxTextblockSourceRanges = spacedTokens
+      .filter(token => ['paragraph_open', 'heading_open', 'code_block', 'fence'].includes(token.type))
+      .map(token => token.map || null);
+    environment.yomuxTableRowSourceRanges = spacedTokens.filter(token => token.type === 'tr_open')
+      .map(token => token.map || null);
+    environment.yomuxMathBlockSourceRanges = spacedTokens.filter(token => token.type === 'tex_math_block')
+      .map(token => ({lines: token.map, columns: token.mathColumns}));
     environment.yomuxIgnoredCommentRanges = ignoredCommentRanges;
     return spacedTokens;
   };
+  function listTight(token, tokenStream, index) {
+    if (token.meta?.hasTasks) return true;
+    let tight = true, previous;
+    for (let next = index + 1; tokenStream[next]?.level > token.level; next++) {
+      const child = tokenStream[next];
+      if (child.level === token.level + 2 && child.type === 'paragraph_open') return child.hidden;
+      if (child.level === token.level + 1 && child.type === 'list_item_open') {
+        if (previous && child.map[0] > previous.map[1]) tight = false;
+        if (previous && child.map[0] > previous.map[0] + 1 &&
+            tokenStream[next - 2]?.type === 'list_item_open') tight = false;
+        previous = child;
+      }
+    }
+    return tight;
+  }
   const tokens = {
     ...parser.tokens,
     bullet_list: {
       ...parser.tokens.bullet_list,
-      getAttrs: (token, tokenStream, index) => ({
-        ...(parser.tokens.bullet_list.getAttrs?.(token, tokenStream, index) || {}),
-        ...(token.meta?.hasTasks ? {tight: true} : {}),
-        bullet: ['-', '+', '*'].includes(token.markup) ? token.markup : '*',
+      getAttrs: (token, stream, index) => ({
+        tight: listTight(token, stream, index), bullet: ['-', '+', '*'].includes(token.markup) ? token.markup : '*',
+      }),
+    },
+    ordered_list: {
+      ...parser.tokens.ordered_list,
+      getAttrs: (token, stream, index) => ({
+        ...parser.tokens.ordered_list.getAttrs(token, stream, index), tight: listTight(token, stream, index),
+        delimiter: token.markup === ')' ? ')' : '.',
       }),
     },
     list_item: {block: 'list_item', getAttrs: token => token.meta || {}},
@@ -516,6 +573,28 @@ function prosemirrorImageWidth(value) {
   return /^[1-9]\d*$/.test(width) ? width : null;
 }
 
+function prosemirrorImageFitPlugin(api) {
+  const decorate = doc => {
+    const decorations = [];
+    doc.forEach((node, position) => {
+      const image = node.firstChild;
+      if (node.type.name === 'paragraph' && node.childCount === 1 && image.type.name === 'image' &&
+          markdownAutoFitSvg(image.attrs.src, image.attrs.width)) {
+        decorations.push(api.Decoration.node(position, position + node.nodeSize, {class: 'markdown-fit-svg'}));
+      }
+    });
+    return api.DecorationSet.create(doc, decorations);
+  };
+  const plugin = new api.Plugin({
+    state: {
+      init: (_config, state) => decorate(state.doc),
+      apply: (transaction, decorations) => transaction.docChanged ? decorate(transaction.doc) : decorations,
+    },
+    props: {decorations: state => plugin.getState(state)},
+  });
+  return plugin;
+}
+
 const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'strong', 'em', 's', 'mark', 'kbd', 'sup', 'code', 'br', 'img', 'details', 'summary']);
 const PROSEMIRROR_KNOWN_HTML_TAGS = new Set([
   'a', 'abbr', 'address', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'blockquote', 'body', 'button',
@@ -539,7 +618,15 @@ function prosemirrorUnsupportedHtmlSource(source) {
   return null;
 }
 
-function prosemirrorMarkdownSerializer(api) {
+function prosemirrorEmptyListItem(node) {
+  return node?.childCount === 1 && node.firstChild.type.name === 'paragraph' && !node.firstChild.content.size;
+}
+
+function prosemirrorHiddenComment(node) {
+  return node.type.name === 'markdown_comment_block' || node.type.name === 'markdown_comment_inline';
+}
+
+function prosemirrorMarkdownSerializer(api, {explicitInline = false} = {}) {
   return new api.MarkdownSerializer({
     ...api.defaultMarkdownSerializer.nodes,
     image(state, node) {
@@ -557,9 +644,17 @@ function prosemirrorMarkdownSerializer(api) {
       const title = node.attrs.title ? ` title="${attr(node.attrs.title)}"` : '';
       state.write(`<img src="${attr(node.attrs.src)}" alt="${attr(node.attrs.alt)}"${title} width="${node.attrs.width}">`);
     },
-    paragraph(state, node) {
+    paragraph(state, node, parent) {
+      if (explicitInline) {
+        let from = 0, to = node.content.size;
+        while (node.childAfter(from).node?.type.name === 'soft_break') from++;
+        while (to > from && node.childBefore(to).node?.type.name === 'soft_break') to--;
+        if (from || to !== node.content.size) node = node.cut(from, to);
+      }
       if (node.content.size) {
         state.renderInline(node);
+      } else if (parent.type.name === 'blockquote' || explicitInline) {
+        state.write(PROSEMIRROR_EXPLICIT_SPACE);
       } else {
         // A Markdown paragraph separator is two newlines. Empty ViewEditor paragraphs need one
         // additional source newline each or Markdown would collapse them on the next parse.
@@ -569,12 +664,46 @@ function prosemirrorMarkdownSerializer(api) {
       state.closeBlock(node);
     },
     soft_break(state) { state.write(state.inTableCell ? '<br>' : '\n'); },
-    // Keep an explicit end-of-line break valid Markdown. HTML is disabled in the parser, so
-    // serializing `<br>` would round-trip as literal text in the next ViewEditor refresh.
-    hard_break(state) { state.write(state.inTableCell ? '<br>' : '\\\n'); },
+    hard_break(state, _node, parent, index) {
+      if (explicitInline && !state.inTableCell && index === 0) state.write(PROSEMIRROR_EXPLICIT_SPACE);
+      // A backslash-newline followed by a soft newline would split the paragraph on reopen.
+      const beforeSoftBreak = parent.maybeChild(index + 1)?.type.name === 'soft_break';
+      state.write(state.inTableCell || explicitInline || beforeSoftBreak ? '<br>' : '\\\n');
+    },
     list_item(state, node) {
       if (node.attrs.taskChecked !== null) state.write(`[${node.attrs.taskChecked ? 'x' : ' '}] `);
-      state.renderContent(node);
+      if (prosemirrorEmptyListItem(node)) return;
+      node.forEach((child, _, index) => {
+        // A nested empty dash bullet immediately below text otherwise becomes a Setext heading.
+        if (child.type.name === 'bullet_list' && child.attrs.bullet === '-' &&
+            prosemirrorEmptyListItem(child.firstChild) && node.maybeChild(index - 1)?.type.name === 'paragraph') {
+          state.flushClose(2);
+        }
+        state.render(child, node, index);
+      });
+    },
+    ordered_list(state, node) {
+      if (node.attrs.delimiter !== ')') return api.defaultMarkdownSerializer.nodes.ordered_list(state, node);
+      const start = node.attrs.order;
+      const width = String(start + node.childCount - 1).length;
+      state.renderList(node, ' '.repeat(width + 2), index => (String(start + index) + ') ').padStart(width + 2));
+    },
+    text(state, node, parent, index) {
+      if (!explicitInline || !parent.isTextblock || parent.type.spec.code) {
+        return api.defaultMarkdownSerializer.nodes.text(state, node);
+      }
+      const lineBoundary = neighbor => !neighbor || neighbor.type.name.endsWith('_break');
+      const previous = parent.maybeChild(index - 1);
+      const leading = lineBoundary(previous) ? node.text.match(/^ */)[0].length : 0;
+      const trailing = lineBoundary(parent.maybeChild(index + 1)) ? node.text.slice(leading).match(/ *$/)[0].length : 0;
+      if (leading) state.write(PROSEMIRROR_EXPLICIT_SPACE.repeat(leading));
+      const text = node.text.slice(leading, node.text.length - trailing);
+      let escaped = state.inAutolink ? text : state.esc(text, lineBoundary(previous));
+      if (!leading && lineBoundary(previous)) escaped = escaped.replace(/^(\d+)([.)])(?=\s|$)/, '$1\\$2');
+      if (parent.type.name === 'heading' && index === parent.childCount - 1) escaped = escaped.replace(/#+$/, hashes => hashes.replaceAll('#', '\\#'));
+      escaped = escaped.replace(/\\\[(?=[\s\S]*\\\])/g, '&#91;');
+      state.text(escaped, false);
+      if (trailing) state.write(PROSEMIRROR_EXPLICIT_SPACE.repeat(trailing));
     },
     markdown_comment_block(state, node) {
       state.write(node.attrs.source || '<!---->');
@@ -582,7 +711,10 @@ function prosemirrorMarkdownSerializer(api) {
     },
     tex_math(state, node) { state.text(node.attrs.source, false); },
     tex_math_block(state, node) { state.text(node.attrs.source, false); state.closeBlock(node); },
-    markdown_comment_inline(state, node) { state.write(node.attrs.source || '<!---->'); },
+    markdown_comment_inline(state, node, _parent, index) {
+      if (explicitInline && index === 0) state.write(PROSEMIRROR_EXPLICIT_SPACE);
+      state.write(node.attrs.source || '<!---->');
+    },
     markdown_literal_block(state, node) { state.write(node.attrs.source || ''); state.closeBlock(node); },
     markdown_literal_inline(state, node) { state.write(node.attrs.source || ''); },
     details(state, node) {
@@ -624,7 +756,10 @@ function prosemirrorMarkdownSerializer(api) {
     },
   }, {
     ...api.defaultMarkdownSerializer.marks,
-    ...Object.fromEntries(markdownFormatCommands.filter(entry => ['strong', 'em'].includes(entry.mark)).map(entry => [entry.mark, prosemirrorCodeStyleMark(entry, api.defaultMarkdownSerializer.marks[entry.mark])])),
+    ...Object.fromEntries(markdownFormatCommands.filter(entry => ['strong', 'em'].includes(entry.mark)).map(entry => [
+      entry.mark, explicitInline ? {open: `<${entry.mark}>`, close: `</${entry.mark}>`, mixable: true} :
+        prosemirrorCodeStyleMark(entry, api.defaultMarkdownSerializer.marks[entry.mark]),
+    ])),
     strike: prosemirrorCodeStyleMark(markdownFormatCommands.find(entry => entry.id === 'strike'), {open: '~~', close: '~~', mixable: true}),
     underline: {open: '<u>', close: '</u>', mixable: true},
     highlight: {open: '<mark>', close: '</mark>', mixable: true},
@@ -647,7 +782,36 @@ function prosemirrorDetailsNodeView(node) {
   };
 }
 
-function prosemirrorImageNodeView(node, panel, markdownPath) {
+function clearProseMirrorSourceSelection(panel, dom = null) {
+  const highlight = panel._pmAtomSourceSelection;
+  if (!highlight || (dom && highlight.dom !== dom)) return;
+  delete panel._pmAtomSourceSelection;
+  const {view, selection} = highlight;
+  // A rendered node can be destroyed while CodeMirror is applying an update.
+  queueMicrotask(() => {
+    if (panel._pmAtomSourceSelection || panel._cmView !== view || view.state.selection !== selection) return;
+    view.dispatch({selection: {anchor: selection.main.head}});
+  });
+}
+
+function bindProseMirrorSourceSelection(panel, dom, getPos, kind) {
+  const select = event => {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || fileEditorPanelMode(panel) !== 'split') return;
+    const position = getPos();
+    const range = sharedProseMirrorCoordinates(panel, 100)?.atoms.find(range => range.atom === kind && range.rich === position);
+    if (!range) return;
+    const view = panel._cmView;
+    revealSplitEditorSourceSelection(panel, range.source, range.sourceEnd);
+    panel._pmAtomSourceSelection = {dom, view, selection: view.state.selection};
+  };
+  dom.addEventListener('click', select);
+  return () => {
+    dom.removeEventListener('click', select);
+    clearProseMirrorSourceSelection(panel, dom);
+  };
+}
+
+function prosemirrorImageNodeView(node, panel, markdownPath, getPos) {
   const image = document.createElement('img');
   const original = String(node.attrs.src || '');
   image.className = 'markdown-preview-image prosemirror-image';
@@ -663,7 +827,8 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
   let active = true;
   let loadFrame = 0;
   let resolveScheduledLoad = null;
-  const isCurrent = () => active && image.isConnected;
+  // Dockview can detach a live editor while its authenticated image fetch is in flight.
+  const isCurrent = () => active;
   const target = markdownPreviewImageTarget(original, markdownPath);
   if (!target) {
     image.src = original;
@@ -699,10 +864,12 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
     image.addEventListener('error', onError, {once: true});
     image._prosemirrorErrorHandler = onError;
   }
+  const unbindSourceSelection = bindProseMirrorSourceSelection(panel, image, getPos, 'Image');
   return {
     dom: image,
     destroy() {
       active = false;
+      unbindSourceSelection();
       if (loadFrame) cancelAnimationFrame(loadFrame);
       loadFrame = 0;
       resolveScheduledLoad?.(false);
@@ -729,7 +896,6 @@ function prosemirrorMermaidCodeBlockNodeView(node, panel, markdownPath) {
   panel._pmMediaPromises ||= [];
   const render = renderMermaidSourceInto(host, node.textContent || '', {
     full: false,
-    controlsOnly: true,
     path: markdownPath,
     zoomKey: 'mermaid',
     wheelScrollParent: true,
@@ -765,6 +931,8 @@ function prosemirrorTaskListItemNodeView(node, view, getPos) {
   const taskLine = Number(node.attrs.taskLine || 0);
   let input = null;
   if (node.attrs.taskChecked !== null) {
+    dom.classList.add('task-list-item');
+    contentDOM.classList.add('markdown-task-label');
     input = document.createElement('input');
     input.className = `${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS} markdown-task-checkbox`;
     input.type = 'checkbox';
@@ -791,6 +959,19 @@ function prosemirrorTaskListItemNodeView(node, view, getPos) {
     ignoreMutation: mutation => Boolean(input && (mutation.target === input || input.contains(mutation.target))),
     stopEvent: event => Boolean(input && input.contains(event.target)),
   };
+}
+
+function prosemirrorTaskAccessPlugin(api) {
+  return new api.Plugin({
+    view(view) {
+      let editable = view.editable;
+      return {update(updated) {
+        if (editable === updated.editable) return;
+        editable = updated.editable;
+        for (const input of markdownRenderedTaskCheckboxes(updated.dom)) input.disabled = !editable;
+      }};
+    },
+  });
 }
 
 function prosemirrorPreviewClassName() {
@@ -825,6 +1006,12 @@ function prosemirrorSourceLineMetadata(source, parseEnvironment) {
   return {
     headings,
     topLevel: parseEnvironment.yomuxTopLevelSourceLines || [],
+    ranges: parseEnvironment.yomuxTopLevelSourceRanges || [],
+    listItemLines: parseEnvironment.yomuxListItemSourceLines || [],
+    textblocks: parseEnvironment.yomuxTextblockSourceRanges || [],
+    tableRows: parseEnvironment.yomuxTableRowSourceRanges || [],
+    mathBlocks: parseEnvironment.yomuxMathBlockSourceRanges || [],
+    references: parseEnvironment.references || {},
   };
 }
 
@@ -876,28 +1063,6 @@ function prosemirrorSourceLinePlugin(api, panel) {
   return plugin;
 }
 
-function normalizeProseMirrorEndBreakSource(text) {
-  const source = String(text || '');
-  let output = '', from = 0;
-  for (let index = 0; index < source.length; index++) {
-    if (source[index] === '\\') {
-      if (!['(', '['].includes(source[index + 1])) { index++; continue; }
-    } else if (source[index] !== '$') continue;
-    const math = markdownTexMathAt(source, index);
-    if (!math) continue;
-    output += source.slice(from, index).replace(/\\\n(?=\S)/g, '\n') + math.raw;
-    index += math.raw.length - 1;
-    from = index + 1;
-  }
-  return output + source.slice(from).replace(/\\\n(?=\S)/g, '\n');
-}
-
-function normalizeLegacyBreakMarkup(text) {
-  // Files produced by the earlier adapter may contain literal `<br>` markers. Treat only the
-  // standalone marker as a Markdown hard break; ordinary prose containing that text stays text.
-  return String(text || '').replace(/(^|\n)([^\n]*?)<br\s*\/?>\r?\n|(^|\n)([^\n]*?)<br\s*\/?>$/gi, '$1$2$3$4\\\n');
-}
-
 function destroyProseMirrorPanel(panel, options = {}) {
   if (!panel) return;
   if (options.invalidateEnsure !== false) {
@@ -916,9 +1081,15 @@ function destroyProseMirrorPanel(panel, options = {}) {
   delete panel._pmSource;
   delete panel._pmPlugins;
   delete panel._pmSourceLinePlugin;
+  delete panel._pmSharePresence;
+  delete panel._pmSplitCaret;
+  delete panel._pmSharePeers;
+  delete panel._pmShareCoordinates;
+  delete panel._pmSharedSourceDoc;
   delete panel._pmSourceDocument;
   delete panel._pmDocumentChanged;
   delete panel._pmPreviewPane;
+  scheduleSplitEditorCaret(panel);
 }
 
 function installProseMirrorContextMenuGuard() {
@@ -948,12 +1119,65 @@ function setProseMirrorSelection(view, from, to) {
   return true;
 }
 
+function prosemirrorIncomingTransaction(state, doc) {
+  const current = state.doc.content;
+  const start = current.findDiffStart(doc.content);
+  if (start === null) return state.tr;
+  if (state.doc.childCount === doc.childCount) {
+    const separate = state.tr;
+    function update(before, after, from) {
+      if (before.eq(after)) return;
+      if (!before.sameMarkup(after) || before.isLeaf ||
+          (!before.inlineContent && before.childCount !== after.childCount)) {
+        separate.replaceWith(from, from + before.nodeSize, after);
+        return;
+      }
+      if (before.inlineContent) {
+        const first = before.content.findDiffStart(after.content);
+        const {a, b} = before.content.findDiffEnd(after.content);
+        const overlap = Math.max(0, first - Math.min(a, b));
+        separate.replaceWith(from + 1 + first, from + 1 + a + overlap, after.content.cut(first, b + overlap));
+        return;
+      }
+      let end = from + before.nodeSize - 1;
+      for (let index = before.childCount - 1; index >= 0; index--) {
+        const child = before.child(index);
+        end -= child.nodeSize;
+        update(child, after.child(index), end);
+      }
+    }
+    // A batch can skip unchanged siblings containing local undo history.
+    update(state.doc, doc, -1);
+    if (separate.steps.length > 1 && separate.doc.eq(doc)) return separate;
+  }
+  const end = current.findDiffEnd(doc.content);
+  const overlap = Math.max(0, start - Math.min(end.a, end.b));
+  const slice = doc.slice(start, end.b + overlap);
+  const small = state.tr;
+  small.replace(start, end.a + overlap, slice);
+  if (small.doc.eq(doc)) return small;
+  // Fitting an open slice can drop a container. Replace the affected top-level blocks as a closed slice.
+  let from = 0, first = 0, oldEnd = current.childCount, newEnd = doc.childCount;
+  while (first < oldEnd && first < newEnd && current.child(first).eq(doc.child(first))) {
+    from += current.child(first++).nodeSize;
+  }
+  let to = current.size, nextTo = doc.content.size;
+  while (oldEnd > first && newEnd > first && current.child(oldEnd - 1).eq(doc.child(newEnd - 1))) {
+    to -= current.child(--oldEnd).nodeSize;
+    nextTo -= doc.child(--newEnd).nodeSize;
+  }
+  return state.tr.replace(from, to, doc.slice(from, nextTo));
+}
+
 function syncProseMirrorPanelSource(panel, path, state, options = {}) {
   if (!panel?._pmView || panel._pmPath !== path || !state) return false;
   restoreProseMirrorPanelDom(panel, {previewPane: panel._pmPreviewPane});
   applyProseMirrorViewDisplayMode(panel._pmView, path);
-  const next = normalizeLegacyBreakMarkup(state.content || '');
   const textEditorCommit = options.sourceSurface === 'text-editor';
+  const previewText = options.previewText;
+  const sharedText = state._shareActive ? codeMirrorPanelContent(panel) : null;
+  const source = previewText ?? sharedText ?? (textEditorCommit ? state.content : codeMirrorSplitPreviewText(panel, path, state)) ?? '';
+  if (panel._pmSource === source && !panel._pmDocumentChanged) return true;
   if (textEditorCommit) {
     if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
     panel._pmSerializeTimer = null;
@@ -961,28 +1185,35 @@ function syncProseMirrorPanelSource(panel, path, state, options = {}) {
     panel._pmSource = null;
     panel._pmDocumentChanged = false;
   }
-  if (panel._pmSource === next) return true;
+  if (panel._pmSource === source) return true;
   if (!textEditorCommit && panel._pmSerializeTimer && panel._pmSource === null) return true;
   if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
   panel._pmSerializeTimer = null;
   panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
   try {
     const parseEnvironment = {};
-    const doc = panel._pmParser.parse(next, parseEnvironment);
-    panel._pmSourceLineMetadata = prosemirrorSourceLineMetadata(next, parseEnvironment);
+    const doc = panel._pmParser.parse(source, parseEnvironment);
+    panel._pmSourceLineMetadata = prosemirrorSourceLineMetadata(source, parseEnvironment);
     panel._pmSourceLines = panel._pmSourceLineMetadata.topLevel;
     panel._pmIgnoredCommentRanges = parseEnvironment.yomuxIgnoredCommentRanges || [];
-    const selection = panel._pmView.state.selection;
-    const api = window.YOmuxProseMirror;
-    const options = {doc, plugins: panel._pmPlugins || []};
-    const nextSelection = prosemirrorSelectionForDocument(api, doc, selection.anchor, selection.head);
-    if (nextSelection) options.selection = nextSelection;
-    panel._pmView.updateState(api.EditorState.create(options));
-    panel._pmSource = next;
+    const view = panel._pmView;
+    const transaction = prosemirrorIncomingTransaction(view.state, doc);
+    transaction.setMeta(panel._pmSourceLinePlugin, panel._pmSourceLineMetadata).setMeta('addToHistory', false);
+    view.updateState(view.state.apply(transaction));
+    panel._pmSource = source;
+    panel._pmSharedSourceDoc = state._shareActive ? panel._cmView?.state.doc : null;
     panel._pmSourceDocument = doc;
     panel._pmDocumentChanged = false;
+    const pending = panel._pmSharePeers;
+    if (state._shareActive && pending && pending.doc === panel._pmSharedSourceDoc) {
+      paintSharedProseMirrorPresence(panel, pending.peers);
+    }
+    scheduleSplitEditorCaret(panel);
     return true;
   } catch (error) {
+    // The source editor may still be typing an incomplete construct. A committed failure
+    // uses the usual read-only fallback and diagnostic.
+    if (previewText !== undefined) return false;
     renderProseMirrorFailure(panel, path, editorPanelParts(panel), error);
     return false;
   }
@@ -991,7 +1222,8 @@ function syncProseMirrorPanelSource(panel, path, state, options = {}) {
 function restoreProseMirrorPanelDom(panel, parts) {
   const view = panel?._pmView;
   const pane = parts?.previewPane;
-  if (!view || !pane || view.dom.isConnected) return Boolean(view?.dom?.isConnected);
+  if (!view || !pane) return false;
+  if (view.dom.isConnected || pane.contains(view.dom)) return true;
   cleanupStandardPreviewStrategy(pane);
   disposeMarkdownPreviewEditing(pane);
   pane._previewRendererId = null;
@@ -1002,7 +1234,778 @@ function restoreProseMirrorPanelDom(panel, parts) {
 }
 
 function prosemirrorSupportedSource(path, state) {
-  return state?.kind === 'text' && previewKindForPath(path) === 'markdown' && state.historical !== true && state._shareActive !== true;
+  return state?.kind === 'text' && previewKindForPath(path) === 'markdown' && state.historical !== true &&
+    (!state._shareActive || fileEditorStateWritable(state));
+}
+
+function sharedProseMirrorSourceChanges(doc, start, raw, canonical, replacement) {
+  const base = Array.from(canonical);
+  const local = fileMergeEdits(base, Array.from(replacement));
+  const spelling = raw === canonical ? [] : fileMergeEdits(base, Array.from(raw));
+  if (!local || !spelling) return null;
+  const rawOffsets = [start];
+  for (const character of raw) rawOffsets.push(rawOffsets.at(-1) + character.length);
+  const changes = [];
+  for (const edit of local) {
+    let startShift = 0, endShift = 0;
+    for (const other of spelling) {
+      if (edit.from === edit.to && other.from === other.to && edit.from === other.from) {
+        if (edit.from === base.length) continue;
+        return null;
+      }
+      const delta = other.lines.length - (other.to - other.from);
+      if (other.to <= edit.from) {
+        startShift += delta;
+        endShift += delta;
+      } else if (other.from < edit.to) {
+        if (other.from < edit.from || other.to > edit.to) return null;
+        endShift += delta;
+      }
+    }
+    changes.push({from: rawOffsets[edit.from + startShift], to: rawOffsets[edit.to + endShift], insert: edit.lines.join('')});
+  }
+  return window.YOmuxCodeMirror.ChangeSet.of(changes, doc.length);
+}
+
+function sharedProseMirrorEquivalent(parsed, edited) {
+  if (parsed.eq(edited)) return true;
+  if (!parsed.sameMarkup(edited) && !(parsed.type === edited.type && (
+    (edited.type.name === 'bullet_list' && parsed.attrs.bullet === edited.attrs.bullet) ||
+    (edited.type.name === 'ordered_list' && parsed.attrs.order === edited.attrs.order &&
+      parsed.attrs.delimiter === edited.attrs.delimiter) ||
+    (edited.type.name === 'list_item' && parsed.attrs.taskChecked === edited.attrs.taskChecked)
+  ))) return false;
+  if (['paragraph', 'heading', 'table_cell', 'table_header'].includes(edited.type.name)) {
+    let from = 0, to = edited.content.size;
+    const trim = (node, direction) => node.isText ? node.text.match(direction < 0 ? /^[ \t]*/ : /[ \t]*$/)[0].length :
+      node.type.name === 'soft_break' ? node.nodeSize : 0;
+    for (let i = 0; i < edited.childCount; i++) {
+      const node = edited.child(i), size = trim(node, -1);
+      from += size;
+      if (size !== node.nodeSize) break;
+    }
+    for (let i = edited.childCount - 1; i >= 0; i--) {
+      const node = edited.child(i), size = trim(node, 1);
+      to -= size;
+      if (size !== node.nodeSize) break;
+    }
+    return parsed.content.eq(edited.content.cut(from, Math.max(from, to)));
+  }
+  if (parsed.childCount !== edited.childCount) return false;
+  for (let index = 0; index < parsed.childCount; index++) {
+    if (!sharedProseMirrorEquivalent(parsed.child(index), edited.child(index))) return false;
+  }
+  return true;
+}
+
+function normalizeSharedProseMirrorEdit(transaction) {
+  if (!transaction.docChanged) return;
+  const {doc, before} = transaction;
+  const start = before.content.findDiffStart(doc.content);
+  if (start === null) return;
+  const end = before.content.findDiffEnd(doc.content).b;
+  const removals = [], softBreaks = [];
+  const from = Math.max(0, start - 1), to = Math.min(doc.content.size, Math.max(start, end) + 1);
+  doc.nodesBetween(from, to, (node, position, parent) => {
+    if (node.isText && !parent.type.spec.code && node.text.includes('\n')) {
+      for (const match of node.text.matchAll(/\n/g)) {
+        softBreaks.push({position: position + match.index, marks: node.marks});
+      }
+    }
+    if (node.isTextblock) node.forEach((child, offset, index) => {
+      if (child.type.name === 'soft_break' && node.maybeChild(index - 1)?.type === child.type) {
+        removals.push([position + 1 + offset, child.nodeSize]);
+      }
+    });
+    if (node.type.name !== 'list_item' || node.childCount < 2) return;
+    let required = true;
+    node.forEach((child, offset, index) => {
+      if (child.type.name === 'paragraph' && !child.content.size &&
+          (!required || ['paragraph', 'tex_math_block'].includes(node.maybeChild(index + 1)?.type.name))) {
+        removals.push([position + 1 + offset, child.nodeSize]);
+      } else {
+        required = false;
+      }
+    });
+  });
+  for (const {position, marks} of softBreaks) {
+    transaction.replaceWith(position, position + 1, doc.type.schema.nodes.soft_break.create(null, null, marks));
+  }
+  for (const [at, size] of removals.sort((a, b) => b[0] - a[0])) transaction.delete(at, at + size);
+  const joins = [];
+  const nextDoc = transaction.doc;
+  const normalized = transaction.mapping.slice(transaction.mapping.maps.length - softBreaks.length - removals.length);
+  nextDoc.nodesBetween(normalized.map(from), normalized.map(to), (node, position) => {
+    if (node.type.name !== 'bullet_list') return;
+    const boundary = position + node.nodeSize;
+    const sibling = nextDoc.resolve(boundary).nodeAfter;
+    if (sibling?.type === node.type && sibling.attrs.bullet === node.attrs.bullet) joins.push(boundary);
+  });
+  for (const boundary of joins.sort((a, b) => b - a)) transaction.join(boundary);
+}
+
+function sharedProseMirrorEdit(panel, transaction, includeNeighbors = false) {
+  const view = panel._cmView;
+  const source = panel._pmSource;
+  if (source == null || (panel._pmSharedSourceDoc !== view.state.doc && source !== view.state.doc.toString())) return null;
+  const before = transaction.before, after = transaction.doc;
+  let first = 0, oldEnd = before.childCount, newEnd = after.childCount;
+  while (first < oldEnd && first < newEnd && before.child(first).eq(after.child(first))) first++;
+  while (oldEnd > first && newEnd > first && before.child(oldEnd - 1).eq(after.child(newEnd - 1))) {
+    oldEnd--; newEnd--;
+  }
+  if (first === oldEnd && first === newEnd) return {source, selectionOnly: true};
+  if (includeNeighbors) {
+    if (first > 0) first--;
+    while (oldEnd < before.childCount && newEnd < after.childCount) {
+      const range = panel._pmSourceLineMetadata?.ranges?.[oldEnd];
+      oldEnd++;
+      newEnd++;
+      if (range && range[0] < range[1]) break;
+    }
+  }
+  const ranges = panel._pmSourceLineMetadata?.ranges;
+  // An insertion at a block boundary needs a source range for its Markdown separators.
+  if (first === oldEnd) {
+    if (first > 0) first--;
+    else if (before.childCount) { oldEnd++; newEnd++; }
+  }
+  const emptyParagraph = node => node?.type.name === 'paragraph' && !node.content.size;
+  const atEnd = oldEnd === before.childCount && newEnd === after.childCount;
+  const trailingParagraphs = atEnd && (emptyParagraph(before.lastChild) || emptyParagraph(after.lastChild));
+  while (first > 0 && (!ranges?.[first] || ranges[first][1] <= ranges[first][0])) first--;
+  const startLine = ranges?.[first]?.[0], endLine = ranges?.[oldEnd - 1]?.[1];
+  const leadingParagraphs = first === 0 && Number.isInteger(startLine) && startLine === ranges[0][1];
+  if (!Number.isInteger(startLine) || (!leadingParagraphs && !trailingParagraphs &&
+      (!Number.isInteger(endLine) || endLine <= startLine))) {
+    if (source.trim()) return includeNeighbors ? null : sharedProseMirrorEdit(panel, transaction, true);
+  }
+  const doc = view.state.doc;
+  const start = !leadingParagraphs && Number.isInteger(startLine) ? doc.line(startLine + 1).from : 0;
+  const end = trailingParagraphs || !Number.isInteger(endLine) ? source.length :
+    leadingParagraphs && endLine === startLine ? doc.line(startLine + 1).from : doc.line(Math.min(doc.lines, endLine)).to;
+  const previousNodes = [];
+  for (let index = first; index < oldEnd; index++) previousNodes.push(before.child(index));
+  const nodes = [];
+  for (let index = first; index < newEnd; index++) nodes.push(after.child(index));
+  const hiddenComments = children => {
+    const comments = [];
+    const collect = node => {
+      if (prosemirrorHiddenComment(node)) comments.push(node.attrs.source);
+    };
+    for (const child of children) {
+      collect(child);
+      child.descendants(collect);
+    }
+    return comments;
+  };
+  const beforeComments = hiddenComments(previousNodes), afterComments = hiddenComments(nodes);
+  if (beforeComments.length !== afterComments.length || beforeComments.some((comment, index) => comment !== afterComments[index])) return null;
+  const serialize = (root, children, serializer = panel._pmSerializer) => serializer.serialize(root.type.create(null, children));
+  const raw = source.slice(start, end);
+  const retainNewline = trailingParagraphs && raw.endsWith('\n');
+  const canonical = serialize(before, previousNodes) + (retainNewline && !emptyParagraph(before.lastChild) ? '\n' : '');
+  const replacement = serialize(after, nodes) + (retainNewline && !emptyParagraph(after.lastChild) ? '\n' : '');
+  function validate(changes) {
+    if (!changes) return null;
+    const candidateDoc = changes.apply(doc);
+    const replacementSource = candidateDoc.sliceString(start, end + candidateDoc.length - doc.length);
+    const candidate = candidateDoc.toString();
+    if (oldEnd === first + 1 && newEnd === first + 1 && endLine === startLine + 1 &&
+        before.child(first).type.name === 'paragraph' && nodes[0].type.name === 'paragraph' &&
+        replacementSource.trim() && !replacementSource.includes('\n')) {
+      const fragment = panel._pmParser.parse(replacementSource);
+      if (fragment.childCount === 1 && sharedProseMirrorEquivalent(fragment.child(0), nodes[0])) {
+        return {source: candidate, changes, metadata: panel._pmSourceLineMetadata};
+      }
+    }
+    const environment = {};
+    const parsed = panel._pmParser.parse(candidate, environment);
+    if (!sharedProseMirrorEquivalent(parsed, after)) return null;
+    return {source: candidate, changes, metadata: prosemirrorSourceLineMetadata(candidate, environment)};
+  }
+  const mapped = validate(sharedProseMirrorSourceChanges(doc, start, raw, canonical, replacement));
+  if (mapped) return mapped;
+  const replace = text => sharedProseMirrorSourceChanges(doc, start, raw, raw, text);
+  const serializer = prosemirrorMarkdownSerializer(window.YOmuxProseMirror, {explicitInline: true});
+  const explicitReplacement = serialize(after, nodes, serializer) + (retainNewline && !emptyParagraph(after.lastChild) ? '\n' : '');
+  for (const text of new Set([replacement, explicitReplacement])) {
+    const result = validate(replace(text));
+    if (result) return result;
+    if (start > 1 && source[start - 2] !== '\n') {
+      const separated = validate(replace('\n' + text));
+      if (separated) return separated;
+    }
+  }
+  return includeNeighbors ? null : sharedProseMirrorEdit(panel, transaction, true);
+}
+
+function applySharedProseMirrorTransaction(panel, path, view, transaction) {
+  const state = fileEditorPanelState(panel);
+  let edit;
+  try {
+    normalizeSharedProseMirrorEdit(transaction);
+    edit = sharedProseMirrorEdit(panel, transaction);
+  } catch (_) { edit = null; }
+  if (!edit) {
+    syncProseMirrorPanelSource(panel, path, state);
+    view.updateState(view.state);
+    setFileEditorPanelStatus(panel, 'This edit could not be mapped to the shared Markdown. Use TextEdit for this change.', 'warn');
+    return;
+  }
+  if (!edit.selectionOnly) {
+    panel._pmSource = edit.source;
+    if (panel._pmSourceLineMetadata !== edit.metadata) transaction.setMeta(panel._pmSourceLinePlugin, edit.metadata);
+    panel._pmSourceLineMetadata = edit.metadata;
+  }
+  view.updateState(view.state.apply(transaction));
+  panel._pmSourceDocument = view.state.doc;
+  if (!edit.selectionOnly) {
+    panel._pmApplyingSharedEdit = true;
+    try {
+      panel._cmView.dispatch({changes: edit.changes, annotations: panel._cmApi.Transaction.addToHistory.of(false)});
+      panel._pmSharedSourceDoc = panel._cmView.state.doc;
+    } finally {
+      panel._pmApplyingSharedEdit = false;
+    }
+  }
+  restartProseMirrorCursorBlink(view);
+  scheduleSplitEditorCaret(panel);
+}
+
+function refreshSharedProseMirrorAccess(panel) {
+  panel._pmView.setProps({editable: () => prosemirrorPanelEditable(panel)});
+  refreshMarkdownFormattingToolbar(panel);
+}
+
+function splitCaretSourceSyntax(tree, doc, utils, references) {
+  if (!tree) return null;
+  const ranges = [];
+  const cells = [];
+  const unresolved = new Set();
+  tree.iterate({enter(node) {
+    const {from, to, name} = node;
+    if (name === 'TableCell') cells.push({from, to});
+    if (name === 'Link' || name === 'Image') {
+      const children = node.node.getChildren('LinkMark');
+      const last = node.node.lastChild;
+      if (children.length === 2 && last) {
+        const label = last.name === 'LinkLabel' && doc.sliceString(last.from + 1, last.to - 1) ||
+          doc.sliceString(children[0].to, children[1].from);
+        // Lezer recognizes unresolved reference syntax; Markdown-it renders it literally.
+        if (!Object.hasOwn(references, utils.normalizeReference(label))) {
+          unresolved.add(from);
+          return;
+        }
+      }
+    }
+    if (name === 'Image' || name === 'Comment') {
+      ranges.push({from, to, text: '', atom: name});
+      return false;
+    }
+    if (name === 'HTMLTag') {
+      const tag = doc.sliceString(from, to).match(/^<\/?([a-z]+)\b/i)?.[1]?.toLowerCase();
+      if (tag) ranges.push({from, to, text: '', atom: tag === 'img' ? 'Image' : 'Tag'});
+    } else if (name === 'HTMLBlock') {
+      const raw = doc.sliceString(from, to);
+      const image = raw.match(/^\s*(<img(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>)\s*$/i)?.[1];
+      if (image) {
+        const start = from + raw.indexOf(image);
+        ranges.push({from: start, to: start + image.length, text: '', atom: 'Image'});
+      }
+    } else if (['LinkMark', 'LinkLabel', 'LinkTitle', 'ListMark', 'HeaderMark', 'QuoteMark',
+      'EmphasisMark', 'StrikethroughMark', 'CodeMark', 'CodeInfo', 'TableDelimiter'].includes(name) ||
+      name === 'URL' && node.node.parent?.name === 'Link') {
+      if (!unresolved.has(node.node.parent?.from)) ranges.push({from, to, text: ''});
+    } else if (name === 'Entity' || name === 'Escape') {
+      const raw = doc.sliceString(from, to), text = utils.unescapeAll(raw);
+      if (raw !== text) ranges.push({from, to, text});
+    }
+  }});
+  return {ranges, cells};
+}
+
+function splitCaretSourceProjection(raw, start, changes) {
+  const pieces = [];
+  let text = '', cursor = start;
+  const copy = end => {
+    if (end <= cursor) return;
+    pieces.push({start: text.length, end: text.length + end - cursor, source: cursor});
+    text += raw.slice(cursor - start, end - start);
+  };
+  for (const change of changes) {
+    if (change.from < cursor || change.to > start + raw.length) continue;
+    copy(change.from);
+    if (change.text) {
+      pieces.push({start: text.length, end: text.length + change.text.length,
+        source: change.from, sourceEnd: change.to});
+      text += change.text;
+    }
+    cursor = change.to;
+  }
+  copy(start + raw.length);
+  return {text, pieces};
+}
+
+function splitCaretLowerBound(ranges, key, boundary) {
+  let first = 0, last = ranges.length;
+  while (first < last) {
+    const middle = (first + last) >>> 1;
+    if (ranges[middle][key] < boundary) first = middle + 1;
+    else last = middle;
+  }
+  return first;
+}
+
+function splitCaretSyntaxWithin(ranges, bounds) {
+  const local = [];
+  for (let index = splitCaretLowerBound(ranges, 'from', bounds.source);
+    index < ranges.length && ranges[index].from < bounds.sourceEnd; index++) {
+    if (ranges[index].to <= bounds.sourceEnd) local.push(ranges[index]);
+  }
+  return local;
+}
+
+function sharedProseMirrorCoordinates(panel, parseBudget = 0) {
+  const state = panel._cmView?.state, source = state?.doc, view = panel._pmView;
+  if (!source || !view) return null;
+  const cached = panel._pmShareCoordinates;
+  const api = window.YOmuxCodeMirror;
+  const tree = api?.ensureSyntaxTree(state, source.length, parseBudget) || api?.ensureSyntaxTree(state, 0, 0);
+  if (cached?.source === source && cached.rich === view.state.doc && cached.tree === tree) return cached;
+  const original = panel._pmSource;
+  const normalized = cached && cached.original === original ? cached.normalized : original?.replace(/\r\n?/g, '\n');
+  if (panel._pmSharedSourceDoc !== source &&
+      (normalized?.length !== source.length || normalized !== source.toString())) return null;
+  const tokenizer = panel._pmParser.tokenizer;
+  const {utils} = tokenizer;
+  const {references, mathBlocks} = panel._pmSourceLineMetadata;
+  const syntax = splitCaretSourceSyntax(tree, source, utils, references);
+  const spans = [], blocks = [], emptyItems = [], textblocks = [], atoms = [];
+  const listItemLines = panel._pmSourceLineMetadata?.listItemLines || [];
+  let itemIndex = 0;
+  if (listItemLines.length) view.state.doc.descendants((node, position) => {
+    if (node.type.name !== 'list_item') return;
+    const lineNumber = listItemLines[itemIndex++];
+    if (!prosemirrorEmptyListItem(node) || !Number.isInteger(lineNumber) || lineNumber > source.lines) return;
+    const line = source.line(lineNumber);
+    if (/^[\t >]*(?:[-+*]|\d+[.)])(?:[ \t]+\[[ xX]\])?[ \t]*$/.test(line.text)) {
+      emptyItems.push({rich: position + 2, source: line.to, sourceStart: line.from});
+    }
+  });
+  const boundsFor = (range, rich, richEnd) => {
+    if (!range || range[0] >= range[1] || range[1] > source.lines) return;
+    return {rich, richEnd, source: source.line(range[0] + 1).from, sourceEnd: source.line(range[1]).to};
+  };
+  const collectSpans = (node, offset, bounds, raw, sourceSyntax) => {
+    if (node.isTextblock && node.textContent === raw && node.content.size === raw.length) {
+      spans.push({rich: offset + 1, source: bounds.source, length: raw.length});
+      return;
+    }
+    let changes;
+    if (sourceSyntax) {
+      changes = sourceSyntax;
+    } else {
+      changes = Array.from(raw.matchAll(/\\[!-\/:-@[-\x60{-~]|&(?:#[xX][\da-fA-F]+|#\d+|[a-zA-Z][\da-zA-Z]*);/g),
+        match => ({from: bounds.source + match.index, to: bounds.source + match.index + match[0].length,
+          text: utils.unescapeAll(match[0])})).filter(change => change.to - change.from !== change.text.length);
+    }
+    const projected = splitCaretSourceProjection(raw, bounds.source, changes);
+    const content = projected.text;
+    const addSpan = (leaf, start) => {
+      const end = start + leaf.text.length;
+      const pieces = projected.pieces;
+      for (let index = splitCaretLowerBound(pieces, 'end', start + 1);
+        index < pieces.length && pieces[index].start < end; index++) {
+        const piece = pieces[index];
+        const from = Math.max(start, piece.start), to = Math.min(end, piece.end);
+        const rich = leaf.rich + from - start;
+        if (piece.sourceEnd === undefined) {
+          spans.push({rich, source: piece.source + from - piece.start, length: to - from});
+        } else {
+          if (from === piece.start) spans.push({rich, source: piece.source, length: 0});
+          if (to === piece.end) spans.push({rich: rich + to - from, source: piece.sourceEnd, length: 0});
+          if (from === piece.start && to === piece.end) {
+            atoms.push({source: piece.source, sourceEnd: piece.sourceEnd, rich, richEnd: rich + to - from});
+          }
+        }
+      }
+    };
+    const leaves = [];
+    node.descendants((child, position) => {
+      if (child.isText) leaves.push({text: child.text, rich: offset + position + 1});
+    });
+    // Only cross delimiters and whitespace. A URL or HTML attribute can repeat visible text.
+    const delimiter = /^(?:[\s*_~\x60>#|+:[\]().-]|\d+[.)])*$/;
+    let left = 0, first = 0;
+    for (; first < leaves.length; first++) {
+      const leaf = leaves[first];
+      const match = content.indexOf(leaf.text, left);
+      if (match < 0 || !delimiter.test(content.slice(left, match))) break;
+      addSpan(leaf, match);
+      left = match + leaf.text.length;
+    }
+    let right = content.length;
+    for (let index = leaves.length - 1; index >= first; index--) {
+      const leaf = leaves[index];
+      if (right - left < leaf.text.length) break;
+      const match = content.lastIndexOf(leaf.text, right - leaf.text.length);
+      if (match < left || !/^[\s*_~\x60]*$/.test(content.slice(match + leaf.text.length, right))) break;
+      addSpan(leaf, match);
+      right = match;
+    }
+  };
+  const collectAtoms = (node, offset, bounds, raw, firstSpan, sourceSyntax) => {
+    if (!raw.includes('<') && !raw.includes('![')) return;
+    const localSpans = spans.slice(firstSpan);
+    let after = bounds.source;
+    node.descendants((child, position) => {
+      const kind = prosemirrorHiddenComment(child) ? 'Comment' :
+        child.type.name === 'image' ? 'Image' : child.type.name === 'markdown_literal_inline' ? 'Tag' : null;
+      if (!kind) return;
+      const rich = offset + position + 1, richEnd = rich + child.nodeSize;
+      let from = bounds.source, to = bounds.sourceEnd;
+      for (const span of localSpans) {
+        if (span.rich + span.length <= rich) from = Math.max(from, span.source + span.length);
+        if (span.rich >= richEnd) to = Math.min(to, span.source);
+      }
+      const range = sourceSyntax?.find(range => range.atom === kind && range.from >= Math.max(from, after) && range.to <= to);
+      if (range) {
+        from = range.from;
+        to = range.to;
+        after = to;
+      } else if (kind === 'Comment') {
+        const start = raw.indexOf(child.attrs.source, from - bounds.source);
+        if (start < 0 || bounds.source + start + child.attrs.source.length > to) return;
+        from = bounds.source + start;
+        to = from + child.attrs.source.length;
+      }
+      if (from < to) atoms.push({source: from, sourceEnd: to, rich, richEnd, atom: range?.atom});
+    });
+  };
+  const collect = (node, offset, bounds) => {
+    const firstSpan = spans.length;
+    const raw = source.sliceString(bounds.source, bounds.sourceEnd);
+    let sourceSyntax = syntax && bounds.sourceEnd <= tree.length ? splitCaretSyntaxWithin(syntax.ranges, bounds) : null;
+    const equations = [];
+    if (raw.includes('$') || raw.includes('\\(') || raw.includes('\\[')) {
+      node.descendants((child, position) => {
+        if (child.type.name === 'tex_math') equations.push({child, rich: offset + position + 1});
+      });
+    }
+    if (equations.length) {
+      const tokens = [];
+      tokenizer.inline.parse(raw, tokenizer, {references}, tokens);
+      const matches = [];
+      for (let index = 0; index < tokens.length; index++) {
+        const codeEnd = prosemirrorInlineCodeEnd(tokens, index);
+        if (codeEnd > index) index = codeEnd;
+        else if (tokens[index].type === 'tex_math') matches.push(tokens[index]);
+      }
+      const tableCell = node.type.name === 'table_cell' || node.type.name === 'table_header';
+      // Match the parsed sequence within this block or cell. Identical code spans never enter it.
+      if (matches.length === equations.length && matches.every((token, index) =>
+        token.meta.source === equations[index].child.attrs.source ||
+        (tableCell && token.meta.source.replaceAll('\\|', '|') === equations[index].child.attrs.source))) {
+        const ranges = matches.map(({mathOffset, meta}, index) => {
+          const {child, rich} = equations[index];
+          const from = bounds.source + mathOffset, to = from + meta.source.length;
+          atoms.push({source: from, sourceEnd: to, rich, richEnd: rich + child.nodeSize, atom: 'Math'});
+          return {from, to, text: ''};
+        });
+        if (sourceSyntax) {
+          sourceSyntax = sourceSyntax.filter(change => !ranges.some(range => range.from < change.to && range.to > change.from))
+            .concat(ranges).sort((a, b) => a.from - b.from);
+        }
+      }
+    }
+    const task = node.type.name === 'paragraph' && raw.match(/^[\t >]*(?:[-+*]|\d+[.)])[\t ]+(\[[ xX]\])(?=\s|$)/);
+    if (task && sourceSyntax) {
+      const from = bounds.source + task[0].length - task[1].length;
+      sourceSyntax.splice(splitCaretLowerBound(sourceSyntax, 'from', from), 0,
+        {from, to: bounds.source + task[0].length, text: ''});
+    }
+    collectSpans(node, offset, bounds, raw, sourceSyntax);
+    collectAtoms(node, offset, bounds, raw, firstSpan, sourceSyntax);
+  };
+  const collectRow = ({node, position}, range) => {
+    const bounds = boundsFor(range, position + 2, position + node.nodeSize - 1);
+    if (!bounds) return;
+    const cells = syntax && bounds.sourceEnd <= tree.length ? splitCaretSyntaxWithin(syntax.cells, bounds) : [];
+    if (!cells.length) {
+      textblocks.push(bounds);
+      collect(node, position, bounds);
+      return;
+    }
+    node.forEach((cell, offset, index) => {
+      const cellPosition = position + offset + 1;
+      const cellBounds = {source: cells[index]?.from ?? bounds.sourceEnd, sourceEnd: cells[index]?.to ?? bounds.sourceEnd,
+        rich: cellPosition + 1, richEnd: cellPosition + cell.nodeSize - 1};
+      textblocks.push(cellBounds);
+      collect(cell, cellPosition, cellBounds);
+    });
+  };
+  const textNodes = [], rows = [], blockEquations = [];
+  view.state.doc.descendants((node, position) => {
+    if (['paragraph', 'heading', 'code_block'].includes(node.type.name)) textNodes.push({node, position});
+    if (node.type.name === 'table_row') rows.push({node, position});
+    if (node.type.name === 'tex_math_block') blockEquations.push({node, position});
+  });
+  if (mathBlocks.length === blockEquations.length) blockEquations.forEach(({node, position}, index) => {
+    const {lines, columns} = mathBlocks[index];
+    const bounds = boundsFor(lines, position, position + node.nodeSize);
+    if (!bounds || !columns) return;
+    atoms.push({...bounds, source: bounds.source + columns[0], sourceEnd: source.line(lines[1]).from + columns[1], atom: 'Math'});
+  });
+  const rowRanges = panel._pmSourceLineMetadata?.tableRows || [];
+  const scopedRows = rowRanges.length === rows.length;
+  if (scopedRows) rows.forEach((row, index) => collectRow(row, rowRanges[index]));
+  const textRanges = panel._pmSourceLineMetadata?.textblocks || [];
+  const scoped = textRanges.length === textNodes.length && textNodes.length > 0;
+  if (scoped) textNodes.forEach(({node, position}, index) => {
+    const bounds = boundsFor(textRanges[index], position + 1, position + 1 + node.content.size);
+    if (!bounds) return;
+    textblocks.push(bounds);
+    collect(node, position, bounds);
+  });
+  view.state.doc.forEach((block, offset, index) => {
+    let richStart = offset + (block.isTextblock ? 1 : 0);
+    if (!block.isTextblock && !block.isAtom) block.descendants((node, position) => {
+      if (richStart !== offset) return false;
+      if (node.isTextblock) {
+        richStart = offset + position + 2;
+        return false;
+      }
+    });
+    const range = panel._pmSourceLineMetadata?.ranges?.[index];
+    const bounds = boundsFor(range, richStart, offset + block.nodeSize);
+    if (!bounds) return;
+    blocks.push(bounds);
+    if (prosemirrorHiddenComment(block)) {
+      atoms.push(bounds);
+    } else if (block.type.name === 'table' ? !scopedRows : !scoped) collect(block, offset, bounds);
+  });
+  return panel._pmShareCoordinates = {
+    spans, blocks, textblocks, atoms, emptyItems: itemIndex === listItemLines.length ? emptyItems : [],
+    source, rich: view.state.doc, original, normalized, tree,
+  };
+}
+
+function mapSharedProseMirrorPosition(coordinates, position, from) {
+  if (!coordinates) return {offset: -1, exact: false};
+  const to = from === 'rich' ? 'source' : 'rich';
+  const {emptyItems, atoms, spans, textblocks, blocks} = coordinates;
+  const emptyItem = emptyItems.find(item => from === 'rich' ? position === item.rich :
+    position >= item.sourceStart && position <= item.source);
+  if (emptyItem) return {offset: emptyItem[to], exact: true};
+  if (from === 'source') {
+    const atom = atoms.find(range => position > range.source && position < range.sourceEnd);
+    if (atom) return {offset: atom.rich, exact: false};
+  }
+  const span = spans.find(range => position >= range[from] && position <= range[from] + range.length);
+  if (span) return {offset: span[to] + position - span[from], exact: true};
+  if (from === 'rich') {
+    const atom = atoms.find(range => position >= range.rich && position <= range.richEnd);
+    if (atom) return {offset: position === atom.rich ? atom.source : atom.sourceEnd, exact: false};
+  }
+  const contains = (scope, point) => point >= scope[from] && point <= scope[from + 'End'];
+  const scope = textblocks.find(range => contains(range, position)) || blocks.find(range => contains(range, position));
+  const next = blocks.find(range => position < range[from]);
+  if (!scope) return {offset: next?.[to] ?? blocks.at(-1)?.[to + 'End'] ?? (to === 'rich' ? 1 : 0), exact: false};
+  let offset = scope[to], distance = Infinity;
+  for (const span of spans) for (const end of [0, span.length]) {
+    const point = span[from] + end;
+    const gap = Math.abs(position - point);
+    if (!contains(scope, point) || gap >= distance) continue;
+    distance = gap;
+    offset = span[to] + end;
+  }
+  return {offset, exact: false};
+}
+
+function sharedProseMirrorSelection(panel) {
+  const rich = panel._pmView;
+  const coordinates = sharedProseMirrorCoordinates(panel);
+  const map = position => mapSharedProseMirrorPosition(coordinates, position, 'rich');
+  const head = map(rich.state.selection.head), anchor = map(rich.state.selection.anchor);
+  return {anchor: head.exact && anchor.exact ? anchor.offset : head.offset, head: head.offset,
+    focused: rich.hasFocus(), surface: 'view', approximate: !head.exact};
+}
+
+const splitCodeMirrorCarets = new WeakMap();
+
+function createSplitEditorCaret() {
+  const marker = document.createElement('span');
+  marker.className = 'split-editor-caret';
+  marker.setAttribute('aria-hidden', 'true');
+  return marker;
+}
+
+function paintSplitCodeMirrorGuide(view, api, range, revealPanel = null) {
+  if (!view) return;
+  let layer = splitCodeMirrorCarets.get(view);
+  if (!layer) {
+    if (!range) return;
+    const effect = api.StateEffect.define();
+    const field = api.StateField.define({
+      create: () => null,
+      update(previous, transaction) {
+        const update = transaction.effects.find(item => item.is(effect));
+        return update ? update.value : transaction.docChanged ? null : previous;
+      },
+    });
+    const overlay = api.layer({
+      above: true,
+      update: update => update.startState.field(field) !== update.state.field(field),
+      markers(view) {
+        const range = view.state.field(field);
+        if (!range) return [];
+        const marker = range.empty ? 'split-editor-caret split-codemirror-caret' : 'split-editor-selection';
+        return api.RectangleMarker.forRange(view, marker, range);
+      },
+    });
+    layer = {effect, field};
+    splitCodeMirrorCarets.set(view, layer);
+    view.dispatch({effects: api.StateEffect.appendConfig.of([field, overlay])});
+  }
+  const next = range ? (range.head === range.from
+    ? api.EditorSelection.range(range.to, range.from) : api.EditorSelection.range(range.from, range.to)) : null;
+  const previous = view.state.field(layer.field);
+  if (next ? !previous?.eq(next) : previous) {
+    const effects = [layer.effect.of(next)];
+    if (revealPanel && next) {
+      setFileEditorScrollSyncGuardForSource('preview', revealPanel);
+      const scroller = view.scrollDOM;
+      const yMargin = Number.isFinite(range.clientTop) && elementCanScroll(scroller)
+        ? Math.min(Math.max(0, scroller.clientHeight - view.defaultLineHeight), Math.max(0, range.clientTop - scroller.getBoundingClientRect().top))
+        : null;
+      effects.push(api.EditorView.scrollIntoView(next.head, yMargin === null ? undefined : {y: 'start', yMargin}));
+    }
+    view.dispatch({effects});
+  }
+}
+
+function* projectMarkdownSplitSelection(coordinates, selection, from) {
+  if (!coordinates) return;
+  const to = from === 'rich' ? 'source' : 'rich';
+  for (const span of coordinates.spans) {
+    const start = Math.max(selection.from, span[from]), end = Math.min(selection.to, span[from] + span.length);
+    if (start < end) yield {from: span[to] + start - span[from], to: span[to] + end - span[from]};
+  }
+  for (const atom of coordinates.atoms) {
+    if (selection.from >= atom[from + 'End'] || selection.to <= atom[from]) continue;
+    const node = coordinates.rich.nodeAt(atom.rich);
+    if (node && prosemirrorHiddenComment(node)) continue;
+    yield {from: atom[to], to: atom[to + 'End'], node: Boolean(node?.isAtom && !node.isText)};
+  }
+}
+
+function scheduleSplitEditorCaret(panel, revealCaret = false) {
+  if (revealCaret && panel._cmView?.hasFocus) panel._splitCaretRevealSelection = panel._cmView.state.selection;
+  if ((!panel._pmView && !splitCodeMirrorCarets.has(panel._cmView) && !htmlEditorPreviewFrame(panel)) || panel._splitCaretFrame) return;
+  panel._splitCaretFrame = requestAnimationFrame(() => {
+    panel._splitCaretFrame = null;
+    const frame = htmlEditorPreviewFrame(panel);
+    const text = panel._cmView, rich = panel._pmView, layer = panel._pmSplitCaret;
+    const selection = panel._splitCaretRevealSelection;
+    panel._splitCaretRevealSelection = null;
+    if (frame) {
+      if (fileEditorPanelMode(panel) === 'split') paintHtmlSplitCaret(panel, frame, !!selection && selection === text?.state.selection);
+      paintSharedHtmlPresence(panel, frame);
+    }
+    const textFocused = text?.hasFocus;
+    const richFocused = rich?.hasFocus();
+    let source = null, rendered = -1, renderedSelection = null;
+    const htmlGuide = frame && rememberSharedHtmlSelection(panel, frame);
+    if (panel.isConnected && text && rich?.editable && fileEditorPanelMode(panel) === 'split') {
+      if (textFocused) {
+        const coordinates = sharedProseMirrorCoordinates(panel);
+        const range = text.state.selection.main;
+        const head = prosemirrorCaretDestination(rich, mapSharedProseMirrorPosition(coordinates, range.head, 'source').offset);
+        if (range.empty) rendered = head;
+        else renderedSelection = projectMarkdownSplitSelection(coordinates, range, 'source');
+        if (selection === text.state.selection && head >= 0) revealProseMirrorSplitCaret(panel, rich, text, range, head);
+      } else if (richFocused) {
+        const coordinates = sharedProseMirrorCoordinates(panel), range = rich.state.selection;
+        if (range.empty) {
+          const {offset} = mapSharedProseMirrorPosition(coordinates, range.head, 'rich');
+          if (offset >= 0) source = {from: offset, to: offset};
+        } else {
+          for (const {from, to} of projectMarkdownSplitSelection(coordinates, range, 'rich')) {
+            source = source ? {from: Math.min(from, source.from), to: Math.max(to, source.to)} : {from, to};
+          }
+        }
+        // Like an HTML page caret, the ViewEdit caret's height is where TextEdit lines up its own.
+        if (source) source.clientTop = rich.coordsAtPos(range.head).top;
+      }
+    }
+    const htmlSplitGuide = fileEditorPanelMode(panel) === 'split' ? htmlGuide : null;
+    const guide = htmlSplitGuide || source;
+    paintSplitCodeMirrorGuide(text, panel._cmApi, textFocused ? null : guide, guide ? panel : null);
+    if (!layer || richFocused) return;
+    const api = window.YOmuxProseMirror;
+    const marks = rendered >= 0
+      ? [api.Decoration.widget(rendered, createSplitEditorCaret, {key: 'split-editor-caret', side: 1})]
+      : Array.from(renderedSelection || [], ({from, to, node}) => {
+        const attrs = {class: node ? 'split-editor-selection split-editor-selection-atom' : 'split-editor-selection'};
+        return node ? api.Decoration.node(from, to, attrs) : api.Decoration.inline(from, to, attrs);
+      });
+    const decorations = api.DecorationSet.create(rich.state.doc, marks);
+    if (layer.getState(rich.state).eq(decorations)) return;
+    rich.updateState(rich.state.apply(rich.state.tr.setMeta(layer, decorations)));
+  });
+}
+
+// The ViewEdit half of a TextEdit click: scroll ViewEdit so the rendered caret is level with the
+// TextEdit caret, as the HTML page does.
+function revealProseMirrorSplitCaret(panel, rich, text, range, head) {
+  const scroller = fileEditorSourceElement(panel, 'preview');
+  const source = text.coordsAtPos(range.head, range.head === range.from ? 1 : -1);
+  if (!scroller || !source) return;
+  const caret = rich.coordsAtPos(head), viewport = scroller.getBoundingClientRect();
+  const targetTop = Math.max(0, Math.min(viewport.height - (caret.bottom - caret.top), source.top - viewport.top));
+  revealSplitCaret(panel, scroller, caret.top - viewport.top, targetTop);
+}
+
+function prosemirrorCaretDestination(view, offset) {
+  if (offset < 0) return -1;
+  const api = window.YOmuxProseMirror;
+  const point = view.state.doc.resolve(offset);
+  return point.parent.inlineContent ? point.pos :
+    ((api.Selection.findFrom(point, 1, true) || api.Selection.findFrom(point, -1, true))?.head ?? -1);
+}
+
+function paintSharedProseMirrorPresence(panel, peers) {
+  const rich = panel._pmView, plugin = panel._pmSharePresence;
+  if (!rich || !plugin) return;
+  const api = window.YOmuxProseMirror;
+  const coordinates = peers.length ? sharedProseMirrorCoordinates(panel) : null;
+  panel._pmSharePeers = peers.length && !coordinates ? {doc: panel._cmView?.state.doc, peers} : null;
+  const map = position => mapSharedProseMirrorPosition(coordinates, position, 'source');
+  const decorations = [];
+  for (const peer of peers) {
+    const anchor = map(peer.anchor), destination = map(peer.head);
+    const head = prosemirrorCaretDestination(rich, destination.offset);
+    if (head < 0) continue;
+    const approximate = peer.approximate || !destination.exact || head !== destination.offset;
+    const color = shareParticipantStyle(peer);
+    if (!peer.follower && !approximate && anchor.exact && anchor.offset !== head) {
+      decorations.push(api.Decoration.inline(Math.min(anchor.offset, head), Math.max(anchor.offset, head),
+        {class: 'share-remote-selection', style: color}));
+    }
+    decorations.push(api.Decoration.widget(head, () => {
+      const caret = document.createElement('span');
+      caret.className = 'share-rich-caret';
+      caret.setAttribute('style', color);
+      caret.dataset.shareCaretName = peer.name;
+      caret.toggleAttribute('data-share-caret-follower', peer.follower === true);
+      caret.toggleAttribute('data-share-caret-primary', peer.follower === false);
+      if (approximate) caret.dataset.shareCaretApproximate = '';
+      caret.setAttribute('aria-hidden', 'true');
+      return caret;
+    }, {key: `${peer.clientID}:${peer.name}:${color}:${Boolean(approximate)}:${peer.follower}`, side: 1}));
+  }
+  rich.updateState(rich.state.apply(rich.state.tr.setMeta(plugin, api.DecorationSet.create(rich.state.doc, decorations))));
 }
 
 function clearProseMirrorFallback(parts) {
@@ -1062,7 +2065,7 @@ function commitProseMirrorSource(panel, path, options = {}) {
     panel._pmDocumentChanged = false;
     return true;
   }
-  let next = normalizeProseMirrorEndBreakSource(serializeProseMirrorSource(panel));
+  let next = serializeProseMirrorSource(panel);
   if (next === null) return false;
   const state = fileEditorPanelState(panel);
   if (!state || state.historical === true) return false;
@@ -1135,16 +2138,78 @@ function prosemirrorTableCell(node, schema) {
   return node.type === schema.nodes.table_cell || node.type === schema.nodes.table_header;
 }
 
+function moveProseMirrorTableRow(api, direction) {
+  return (state, dispatch) => {
+    const {$head} = state.selection;
+    const tableDepth = $head.depth - 2;
+    if (tableDepth < 0 || !prosemirrorTableCell($head.parent, state.schema) ||
+        $head.node(tableDepth).type !== state.schema.nodes.table) return false;
+    const table = $head.node(tableDepth);
+    const rowIndex = $head.index(tableDepth) + direction;
+    const column = $head.index(tableDepth + 1);
+    if (rowIndex < 0 || rowIndex >= table.childCount || column >= table.child(rowIndex).childCount) return true;
+    const row = state.doc.resolve($head.posAtIndex(rowIndex, tableDepth) + 1);
+    const cell = row.parent.child(column);
+    const position = row.posAtIndex(column) + 1 + Math.min($head.parentOffset, cell.content.size);
+    if (dispatch) dispatch(state.tr.setSelection(api.TextSelection.create(state.doc, position)).scrollIntoView());
+    return true;
+  };
+}
+
+function replaceProseMirrorProtectedSelection(api, state, from, to) {
+  if (from === to) return null;
+  const $from = state.doc.resolve(from), $to = state.doc.resolve(to);
+  let protect = !$from.sameParent($to) &&
+    (prosemirrorTableCell($from.parent, state.schema) || prosemirrorTableCell($to.parent, state.schema));
+  const ranges = [];
+  state.doc.nodesBetween(from, to, (node, position) => {
+    if (prosemirrorHiddenComment(node)) protect = true;
+    if (!node.isTextblock) return;
+    let start = Math.max(from, position + 1);
+    const end = Math.min(to, position + node.nodeSize - 1);
+    node.forEach((child, offset) => {
+      const next = position + 1 + offset;
+      if (!prosemirrorHiddenComment(child) || next >= end || next + child.nodeSize <= start) return;
+      protect = true;
+      if (start < next) ranges.push([start, next]);
+      start = next + child.nodeSize;
+    });
+    if (start < end) ranges.push([start, end]);
+    return false;
+  });
+  if (!protect) return null;
+  const tr = state.tr;
+  for (const [start, end] of ranges.reverse()) tr.delete(start, end);
+  return tr.setSelection(api.Selection.near(tr.doc.resolve(tr.mapping.map(from))));
+}
+
+function replaceProseMirrorRangeWithBreak(api, command, state, dispatch, view) {
+  const tr = replaceProseMirrorProtectedSelection(api, state, state.selection.from, state.selection.to);
+  if (!tr) return false;
+  if (dispatch) {
+    const interim = api.EditorState.create({doc: tr.doc, selection: tr.selection});
+    const handled = command(interim, next => {
+      for (const step of next.steps) tr.step(step);
+      tr.setSelection(api.Selection.fromJSON(tr.doc, next.selection.toJSON())).setStoredMarks(next.storedMarks);
+    }, view);
+    if (handled || tr.docChanged) dispatch(tr.scrollIntoView());
+  }
+  return true;
+}
+
 function insertProseMirrorHardBreak(api, schema) {
-  return (state, dispatch, view) => {
+  return function hardBreak(state, dispatch, view) {
     const {$from, $to} = state.selection;
-    if (!$from.sameParent($to)) return prosemirrorTableCell($from.parent, schema) || prosemirrorTableCell($to.parent, schema);
+    if (!$from.sameParent($to) && (prosemirrorTableCell($from.parent, schema) || prosemirrorTableCell($to.parent, schema))) return true;
+    if (replaceProseMirrorRangeWithBreak(api, hardBreak, state, dispatch, view)) return true;
+    if (!$from.sameParent($to)) return false;
     if (!$from.parent.isTextblock) return false;
     if ($from.parent.type.spec.code) return api.baseKeymap.Enter(state, dispatch, view);
     const type = schema.nodes.hard_break;
     if (!type) return false;
     if (dispatch) {
-      dispatch(state.tr.replaceSelectionWith(type.create()).scrollIntoView());
+      const marks = state.storedMarks || $from.marks();
+      dispatch(state.tr.replaceSelectionWith(type.create(), false).ensureMarks(marks).scrollIntoView());
     }
     return true;
   };
@@ -1161,14 +2226,34 @@ function insertProseMirrorSoftBreak(api, schema) {
 }
 
 function insertProseMirrorEnter(api, schema) {
-  return (state, dispatch, view) => {
+  return function enter(state, dispatch, view) {
     const {$from, $to} = state.selection;
     // Splitting an inline-content table cell adds a column; GFM drops surplus cells on reopen.
     if (prosemirrorTableCell($from.parent, schema) || prosemirrorTableCell($to.parent, schema)) {
       if ($from.sameParent($to)) insertProseMirrorHardBreak(api, schema)(state, dispatch, view);
       return true;
     }
+    if (replaceProseMirrorRangeWithBreak(api, enter, state, dispatch, view)) return true;
     const itemDepth = markdownListItemDepth($from);
+    if (state.selection.empty && itemDepth && $from.depth === itemDepth + 1) {
+      const item = $from.node(itemDepth);
+      if (prosemirrorEmptyListItem(item)) {
+        const listDepth = itemDepth - 1;
+        const following = state.doc.resolve($from.after(listDepth)).nodeAfter;
+        const continues = $from.index(listDepth) + 1 < $from.node(listDepth).childCount ||
+          following?.type.name === 'bullet_list' || following?.type.name === 'ordered_list';
+        if (continues) {
+          if (dispatch) {
+            const at = $from.after(itemDepth);
+            const blank = item.type.create({...item.attrs, taskLine: 0, taskChecked: item.attrs.taskChecked === null ? null : false}, item.content);
+            const tr = state.tr.insert(at, blank);
+            tr.setSelection(api.TextSelection.create(tr.doc, at + 2));
+            dispatch(tr.scrollIntoView());
+          }
+          return true;
+        }
+      }
+    }
     const checklist = itemDepth && $from.node(itemDepth).attrs.taskChecked !== null;
     const splitDispatch = dispatch && (transaction => {
       const position = transaction.selection.$from;
@@ -1181,6 +2266,67 @@ function insertProseMirrorEnter(api, schema) {
     });
     if (!$from.parent.type.spec.code && api.splitListItem(schema.nodes.list_item)(state, splitDispatch, view)) return true;
     return api.baseKeymap.Enter(state, dispatch, view);
+  };
+}
+
+function deleteProseMirrorBoundary(api, direction) {
+  return (state, dispatch) => {
+    const {empty, $from, $to} = state.selection;
+    if (!empty) {
+      const tr = replaceProseMirrorProtectedSelection(api, state, $from.pos, $to.pos);
+      if (!tr) return false;
+      dispatch?.(tr.scrollIntoView());
+      return true;
+    }
+    let point = $from;
+    while ((direction < 0 ? point.nodeBefore : point.nodeAfter)?.type.name === 'markdown_comment_inline') {
+      point = state.doc.resolve(point.pos + direction);
+    }
+    if (point !== $from) {
+      dispatch?.(state.tr.setSelection(api.TextSelection.create(state.doc, point.pos)).scrollIntoView());
+      return true;
+    }
+    if (!$from.parent.isTextblock || $from.parentOffset !== (direction < 0 ? 0 : $from.parent.content.size)) return false;
+    if (prosemirrorTableCell($from.parent, state.schema)) return true;
+    const adjacent = direction < 0 ? state.doc.resolve($from.before()).nodeBefore : state.doc.resolve($from.after()).nodeAfter;
+    if (adjacent?.type.name === 'markdown_comment_block') {
+      const target = $from.pos + direction * (adjacent.nodeSize + 1);
+      if (target >= 0 && target <= state.doc.content.size) {
+        dispatch?.(state.tr.setSelection(api.Selection.near(state.doc.resolve(target), direction)).scrollIntoView());
+      }
+      return true;
+    }
+    const depth = markdownListItemDepth($from);
+    if (!depth || $from.depth !== depth + 1) return false;
+    const list = $from.node(depth - 1);
+    const index = $from.index(depth - 1);
+    const item = list.child(index);
+    let from = $from.before(depth), to = $from.after(depth);
+    const blank = prosemirrorEmptyListItem(item);
+    if (!blank) {
+      const neighbor = list.maybeChild(index + direction);
+      const edge = direction < 0 ? $from.index(depth) === 0 : $from.index(depth) === item.childCount - 1;
+      if (!edge || !neighbor) return false;
+      if (!prosemirrorEmptyListItem(neighbor)) {
+        const other = direction < 0 ? neighbor.lastChild : neighbor.firstChild;
+        if ($from.parent.type.name !== 'paragraph' || other?.type !== $from.parent.type) return false;
+        const boundary = direction < 0 ? from : to;
+        dispatch?.(state.tr.delete(boundary - 2, boundary + 2).scrollIntoView());
+        return true;
+      }
+      if (direction < 0) { to = from; from -= neighbor.nodeSize; }
+      else { from = to; to += neighbor.nodeSize; }
+    } else if (list.childCount === 1) {
+      return api.liftListItem(item.type)(state, dispatch);
+    }
+    if (dispatch) {
+      const tr = state.tr.delete(from, to);
+      if (blank) {
+        tr.setSelection(api.Selection.near(tr.doc.resolve(from), direction));
+      }
+      dispatch(tr.scrollIntoView());
+    }
+    return true;
   };
 }
 
@@ -1205,7 +2351,7 @@ function prosemirrorSelectionContext(view) {
   };
 }
 
-function prosemirrorSelectionAtClientPoint(view, event) {
+function prosemirrorSelectionAtClientPoint(view, event, cell = null) {
   const link = event.target?.closest?.('a[href]');
   if (link && view.dom.contains(link)) {
     const textNode = link.firstChild;
@@ -1231,12 +2377,19 @@ function prosemirrorSelectionAtClientPoint(view, event) {
     }
   }
   const selection = view.state.selection;
-  if (!selection.empty) return prosemirrorSelectionContext(view);
+  const cellStart = cell ? view.posAtDOM(cell, 0) : null;
+  if (!selection.empty && (!cell || (selection.$from.start() === cellStart && selection.$to.start() === cellStart))) {
+    return prosemirrorSelectionContext(view);
+  }
   const point = view.posAtCoords({left: event.clientX, top: event.clientY});
-  if (!point) return prosemirrorSelectionContext(view);
-  const {$from} = view.state.doc.resolve(point.pos);
+  if (!point && !cell) return prosemirrorSelectionContext(view);
+  const clicked = point && view.state.doc.resolve(point.pos);
+  const $from = cell && clicked?.start() !== cellStart ? view.state.doc.resolve(cellStart) : clicked;
   const text = $from.parent.textContent || '';
-  if (!text) return prosemirrorSelectionContext(view);
+  if (!text) {
+    if (cell) setProseMirrorSelection(view, $from.pos, $from.pos);
+    return prosemirrorSelectionContext(view);
+  }
   const offset = Math.max(0, Math.min($from.parentOffset, text.length));
   let start = offset;
   let end = offset;
@@ -1436,20 +2589,110 @@ async function addMarkdownLinkUrl(view) {
   return true;
 }
 
+function prosemirrorLinkHoverPlugin(api) {
+  return new api.Plugin({
+    view(view) {
+      const hover = installPreviewLinkHover(view.dom, {
+        resolve: link => previewLinkDestination(link, view.dom.dataset.mdPath),
+        isCurrent: () => view.editable && Boolean(view.dom.getClientRects().length),
+        clientPoint: event => ({x: event.clientX, y: event.clientY}),
+      });
+      return {
+        update(current, previous) {
+          if (current.state.doc !== previous.doc || !current.editable) hover.close();
+        },
+        destroy: hover.destroy,
+      };
+    },
+  });
+}
+
+function editProseMirrorTable(panel, view, cell, {axis, offset, align}) {
+  if (panel._pmView !== view || !markdownFormattingWritable(panel, 'view-editor') || !view.dom.contains(cell)) return;
+  const {state} = view;
+  const {table, table_row, table_header, table_cell, paragraph} = state.schema.nodes;
+  const position = state.doc.resolve(view.posAtDOM(cell, 0));
+  const depth = position.depth;
+  if (!prosemirrorTableCell(position.parent, state.schema) || depth < 3 ||
+      position.node(depth - 2).type !== table) return;
+  const original = position.node(depth - 2);
+  const start = position.before(depth - 2);
+  const row = position.index(depth - 2);
+  const column = position.index(depth - 1);
+  if (align !== undefined) {
+    const transaction = state.tr;
+    // GFM stores alignment in the delimiter row and applies it to the entire column.
+    original.forEach((entry, rowOffset) => entry.forEach((node, cellOffset, index) => {
+      if (index === column && node.attrs.align !== align) {
+        transaction.setNodeMarkup(start + rowOffset + cellOffset + 2, null, {...node.attrs, align});
+      }
+    }));
+    if (transaction.docChanged) view.dispatch(transaction);
+    view.focus();
+    return;
+  }
+  const rows = [];
+  original.forEach(entry => {
+    const cells = [];
+    entry.forEach(node => cells.push(node));
+    rows.push(cells);
+  });
+  const alignments = rows[0].map(node => node.attrs.align);
+  let nextRow = row, nextColumn = column;
+  if (axis === 'row') {
+    if (offset) rows.splice(nextRow = row + (offset > 0 ? 1 : 0), 0,
+      alignments.map(align => table_cell.create({align})));
+    else rows.splice(row, 1);
+  } else {
+    if (offset) {
+      nextColumn = column + (offset > 0 ? 1 : 0);
+      for (const cells of rows) cells.splice(nextColumn, 0, table_cell.create());
+    } else {
+      for (const cells of rows) cells.splice(column, 1);
+    }
+  }
+  const remaining = rows.length && rows[0].length;
+  const result = remaining ? table.create(original.attrs, rows.map((cells, index) => {
+    const type = index === 0 ? table_header : table_cell;
+    return table_row.create(null, cells.map(node =>
+      node.type === type ? node : type.create(node.attrs, node.content, node.marks)));
+  })) : paragraph.create();
+  const transaction = state.tr.replaceWith(start, start + original.nodeSize, result);
+  let caret = start + 1;
+  if (remaining) {
+    nextRow = Math.min(nextRow, result.childCount - 1);
+    nextColumn = Math.min(nextColumn, result.child(nextRow).childCount - 1);
+    result.forEach((node, rowOffset, index) => {
+      if (index !== nextRow) return;
+      node.forEach((_cell, cellOffset, index) => {
+        if (index === nextColumn) caret = start + rowOffset + cellOffset + 3;
+      });
+    });
+  }
+  transaction.setSelection(window.YOmuxProseMirror.TextSelection.create(transaction.doc, caret));
+  view.dispatch(transaction.scrollIntoView());
+  view.focus();
+}
+
 function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
   const onContextMenu = event => {
+    const cell = event.target?.closest?.('td,th');
+    const canFormat = markdownFormattingWritable(panel, 'view-editor');
+    const table = cell && view.dom.contains(cell) && canFormat
+      ? {align: cell.style.textAlign || null, edit: change => editProseMirrorTable(panel, view, cell, change)}
+      : null;
     const image = event.target?.closest?.('img');
-    if (image && view.dom.contains(image)) {
+    if (!table && image && view.dom.contains(image)) {
       event.preventDefault();
       event.stopPropagation();
       showImageContextMenu(image, event.clientX, event.clientY);
       return;
     }
     const link = event.target?.closest?.('a[href]');
-    const context = prosemirrorSelectionAtClientPoint(view, event);
-    if (!context.block) return;
+    const context = prosemirrorSelectionAtClientPoint(view, event, table ? cell : null);
+    if (!context.block && !table) return;
     event.preventDefault();
     event.stopPropagation();
     markdownFormattingContextMenu(event, context, {
@@ -1457,11 +2700,13 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
       copyHref: link && view.dom.contains(link) ? link.href : '',
       markdownPath: path,
       surface: 'view-editor',
+      image: table ? image : null,
+      table,
       modifyUrl: link && view.dom.contains(link) ? () => modifyMarkdownLinkUrl(view, link) : null,
       removeUrl: link && view.dom.contains(link) ? () => removeMarkdownLinkUrl(view, link) : null,
       addUrl: !link && context.selectedText ? () => addMarkdownLinkUrl(view) : null,
       applyCommand: command => dispatchMarkdownFormat(panel, command, 'view-editor'),
-      canFormat: markdownFormattingWritable(panel, 'view-editor'),
+      canFormat,
       formatState: command => markdownFormattingState(panel, markdownFormatCommands.find(entry => entry.id === command), 'view-editor'),
 
     });
@@ -1489,6 +2734,17 @@ function restartProseMirrorCursorBlink(view, composing = view.composing) {
   }
 }
 
+function prosemirrorCaretPlugin(api) {
+  const plugin = new api.Plugin({
+    state: {
+      init: () => api.DecorationSet.empty,
+      apply: (transaction, previous) => transaction.getMeta(plugin) || previous.map(transaction.mapping, transaction.doc),
+    },
+    props: {decorations: state => plugin.getState(state)},
+  });
+  return plugin;
+}
+
 function createProseMirrorPanel(panel, item, path, state, parts, api) {
   if (!parts?.previewPane) return false;
   panel._pmMediaPromises = [];
@@ -1505,20 +2761,31 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   applyProseMirrorPreviewDisplayMode(container);
   container.setAttribute('data-prosemirror-editor', 'true');
   const sourceLinePlugin = prosemirrorSourceLinePlugin(api, panel);
+  const sharePresence = prosemirrorCaretPlugin(api);
+  const splitCaret = prosemirrorCaretPlugin(api);
   const plugins = [
     api.keymap({
       'Mod-s': () => {
-        flushProseMirrorSource(panel, path);
+        if (!fileEditorPanelState(panel)?._shareActive) flushProseMirrorSource(panel, path);
         void saveFileEditor(path, panel);
         return true;
       },
       'Shift-Enter': insertProseMirrorHardBreak(api, schema),
       Enter: insertProseMirrorEnter(api, schema),
+      Backspace: deleteProseMirrorBoundary(api, -1),
+      Delete: deleteProseMirrorBoundary(api, 1),
+      ArrowUp: moveProseMirrorTableRow(api, -1),
+      ArrowDown: moveProseMirrorTableRow(api, 1),
     }),
     api.history(),
     api.keymap({'Mod-z': api.undo, 'Shift-Mod-z': api.redo, 'Mod-y': api.redo}),
     api.keymap(api.baseKeymap),
     sourceLinePlugin,
+    prosemirrorImageFitPlugin(api),
+    prosemirrorLinkHoverPlugin(api),
+    prosemirrorTaskAccessPlugin(api),
+    sharePresence,
+    splitCaret,
   ];
   const editorState = api.EditorState.create({doc, plugins});
   if (panel.dataset.filePath !== path || !['preview', 'split'].includes(editorViewModeFor(path, item))) {
@@ -1536,6 +2803,12 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   const view = new api.EditorView(container, {
     state: editorState,
     editable: () => prosemirrorPanelEditable(panel),
+    handleTextInput(view, from, to, text) {
+      const tr = replaceProseMirrorProtectedSelection(api, view.state, from, to);
+      if (!tr) return false;
+      view.dispatch(tr.insertText(text).scrollIntoView());
+      return true;
+    },
     attributes: {
       class: prosemirrorPreviewClassName(),
       'data-md-path': path,
@@ -1545,21 +2818,42 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       // Mermaid fences render as isolated images; ViewEdit never exposes the diagram source as a
       // contentDOM, so changing it remains a TextEdit operation.
       code_block: node => prosemirrorCodeBlockNodeView(node, panel, path),
-      tex_math: prosemirrorTexMathNodeView,
-      tex_math_block: prosemirrorTexMathNodeView,
+      tex_math: (node, _view, getPos) => prosemirrorTexMathNodeView(node, panel, getPos),
+      tex_math_block: (node, _view, getPos) => prosemirrorTexMathNodeView(node, panel, getPos),
       details: prosemirrorDetailsNodeView,
-      image: node => prosemirrorImageNodeView(node, panel, path),
+      image: (node, _view, getPos) => prosemirrorImageNodeView(node, panel, path, getPos),
       list_item: prosemirrorTaskListItemNodeView,
     },
     handleDOMEvents: {
+      focus() {
+        panel._shareCaretSurface = 'view';
+        const current = fileEditorPanelState(panel);
+        if (current?._shareActive) syncProseMirrorPanelSource(panel, path, current);
+        scheduleSplitEditorCaret(panel);
+        return false;
+      },
+      blur() {
+        scheduleSplitEditorCaret(panel);
+        return false;
+      },
       compositionstart(view) { restartProseMirrorCursorBlink(view, true); return false; },
       compositionend(view) { restartProseMirrorCursorBlink(view, false); return false; },
     },
     dispatchTransaction(transaction) {
       if (transaction.docChanged && !markdownFormattingWritable(panel, 'view-editor')) return;
+      if (transaction.docChanged || (transaction.selectionSet && !transaction.selection.eq(view.state.selection))) {
+        clearProseMirrorSourceSelection(panel);
+      }
+      if (transaction.docChanged && fileEditorPanelState(panel)?._shareActive) {
+        applySharedProseMirrorTransaction(panel, path, view, transaction);
+        return;
+      }
       const nextState = view.state.apply(transaction);
       view.updateState(nextState);
-      if (transaction.docChanged || transaction.selectionSet) restartProseMirrorCursorBlink(view);
+      if (transaction.docChanged || transaction.selectionSet) {
+        restartProseMirrorCursorBlink(view);
+        scheduleSplitEditorCaret(panel);
+      }
       refreshMarkdownFormattingToolbar(panel);
       if (transaction.docChanged && transaction.getMeta('yomuxSourceLineRefresh') !== true) {
         panel._pmSource = null;
@@ -1580,7 +2874,9 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmSerializer = serializer;
   panel._pmPlugins = plugins;
   panel._pmSourceLinePlugin = sourceLinePlugin;
-  panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  panel._pmSharePresence = sharePresence;
+  panel._pmSplitCaret = splitCaret;
+  panel._pmSource = state.content || '';
   panel._pmSourceDocument = doc;
   panel._pmDocumentChanged = false;
   panel._pmSourceLines = panel._pmSourceLineMetadata.topLevel;
@@ -1591,6 +2887,8 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   parts.previewPane.dataset.prosemirrorState = 'ready';
   installProseMirrorInteractions(panel, path, view, schema, api);
   ensureMarkdownFormattingToolbar(panel);
+  panel._shareConnection?.refreshPresence();
+  scheduleSplitEditorCaret(panel);
   return true;
 }
 

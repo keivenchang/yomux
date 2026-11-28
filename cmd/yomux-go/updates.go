@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -43,16 +44,18 @@ type updateSnapshot struct {
 }
 
 type updateChecker struct {
-	mu       sync.Mutex
-	root     string
-	current  string
-	branch   string
-	readPref func() string
-	prepare  func(context.Context, selfUpdateJob) (*preparedSelfUpdate, error)
-	publish  func(updateSnapshot)
-	snapshot updateSnapshot
-	running  bool
-	wait     chan struct{}
+	mu           sync.Mutex
+	root         string
+	current      string
+	branch       string
+	readPref     func() string
+	prepare      func(context.Context, selfUpdateJob) (*preparedSelfUpdate, error)
+	publish      func(updateSnapshot)
+	snapshot     updateSnapshot
+	running      bool
+	manualQueued bool
+	lastManual   time.Time
+	wait         chan struct{}
 }
 
 func newUpdateChecker(root, current string, readPref func() string) *updateChecker {
@@ -119,6 +122,35 @@ func (c *updateChecker) Check(ctx context.Context) updateSnapshot {
 	close(wait)
 	c.mu.Unlock()
 	return result
+}
+
+// QueueManual reserves admission before starting a goroutine, so bursts coalesce.
+func (c *updateChecker) QueueManual(ctx context.Context, start func(func()) bool, now time.Time) (bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.running || c.manualQueued {
+		return false, false
+	}
+	if !c.lastManual.IsZero() && now.Sub(c.lastManual) < 30*time.Second {
+		return false, true
+	}
+	c.manualQueued = true
+	previous := c.snapshot
+	if c.snapshot.Available {
+		c.snapshot.BuildState = "checking"
+		c.snapshot.BuildError = ""
+		c.snapshot.prepared = nil
+	}
+	if !start(func() {
+		defer func() { c.mu.Lock(); c.manualQueued = false; c.mu.Unlock() }()
+		c.Check(ctx)
+	}) {
+		c.manualQueued = false
+		c.snapshot = previous
+		return false, false
+	}
+	c.lastManual = now
+	return true, false
 }
 
 func (c *updateChecker) check(ctx context.Context) updateSnapshot {
@@ -226,10 +258,34 @@ func (s *server) publishUpdateStatus(result updateSnapshot) {
 }
 
 func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		if s.producerContext == nil {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "Update checker is unavailable"})
+			return
+		}
+		job := s.loadUpdateJob()
+		if job.State == "preparing" || job.State == "activating" || job.State == "restarting" {
+			jsonResponse(w, http.StatusConflict, map[string]any{"error": "An update is being installed"})
+			return
+		}
+		accepted, limited := s.updates.QueueManual(s.producerContext, s.startBackgroundWork, time.Now())
+		if !accepted && !limited && s.backgroundWorkAdmissionClosed() {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "Update checker is shutting down"})
+			return
+		}
+		if limited {
+			w.Header().Set("Retry-After", "30")
+			jsonResponse(w, http.StatusTooManyRequests, map[string]any{"error": "Wait 30 seconds before retrying preparation"})
+			return
+		}
+		jsonResponse(w, http.StatusAccepted, map[string]any{"accepted": accepted, "status": updateStatusPayload(s.updates.Snapshot())})
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
 	result := s.updates.Snapshot()
 	if s.producerContext != nil && (result.CheckedAt.IsZero() || time.Since(result.CheckedAt) > time.Hour) {
 		s.startBackgroundWork(func() { s.updates.Check(s.producerContext) })
@@ -407,7 +463,7 @@ func (s *server) selfUpdate(w http.ResponseWriter, r *http.Request) {
 	job := s.loadUpdateJob()
 	if job.State == "preparing" || job.State == "activating" || job.State == "restarting" {
 		s.updateJobMu.Unlock()
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "restarting": true, "version": job.Target, "target": job.Target, "job": job})
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "restarting": true, "version": job.Target, "target": job.Target, "instance_id": s.instanceID, "job": job})
 		return
 	}
 	update := s.updates.Snapshot()
@@ -516,35 +572,23 @@ func (s *server) prepareSelfUpdate(ctx context.Context, job selfUpdateJob) (resu
 	if hasLocalChanges {
 		return nil, errors.New("Auto-update needs a clean checkout. Commit or stash the local edits, then retry.")
 	}
-	stage := filepath.Join(s.config, "self-update", job.TargetSHA, job.ID)
-	if strings.HasPrefix(job.ID, "preflight-") {
-		// One owned workspace keeps Bazel's output-base identity bounded across retries and targets.
-		stage = filepath.Join(s.config, "self-update", "preflight")
-		marker := stage + ".owner"
-		if _, err := os.Lstat(stage); err == nil {
-			owner, readErr := os.ReadFile(marker)
-			info, statErr := os.Lstat(stage)
-			if readErr != nil || string(owner) != "yomux-update-preflight-v1\n" || statErr != nil || !info.IsDir() {
-				return nil, errors.New("update preflight workspace has no valid ownership record")
-			}
-			if err := os.RemoveAll(stage); err != nil {
-				return nil, err
-			}
-		} else if !os.IsNotExist(err) {
-			return nil, err
-		}
-		if err := os.MkdirAll(filepath.Dir(stage), 0o700); err != nil {
-			return nil, err
-		}
-		if err := writeAtomicFile(marker, []byte("yomux-update-preflight-v1\n")); err != nil {
-			return nil, err
-		}
+	if err := os.MkdirAll(s.config, 0700); err != nil {
+		return nil, err
 	}
-	stage, err = filepath.Abs(stage)
+	configRoot, err := filepath.Abs(s.config)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(stage, 0o700); err != nil {
+	configRoot, err = filepath.EvalSymlinks(configRoot)
+	if err != nil {
+		return nil, err
+	}
+	stage := filepath.Join(configRoot, "self-update", job.TargetSHA, job.ID)
+	reusable := strings.HasPrefix(job.ID, "preflight-")
+	if reusable {
+		stage = filepath.Join(configRoot, "self-update", "preflight")
+	}
+	if err := prepareUpdateStage(configRoot, stage); err != nil {
 		return nil, err
 	}
 	// Retire only the candidate workspace's Bazel server; never another checkout's server.
@@ -582,7 +626,7 @@ func (s *server) prepareSelfUpdate(ctx context.Context, job selfUpdateJob) (resu
 	if archiveWait != nil || tarWait != nil {
 		return nil, fmt.Errorf("stage archive failed: %s %v %v", archiveErr.String(), archiveWait, tarWait)
 	}
-	for _, args := range [][]string{{"tools/build_go.sh"}, {"bazel-bin/tools/staticgen/staticgen_/staticgen", "--source-root", stage, "--output-directory", filepath.Join(stage, "static")}} {
+	for step, args := range [][]string{{"tools/build_go.sh"}, {"bazel-bin/tools/staticgen/staticgen_/staticgen", "--source-root", stage, "--output-directory", filepath.Join(stage, "static")}} {
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		cmd.Dir = stage
 		cmd.Env = os.Environ()
@@ -604,24 +648,15 @@ func (s *server) prepareSelfUpdate(ctx context.Context, job selfUpdateJob) (resu
 		}
 		closeErr := logFile.Close()
 		if runErr != nil {
-			logReader, readErr := os.Open(logPath)
-			if readErr != nil {
-				return nil, errors.Join(runErr, readErr)
+			phase := "compilation or browser asset setup"
+			if step == 1 {
+				phase = "static generation"
 			}
-			info, statErr := logReader.Stat()
-			if statErr != nil {
-				logReader.Close()
-				return nil, errors.Join(runErr, statErr)
+			// build_go.sh writes the current phase for concise failures; the full output stays private.
+			if data, err := os.ReadFile(filepath.Join(stage, ".update-build-phase")); err == nil && step == 0 {
+				phase = strings.TrimSpace(string(data))
 			}
-			if info.Size() > 4096 {
-				_, readErr = logReader.Seek(-4096, io.SeekEnd)
-			}
-			logData, tailErr := io.ReadAll(io.LimitReader(logReader, 4096))
-			closeErr := logReader.Close()
-			if err := errors.Join(readErr, tailErr, closeErr); err != nil {
-				return nil, errors.Join(runErr, err)
-			}
-			return nil, fmt.Errorf("%s failed: %w: %s (full log: %s)", args[0], runErr, strings.TrimSpace(string(logData)), logPath)
+			return nil, updatePreparationFailure(stage, phase, runErr)
 		}
 		if closeErr != nil {
 			return nil, closeErr
@@ -630,43 +665,93 @@ func (s *server) prepareSelfUpdate(ctx context.Context, job selfUpdateJob) (resu
 	}
 	binary := filepath.Join(stage, "bazel-bin", "cmd", "yomux-go", "yomux-go_", "yomux-go")
 	if info, err := os.Stat(binary); err != nil || !info.Mode().IsRegular() {
-		return nil, errors.New("prepared Go executable is missing")
+		return nil, errors.New("verification failed: prepared Go executable is missing")
 	}
-	versionCheck := exec.CommandContext(ctx, binary, "--version")
-	versionOutput, versionErr := versionCheck.Output()
+	// Verification shares the private output log while preserving stdout's protocol.
+	verify := func(label string, args ...string) ([]byte, []byte, error) {
+		logFile, err := os.OpenFile(filepath.Join(stage, "build.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, err := fmt.Fprintln(logFile, "Verification:", label); err != nil {
+			return nil, nil, errors.Join(err, logFile.Close())
+		}
+		var stdout, stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		cmd.Stdout = io.MultiWriter(logFile, &stdout)
+		cmd.Stderr = io.MultiWriter(logFile, &stderr)
+		cmd.WaitDelay = 5 * time.Second
+		runErr := cmd.Run()
+		return stdout.Bytes(), stderr.Bytes(), errors.Join(runErr, logFile.Close())
+	}
+	versionOutput, _, versionErr := verify("executable version", binary, "--version")
 	if versionErr != nil || strings.TrimSpace(string(versionOutput)) != "yomux-go "+job.Target {
-		return nil, fmt.Errorf("prepared Go executable reported the wrong version: %s", strings.TrimSpace(string(versionOutput)))
+		return nil, updatePreparationFailure(stage, "verification: prepared Go executable reported the wrong version", versionErr)
 	}
-	operatorCheck := exec.CommandContext(ctx, binary, "--operator", "version", "--root", stage)
-	operatorOutput, operatorErr := operatorCheck.CombinedOutput()
-	if operatorErr != nil || strings.TrimSpace(string(operatorOutput)) != job.Target {
-		return nil, fmt.Errorf("prepared checkout lacks compatible native launch support: %s", strings.TrimSpace(string(operatorOutput)))
+	operatorOutput, operatorStderr, operatorErr := verify("native launch support", binary, "--operator", "version", "--root", stage)
+	if operatorErr != nil || strings.TrimSpace(string(append(operatorOutput, operatorStderr...))) != job.Target {
+		return nil, updatePreparationFailure(stage, "verification: prepared checkout lacks compatible native launch support", operatorErr)
 	}
 	if installation != nil {
-		options := exec.CommandContext(ctx, "bash", filepath.Join(stage, "tools", "install.sh"), "--help")
-		output, err := options.CombinedOutput()
-		if err != nil || !strings.Contains(string(output), "--source-root") {
-			return nil, fmt.Errorf("prepared installer lacks installed-update provenance support: %s", strings.TrimSpace(string(output)))
+		output, stderr, err := verify("installed-update provenance", "bash", filepath.Join(stage, "tools", "install.sh"), "--help")
+		if err != nil || !strings.Contains(string(append(output, stderr...)), "--source-root") {
+			return nil, updatePreparationFailure(stage, "verification: prepared installer lacks installed-update provenance support", err)
 		}
 	}
 	preparedBinary := filepath.Join(stage, "yomux-go")
 	if err := copyAtomic(binary, preparedBinary, 0o700); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("verification failed: %w", err)
 	}
 	for _, asset := range []string{"yomux.js", "yomux.css"} {
 		if info, err := os.Stat(filepath.Join(stage, "static", asset)); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-			return nil, fmt.Errorf("prepared browser asset %s is missing", asset)
+			return nil, fmt.Errorf("verification failed: prepared browser asset %s is missing", asset)
 		}
 	}
 	hashes, err := preparedUpdateHashes(stage, preparedBinary)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("verification failed: %w", err)
 	}
 	prepared := &preparedSelfUpdate{runtimeRoot: runtimeRoot, root: root, head: head, installation: installation, stage: stage, binary: preparedBinary, target: job.TargetSHA, hashes: hashes}
 	if err := validatePreparedUpdate(ctx, prepared); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("verification failed: %w", err)
 	}
 	return prepared, nil
+}
+
+// Keep one bounded user-facing reason; command output remains in the private log.
+func updatePreparationFailure(stage, phase string, cause error) error {
+	if cause == nil {
+		cause = errors.New("unexpected verification response")
+	}
+	logPath := filepath.Join(stage, "build.log")
+	failure := func(err error) error {
+		return fmt.Errorf("%s failed: %w (full log: %s)", phase, errors.Join(cause, err), logPath)
+	}
+	reader, err := os.Open(logPath)
+	if err != nil {
+		return failure(err)
+	}
+	info, err := reader.Stat()
+	if err != nil {
+		return failure(errors.Join(err, reader.Close()))
+	}
+	if info.Size() > 512 {
+		if _, err := reader.Seek(-512, io.SeekEnd); err != nil {
+			return failure(errors.Join(err, reader.Close()))
+		}
+	}
+	data, readErr := io.ReadAll(io.LimitReader(reader, 512))
+	if err := errors.Join(readErr, reader.Close()); err != nil {
+		return failure(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		reason := strings.TrimSpace(lines[index])
+		if reason != "" && !strings.HasPrefix(reason, "Verification:") {
+			return fmt.Errorf("%s failed: %w: %s (full log: %s)", phase, cause, reason, logPath)
+		}
+	}
+	return failure(nil)
 }
 
 // Browser dependencies and generated catalogs are part of the prepared runtime,
@@ -736,10 +821,20 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		if err != nil {
 			job.Error = err.Error()
 		}
-		_ = s.saveUpdateJob(job)
+		if err := s.saveUpdateJob(job); err != nil {
+			fmt.Fprintf(os.Stderr, "self-update status publication: %v\n", err)
+		}
 	}
-	fail := func(err error) { set("failed", "Update stopped; the current server remains available", err) }
+	moved := false
 	prepared := job.prepared
+	fail := func(err error) {
+		progress := "Update stopped before checkout activation"
+		if moved {
+			progress = "Update stopped after checkout activation"
+			err = fmt.Errorf("%w; recover with: %s", err, prepared.recoveryCommand(s.selfUpdateBootArgs()))
+		}
+		set("failed", progress, err)
+	}
 	if prepared == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
@@ -773,6 +868,7 @@ func (s *server) runSelfUpdate(job selfUpdateJob) {
 		fail(err)
 		return
 	}
+	moved = true
 	if installation != nil {
 		installer := exec.Command("bash", filepath.Join(stage, "tools", "install.sh"), "--prefix", installation.Prefix, "--source-root", root)
 		installer.Dir = stage
@@ -950,7 +1046,7 @@ func recordSelfUpdateLauncherFailure(spec selfUpdateSupervisorSpec, failure erro
 	_, err := mutateSelfUpdateJob(spec.JobPath, spec.JobID, []string{"restarting"}, func(job *selfUpdateJob) {
 		job.State = "failed"
 		job.Progress = "Managed restart failed; the launcher did not verify the replacement"
-		job.Error = failure.Error()
+		job.Error = failure.Error() + "; recover with: " + selfUpdateRecoveryCommand(spec.Root, spec.PreparedBinary, spec.BootArgs)
 		job.LauncherLog = spec.LogPath
 	})
 	return err
@@ -1056,4 +1152,22 @@ func (s *server) selfUpdateBootArgs() []string {
 		args = append(args, "--cert", s.tlsCertificate, "--key", s.tlsKey)
 	}
 	return args
+}
+
+func selfUpdateRecoveryCommand(root, binary string, args []string) string {
+	parts := []string{"env", shellQuote("YOMUX_GO_BINARY=" + binary), "bash", shellQuote(filepath.Join(root, "boot.sh"))}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func (prepared *preparedSelfUpdate) recoveryCommand(args []string) string {
+	if prepared.installation == nil {
+		return selfUpdateRecoveryCommand(prepared.runtimeRoot, prepared.binary, args)
+	}
+	// Repair a prefix that may contain a new executable beside an old manifest or assets.
+	installer := []string{"env", shellQuote("YOMUX_GO_BINARY=" + prepared.binary), "YOMUX_INSTALL_PREPARED=1", "bash", shellQuote(filepath.Join(prepared.stage, "tools", "install.sh")), "--prefix", shellQuote(prepared.installation.Prefix), "--source-root", shellQuote(prepared.root)}
+	repair := "(cd " + shellQuote(prepared.stage) + " && " + strings.Join(installer, " ") + ")"
+	return repair + " && " + selfUpdateRecoveryCommand(prepared.runtimeRoot, filepath.Join(prepared.runtimeRoot, "yomux-go"), args)
 }

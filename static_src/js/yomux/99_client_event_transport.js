@@ -312,7 +312,11 @@ async function readCurrentUpdateStatus(url = '/api/update-status', options = {})
   return {status, isCurrent: () => sequence === updateStatusReadSequence && revision === updateStatusRevision};
 }
 
+let selfUpdateInstallInFlight = false;
+
 async function triggerSelfUpdate(_event = null, ownerToast = null) {
+  if (selfUpdateInstallInFlight) return;
+  selfUpdateInstallInFlight = true;
   const dry = updateDryRunEnabled();
   try {
     const {status, isCurrent} = await readCurrentUpdateStatus('/api/update-status', {cache: 'no-store'});
@@ -322,7 +326,7 @@ async function triggerSelfUpdate(_event = null, ownerToast = null) {
       if (!status?.available) emitNotification('update', {title: t('update.softwareTitle'), lines: [t('update.notReady')], coalesceKey: 'self-update-result'});
       return;
     }
-    const confirmed = window.confirm(dry ? t('update.confirmDryRun') : t('update.confirmInstall'));
+    const confirmed = window.confirm(dry ? t('update.confirmDryRun') : t('update.confirmInstall', {target: status.target}));
     if (!confirmed) return;
     const target = String(status.target || '').trim();
     const data = await apiFetchJson(`/api/self-update${dry ? '?dryrun=1' : ''}`, {
@@ -334,10 +338,11 @@ async function triggerSelfUpdate(_event = null, ownerToast = null) {
     }
     const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
     emitNotification('update', {title, lines: [data.job?.progress || userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))], coalesceKey: 'self-update-result'});
-    if (data.ok && data.restarting) startSelfUpdateReloadPolling(data.target || data.version || target, data.instance_id || '');
+    if (data.ok && data.restarting) startSelfUpdateReloadPolling(data.target || data.version || target, data.instance_id || '', data.job?.id || '');
   } catch (error) {
     emitNotification('update', {title: t('update.failed'), lines: [userMessageText(error, t('update.seeServerLogs'))], coalesceKey: 'self-update-result'});
   }
+  finally { selfUpdateInstallInFlight = false; }
 }
 
 // Non-intrusive "a newer version exists" cue: unhide the topbar badge and show one dismissible toast
@@ -348,11 +353,26 @@ function updateBuildStatusText(state, error = '') {
   return t('update.buildChecking');
 }
 
+async function retryUpdatePreparation() {
+  try {
+    await apiFetchJson('/api/update-status', {method: 'POST'});
+    await checkForUpdateOnce();
+  } catch (error) {
+    emitNotification('update', {title: t('update.failed'), lines: [userMessageText(error, t('update.seeServerLogs'))], coalesceKey: 'self-update-result'});
+  }
+}
+
+let dismissedUpdateNotice = '';
+
 function applyUpdateAvailable(status, revision = null) {
   if (revision !== null && revision !== updateStatusRevision) return;
   if (revision === null) updateStatusRevision += 1;
-  if (!status || !status.available) return;
-  if (status.notify === false) return;
+  if (!status || !status.available || status.notify === false) {
+    dismissedUpdateNotice = '';
+    hideUpdateBadge();
+    dismissUpdateAvailableToasts();
+    return;
+  }
   const target = String(status.target || '').trim();
   const ready = status.build_state === 'ready';
   const detail = updateBuildStatusText(status.build_state, status.build_error);
@@ -366,12 +386,16 @@ function applyUpdateAvailable(status, revision = null) {
     else delete badge.dataset.updateTarget;
     renderUpdateBadgeChrome();
   }
+  const noticeKey = JSON.stringify([target, status.target_sha, status.build_state, status.build_error || '']);
+  if (noticeKey === dismissedUpdateNotice) return;
+  dismissedUpdateNotice = '';
   const node = emitNotification('update', {
     title: t('update.availableTitle'),
     lines: [t('update.availableBody', {target: target ? ` (${target})` : ''}), detail],
-    actions: readOnlyMode || !ready ? [] : [updateActionButton(t('update.now'), triggerSelfUpdate)],
+    actions: readOnlyMode ? [] : ready ? [updateActionButton(t('update.now'), triggerSelfUpdate)] : status.build_state === 'failed' ? [updateActionButton(t('update.retryPreparation'), retryUpdatePreparation)] : [],
+    onClose: () => { dismissedUpdateNotice = noticeKey; },
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
-    className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
+    className: 'attention-alert toast toast-update toast-update-available',  // solid (opaque) background, not the translucent default
     coalesceKey: 'update-available',
   }).inApp;
   if (node && target) node.dataset.updateTarget = target;
@@ -836,7 +860,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
-    if ((finderActive && fileExplorerMode !== 'tabber') || differActive || fileEditorActive) channels.add('files');
+    if ((finderActive && fileExplorerMode !== 'tabber') || differActive || fileEditorActive || activeItems.includes(shareItemId)) channels.add('files');
     if (activeItems.includes(infoItemId)) {
       channels.add('activity');
       channels.add('transcripts');

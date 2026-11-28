@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/chat"
+	"github.com/keivenchang/yomux/internal/testsupport"
 	"github.com/keivenchang/yomux/internal/yoagent"
 )
 
@@ -502,7 +503,7 @@ func TestRunNativeAgentCancellationStopsProviderProcessGroup(t *testing.T) {
 	}
 	pidPath := filepath.Join(home, "child.pid")
 	program := "#!/bin/sh\n/bin/sleep 60 &\necho $! > \"$YOAGENT_CHILD_PID_FILE\"\nwait\n"
-	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(program), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(bin, "codex"), []byte(program), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
@@ -730,7 +731,7 @@ func TestRunNativeAgentUsesReadOnlyCodexAndStreamsAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	program := "#!/bin/sh\n[ \"$1\" = exec ] || exit 10\nshift\ncase \"$*\" in *\"--sandbox read-only\"*) ;; *) exit 11 ;; esac\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"provider-thread-1\"}' '{\"type\":\"item.delta\",\"delta\":\"hello \"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"hello world\"}}'\n"
-	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(program), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(bin, "codex"), []byte(program), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
@@ -758,7 +759,7 @@ func TestRunNativeAgentUsesClaudeWorkingDirectoryWithoutUnsupportedFlag(t *testi
 		t.Fatal(err)
 	}
 	program := "#!/bin/sh\n[ \"$PWD\" = \"$YOAGENT_EXPECTED_CWD\" ] || exit 20\n[ \"$1\" = --print ] || exit 21\nfor arg in \"$@\"; do [ \"$arg\" = --cwd ] && exit 22; done\ncase \" $* \" in *\" --model claude-sonnet-5-5 \"*) ;; *) exit 23 ;; esac\ncase \" $* \" in *\" --effort medium \"*) ;; *) exit 24 ;; esac\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}}' '{\"type\":\"result\",\"result\":\"OK\",\"is_error\":false}'\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(program), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(bin, "claude"), []byte(program), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
@@ -770,6 +771,31 @@ func TestRunNativeAgentUsesClaudeWorkingDirectoryWithoutUnsupportedFlag(t *testi
 	if err != nil || answer != "OK" || status["transport"] != "claude-print" || status["session_id"] != "claude-session" {
 		t.Fatalf("status=%v answer=%q err=%v", status, answer, err)
 	}
+	guard := `
+case " $* " in *" --safe-mode "*) ;; *) exit 25 ;; esac
+case " $* " in *" --strict-mcp-config "*) ;; *) exit 26 ;; esac
+case " $* " in *" --no-session-persistence "*) ;; *) exit 27 ;; esac
+case " $* " in *' --settings {"disableAllHooks":true} '*) ;; *) exit 30 ;; esac
+found=0
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --tools ]; then
+        [ "$#" -gt 1 ] && [ -z "$2" ] || exit 28
+        found=1
+        break
+    fi
+    shift
+done
+[ "$found" = 1 ] || exit 29
+`
+	if err := testsupport.WriteExecutable(filepath.Join(bin, "claude"), []byte(strings.Replace(program, "printf", guard+"printf", 1)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	status, answer, err = runNativeAgent(context.Background(), home, map[string]any{
+		"claude_model": "claude-sonnet-5-5", "claude_effort": "medium", "_description_data_only": true,
+	}, "claude", "", false, "prompt", func(string) error { return nil })
+	if err != nil || answer != "OK" || status["persistent"] != false || status["session_id"] != nil {
+		t.Fatalf("description status=%v answer=%q err=%v", status, answer, err)
+	}
 }
 
 func TestRunNativeAgentResumesCodexSession(t *testing.T) {
@@ -779,7 +805,7 @@ func TestRunNativeAgentResumesCodexSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	program := "#!/bin/sh\n[ \"$1\" = exec ] && [ \"$2\" = resume ] || exit 10\ncase \"$*\" in *\"provider-thread-1 -\"*) ;; *) exit 11 ;; esac\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"provider-thread-1\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"continued\"}}'\n"
-	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(program), 0700); err != nil {
+	if err := testsupport.WriteExecutable(filepath.Join(bin, "codex"), []byte(program), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)

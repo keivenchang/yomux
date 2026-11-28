@@ -179,9 +179,9 @@ function previewZoomContentSize(content) {
   };
 }
 
-function previewZoomStagePadding(stage) {
-  const ownerWindow = previewZoomOwnerWindow(stage);
-  const style = ownerWindow?.getComputedStyle?.(stage) || (typeof getComputedStyle === 'function' ? getComputedStyle(stage) : null);
+function previewZoomPadding(element) {
+  const ownerWindow = previewZoomOwnerWindow(element);
+  const style = ownerWindow?.getComputedStyle?.(element) || (typeof getComputedStyle === 'function' ? getComputedStyle(element) : null);
   const px = name => Number.parseFloat(style?.getPropertyValue?.(name) || '') || 0;
   return {
     x: px('padding-left') + px('padding-right'),
@@ -189,13 +189,29 @@ function previewZoomStagePadding(stage) {
   };
 }
 
-function previewZoomFitScale(viewport, content, options = {}) {
-  const size = previewZoomContentSize(content);
-  const availableWidth = Math.max(1, (viewport?.clientWidth || 1) - previewZoomPolicy.fitPaddingPx);
-  const availableHeight = Math.max(1, (viewport?.clientHeight || 1) - previewZoomPolicy.fitPaddingPx);
+function previewZoomFitScale(size, width, height, padding, options) {
+  const availableWidth = Math.max(1, width - padding.x);
+  const availableHeight = Math.max(1, height - padding.y);
   const fitScale = Math.min(availableWidth / size.width, availableHeight / size.height);
   const maxFitScale = Number.isFinite(options.fitMaxScale) ? options.fitMaxScale : Number.POSITIVE_INFINITY;
-  return clampPreviewFitScale(Math.min(maxFitScale, fitScale));
+  const scale = Math.min(maxFitScale, fitScale);
+  return options.full === false ? scale : clampPreviewFitScale(scale);
+}
+
+function previewZoomInlinePane(shell) {
+  return shell.parentElement?.closest('.file-editor-preview-pane, .file-editor-preview-pane-panel');
+}
+
+function updatePreviewZoomInlineHeight(shell, toolbar) {
+  const pane = previewZoomInlinePane(shell);
+  if (!pane?.clientHeight) return;
+  const style = previewZoomOwnerWindow(shell).getComputedStyle(shell);
+  const margins = (Number.parseFloat(style.marginTop) || 0) + (Number.parseFloat(style.marginBottom) || 0);
+  // The viewport is still laid out for the previous zoom mode during this calculation.
+  const chrome = previewZoomPadding(shell).y + 2 * shell.clientTop +
+    (toolbar?.offsetHeight || 0) + (Number.parseFloat(style.rowGap) || 0);
+  const height = Math.max(1, pane.clientHeight - previewZoomPadding(pane).y - margins - chrome);
+  shell.style.setProperty('--preview-zoom-fit-height', `${height}px`);
 }
 
 function previewZoomButton(action) {
@@ -247,18 +263,43 @@ function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}
   const focusX = (viewport.scrollLeft + focusOffsetX) / previousScale;
   const focusY = (viewport.scrollTop + focusOffsetY) / previousScale;
   const state = previewZoomStateForRender({...options, shell});
-  const scale = state.mode === 'fit' ? previewZoomFitScale(viewport, content, options) : clampPreviewZoomScale(state.scale);
   const size = previewZoomContentSize(content);
+  const stage = content.closest?.('.file-editor-preview-zoom-stage') || null;
+  const padding = stage ? previewZoomPadding(stage) : {x: 0, y: 0};
+  const parent = shell.parentElement;
+  const inlineFit = options.full === false && state.mode === 'fit' && parent?.clientWidth > 0;
+  const fitPadding = inlineFit ? padding : {x: previewZoomPolicy.fitPaddingPx, y: previewZoomPolicy.fitPaddingPx};
+  let fitWidth = viewport.clientWidth || 1;
+  let fitHeight = viewport.clientHeight || 1;
+  let shellChrome = 0, viewportBorder = 0;
+  if (inlineFit) {
+    updatePreviewZoomInlineHeight(shell, value?.parentElement);
+    // Measure the surrounding layout so a compact diagram can grow again when the pane grows.
+    shellChrome = previewZoomPadding(shell).x + 2 * shell.clientLeft;
+    viewportBorder = 2 * viewport.clientTop;
+    fitWidth = parent.clientWidth - previewZoomPadding(parent).x - shellChrome - viewportBorder;
+    // The fit max-height rule applies only once the shell's mode attribute reads fit, which a
+    // switch from Actual has not written yet. Read the fit height itself, as that rule will.
+    const fitMaxHeight = Number.parseFloat(shell.style.getPropertyValue('--preview-zoom-fit-height'));
+    fitHeight = (Number.isFinite(fitMaxHeight) ? fitMaxHeight
+      : Number.parseFloat(previewZoomOwnerWindow(viewport).getComputedStyle(viewport).maxHeight)) - viewportBorder;
+  }
+  const scale = state.mode === 'fit'
+    ? previewZoomFitScale(size, fitWidth, fitHeight, fitPadding, options)
+    : clampPreviewZoomScale(state.scale);
   const scaledWidth = Math.max(1, Math.round(size.width * scale));
   const scaledHeight = Math.max(1, Math.round(size.height * scale));
   content.style.width = `${scaledWidth}px`;
   content.style.height = `${scaledHeight}px`;
   content.classList.add('file-editor-preview-zoom-content');
-  const stage = content.closest?.('.file-editor-preview-zoom-stage') || null;
   if (stage) {
-    const padding = previewZoomStagePadding(stage);
-    stage.style.width = `${Math.max(viewport.clientWidth, scaledWidth + padding.x)}px`;
-    stage.style.height = `${Math.max(viewport.clientHeight, scaledHeight + padding.y)}px`;
+    stage.style.width = `${Math.max(inlineFit ? 0 : viewport.clientWidth, scaledWidth + padding.x)}px`;
+    stage.style.height = `${Math.max(inlineFit ? 0 : viewport.clientHeight, scaledHeight + padding.y)}px`;
+  }
+  if (inlineFit) {
+    const toolbarWidth = value?.parentElement.offsetWidth || 0;
+    const boxWidth = Math.max(toolbarWidth, scaledWidth + padding.x + viewportBorder);
+    shell.style.setProperty('--preview-zoom-fit-width', `${boxWidth + shellChrome}px`);
   }
   shell.dataset.previewZoomScale = String(scale);
   shell.dataset.previewZoomMode = state.mode;
@@ -425,8 +466,8 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     return applied;
   };
   const ResizeObserverCtor = ownerWindow?.ResizeObserver || (typeof ResizeObserver === 'function' ? ResizeObserver : null);
-  if (ResizeObserverCtor && resolvedOptions.controlsOnly !== true) {
-    const resizeObserver = new ResizeObserverCtor(() => {
+  if (ResizeObserverCtor) {
+    const scheduleRefit = () => {
       // Coalesce to one apply per frame. applyPreviewZoomSurface resizes the content inside the
       // observed viewport (and can toggle a scrollbar, which changes the viewport content-box),
       // so applying synchronously here would re-trigger this observer and emit the noisy
@@ -441,9 +482,16 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
         applyAndScheduleReveal({}, deferredScrollOwner);
       });
       lifecycleScope.ownTimer('resize-frame', frame, value => ownerWin?.cancelAnimationFrame?.(value));
-    });
+    };
+    const resizeObserver = new ResizeObserverCtor(scheduleRefit);
     lifecycleScope.ownObserver('resize-observer', resizeObserver);
     resizeObserver.observe(viewport);
+    if (resolvedOptions.full === false && shell.parentElement) {
+      resizeObserver.observe(shell.parentElement);
+      const pane = previewZoomInlinePane(shell);
+      if (pane && pane !== shell.parentElement) resizeObserver.observe(pane);
+      bind(ownerWindow, 'resize', scheduleRefit);
+    }
   }
   bind(resolvedContent, 'load', () => applyAndScheduleReveal(
     {centerIfUnfocused: true},
@@ -482,7 +530,6 @@ function installPreviewZoomSurface(shell, content, options = {}) {
   toolbar.appendChild(value);
   const viewport = document.createElement('div');
   viewport.className = 'file-editor-preview-zoom-viewport';
-  if (options.controlsOnly === true) viewport.dataset.previewZoomControlsOnly = '1';
   const stage = document.createElement('div');
   stage.className = 'file-editor-preview-zoom-stage';
   stage.appendChild(content);
@@ -617,13 +664,7 @@ async function renderMermaidSourceInto(container, source, options = {}) {
        img.className = 'mermaid-preview-image';
        img.alt = t('preview.mermaid.alt');
        img.src = svgImageUrl(svg);
-       if (options.controlsOnly === true) {
-         installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
-           ...options,
-           path: options.path || '',
-           full: fullPreview,
-         }));
-       } else if (options.interactive === false) {
+       if (options.interactive === false) {
          container.replaceChildren(img);
          container.classList.add('mermaid-preview');
        } else {
@@ -720,6 +761,190 @@ function markdownPreviewLinkContextMenuOptions(markdownPath, href, basePath = ''
     openLabel: localizedLabel('contextmenu.openNewEditor', 'Open in a new Editor'),
     openHandler: () => openMarkdownPreviewPathLink(markdownPath, target.path),
   };
+}
+
+function previewLinkDestination(link, path, honorDocumentBase = false) {
+  const href = link.getAttribute('href').trim();
+  const base = honorDocumentBase && link.ownerDocument.querySelector('base[href]');
+  const external = base || markdownPreviewLinkTarget(path, href).kind === 'external';
+  if (external) {
+    const url = normalizedExternalHttpUrl(link.href);
+    return url ? {href: url, url} : {href};
+  }
+  return {href, ...(bootstrap.guestWorkspace ? {} : markdownPreviewLinkContextMenuOptions(path, href))};
+}
+
+function openPreviewLinkDestination(destination) {
+  if (destination.openHandler) destination.openHandler();
+  else if (destination.url) window.open(destination.url, '_blank', 'noopener,noreferrer');
+}
+
+function installPreviewLinkHover(root, {resolve, isCurrent, clientPoint, receivesEvents = true}) {
+  const popup = document.createElement('div');
+  popup.className = 'viewedit-link-tooltip';
+  const events = new AbortController();
+  let hover = null;
+  let activeLink = null;
+  const close = () => hover?.closeNow();
+  const showLink = (link, anchor, {x, y}, pointerX, event = {target: link}) => {
+    if (!link || !isCurrent()) return;
+    if (link === activeLink) {
+      if (popup.isConnected) hover.openNow(event);
+      else hover.queueOpen(event);
+      return;
+    }
+    close();
+    const authoredHref = link.getAttribute('href');
+    const destination = resolve(link);
+    if (!destination.href) return;
+    const action = destination.url ? document.createElement('a')
+      : destination.openHandler ? makeButton({label: destination.href}) : null;
+    if (action?.tagName === 'A') {
+      action.href = destination.url;
+      action.target = '_blank';
+      action.rel = 'noopener noreferrer';
+    }
+    if (action) {
+      action.textContent = destination.href;
+      action.addEventListener('click', event => {
+        event.preventDefault();
+        openPreviewLinkDestination(destination);
+        close();
+      });
+      popup.removeAttribute('role');
+      popup.replaceChildren(action);
+    } else {
+      popup.setAttribute('role', 'tooltip');
+      popup.textContent = destination.href;
+    }
+    activeLink = link;
+    hover = createHoverPopover({
+      anchor: link,
+      popover: action ? popup : null,
+      stateClass: null,
+      reflectState: false,
+      showDelay: 1500,
+      hideDelay: action ? 300 : 0,
+      canOpen: () => isCurrent() && link.getAttribute('href') === authoredHref,
+      onOpen() {
+        if (popup.isConnected) return;
+        appOverlayRootElement().append(popup);
+        const {width, height} = popup.getBoundingClientRect();
+        const below = y + anchor.bottom;
+        const top = below + height <= viewportBounds().bottom ? below : y + anchor.top - height;
+        const left = Math.max(anchor.left + x, pointerX - width / 2);
+        const point = clampToViewport(left, top, width, height);
+        Object.assign(popup.style, {left: `${point.left}px`, top: `${point.top}px`});
+      },
+      onClose() {
+        popup.remove();
+        hover?.dispose();
+        hover = null;
+        activeLink = null;
+      },
+    });
+    // An event at timer admission makes the shared controller recheck the live hover.
+    hover.queueOpen(event);
+  };
+  if (receivesEvents) root.addEventListener('pointerover', event => {
+    const link = event.target.closest?.('a[href]');
+    // Anchor leave starts the grace period. Crossing ordinary content must not end it.
+    if (!link || link === activeLink || link.contains(event.relatedTarget)) return;
+    close();
+    if (event.buttons || !browserHasCursorHover(event)) return;
+    const {x, y} = clientPoint(event);
+    const anchor = Array.from(link.getClientRects()).find(rect =>
+      event.clientY >= rect.top && event.clientY <= rect.bottom) || link.getBoundingClientRect();
+    showLink(link, anchor, {x: x - event.clientX, y: y - event.clientY}, x, event);
+  }, {signal: events.signal});
+  for (const doc of new Set([root.ownerDocument || root, document])) {
+    doc.addEventListener('scroll', close, {capture: true, signal: events.signal});
+    for (const type of ['pointerdown', 'contextmenu']) {
+      doc.addEventListener(type, event => {
+        if (!popup.contains(event.target)) close();
+      }, {capture: true, signal: events.signal});
+    }
+    doc.addEventListener('keydown', event => {
+      if (event.key === 'Escape') close();
+    }, {signal: events.signal});
+  }
+  return {close, showLink, closeSoon: () => hover?.closeSoon(), destroy() { close(); events.abort(); }};
+}
+
+function installHtmlPreviewLinks(container, frame, doc, path, receivesEvents) {
+  const isCurrent = () => frame.parentElement === container && frame.contentDocument === doc && Boolean(frame.getClientRects().length);
+  const clientPoint = event => {
+    const rect = frame.getBoundingClientRect();
+    return {x: rect.left + event.clientX, y: rect.top + event.clientY};
+  };
+  const resolve = link => previewLinkDestination(link, path, true);
+  const hover = installPreviewLinkHover(doc, {resolve, isCurrent, clientPoint, receivesEvents});
+  const events = new AbortController();
+  let pending = 0;
+  if (!receivesEvents) {
+    for (const link of doc.querySelectorAll('a[href]')) {
+      if (link.getAttribute('href').trim().startsWith('#') && !doc.querySelector('base[href]')) continue;
+      if (!normalizedExternalHttpUrl(link.href)) continue;
+      // The sandbox blocks native popups. Keep direct navigation from replacing the editor
+      // document, and open destinations from the application's actionable URL popup.
+      link.target = '_blank';
+    }
+    let previousLink = null, previousScroll = null;
+    const stop = () => {
+      cancelAnimationFrame(pending);
+      pending = 0;
+      previousLink = previousScroll = null;
+      hover.closeSoon();
+    };
+    const sample = () => {
+      if (!isCurrent() || !frame.matches(':hover')) { stop(); return; }
+      const hovered = doc.querySelector('a[href]:hover');
+      const link = hovered?.matches(':active') ? null : hovered;
+      const scroll = previewEmbeddedScrollElement(frame);
+      const position = ownedElementScrollPosition(scroll);
+      if (previousScroll && (position.top !== previousScroll.top || position.left !== previousScroll.left)) {
+        hover.close();
+        previousLink = null;
+      }
+      previousScroll = position;
+      if (link !== previousLink) {
+        previousLink = link;
+        if (link) {
+          const anchor = link.getClientRects()[0];
+          if (anchor) {
+            const outer = frame.getBoundingClientRect();
+            hover.showLink(link, anchor, {x: outer.left, y: outer.top}, outer.left + anchor.left + anchor.width / 2);
+          }
+        } else hover.closeSoon();
+      }
+      pending = requestAnimationFrame(sample);
+    };
+    frame.addEventListener('pointerenter', event => {
+      if (browserHasCursorHover(event) && !pending) pending = requestAnimationFrame(sample);
+    }, {signal: events.signal});
+    frame.addEventListener('pointerleave', stop, {signal: events.signal});
+    if (frame.matches(':hover') && browserHasCursorHover()) pending = requestAnimationFrame(sample);
+  }
+  const destinationForEvent = event => {
+    const link = event.target.closest?.('a[href]');
+    if (!link || event.defaultPrevented || !isCurrent()) return null;
+    const destination = resolve(link);
+    return destination.url || destination.openHandler ? destination : null;
+  };
+  if (receivesEvents) doc.addEventListener('click', event => {
+    const destination = destinationForEvent(event);
+    if (!destination) return;
+    event.preventDefault();
+    openPreviewLinkDestination(destination);
+  }, {signal: events.signal});
+  if (receivesEvents) doc.addEventListener('contextmenu', event => {
+    const destination = destinationForEvent(event);
+    if (!destination) return;
+    event.preventDefault();
+    const {x, y} = clientPoint(event);
+    openLinkContextMenu(destination.href, x, y, destination);
+  }, {signal: events.signal});
+  return () => { cancelAnimationFrame(pending); hover.destroy(); events.abort(); };
 }
 
 // File links use the owning Markdown path for both clicks and context-menu actions; explicit URLs
@@ -1534,11 +1759,7 @@ function renderOfficePreviewStrategy({container, path, signature}) {
 }
 
 function renderTexPreviewStrategy({container, path, text, signature}) {
-  if (bootstrap.guestWorkspace) return renderSharePublishedPDF(container, path);
-  if (fileState.get(path)?._shareActive && !container._sharePublishRequested) {
-    container.replaceChildren(document.createTextNode('Shared TeX source. Use Publish PDF in YO!share to compile and publish.'));
-    return true;
-  }
+  if (bootstrap.guestWorkspace || fileState.get(path)?._shareTeX) return renderSharePublishedPDF(container, path, text);
   let host = container.querySelector(':scope > [data-tex-preview]');
   const retainPdf = host?.dataset.texPreviewPath === path && Boolean(host.querySelector(':scope > iframe[data-pdf-ready="true"]'));
   if (!prepareRetainedPreviewStrategy(container, signature, '[data-tex-preview]', {retainPdf})) return false;
@@ -1978,14 +2199,181 @@ async function openHtmlPreviewWithAuth(path) {
   }
 }
 
-function renderHtmlPreviewInto(container, path, text) {
-  const embeddedScrollPosition = previewEmbeddedScrollPosition(container);
+function htmlViewEditRestriction(panel, path, state) {
+  if (!fileEditorStateWritable(state)) return 'editor.htmlViewReadOnly';
+  if (state.original?.includes('\r')) return 'editor.htmlViewReadOnlyLineEndings';
+  if (panel._cmPath === path && panel._cmPlainFallback) return 'editor.htmlViewUnavailable';
+  return '';
+}
+
+function htmlViewEditSourceEditor(panel, path, state) {
+  return panel._cmPath === path && !htmlViewEditRestriction(panel, path, state) &&
+    (!state._shareActive || panel._shareConnection) ? panel._cmView : null;
+}
+
+const htmlViewEditProblemLimit = 8;
+const htmlViewEditProblemRepeatMs = 2000;
+
+const htmlViewEditTraceLimit = 100;
+
+// ViewEdit failures often show only as an ignored click. Each panel keeps a short history of what
+// ViewEdit did, which "Copy details" in the status popover hands to whoever debugs it.
+function traceHtmlViewEdit(panel, event, details = {}) {
+  if (!panel) return;
+  const trace = panel._htmlViewEditTrace ||= [];
+  trace.push(`${diagnosticPacificWallTime(Date.now())} +${Math.round(performance.now())}ms ${event} ${JSON.stringify(details)}`);
+  trace.splice(0, Math.max(0, trace.length - htmlViewEditTraceLimit));
+}
+
+function htmlViewEditNodeLabel(node) {
+  if (!node) return '';
+  if (node.nodeType === Node.TEXT_NODE) return `#text "${node.data.slice(0, 24)}"`;
+  return `${node.tagName?.toLowerCase() || node.nodeName}${node.id ? `#${node.id}` : ''}${node.classList?.length ? `.${[...node.classList].join('.')}` : ''}`;
+}
+
+// A snapshot of everything ViewEdit depends on, then the recent history. Plain text for pasting.
+function htmlViewEditDiagnostics(panel) {
+  const path = fileEditorPanelPath(panel), state = fileEditorPanelState(panel), view = panel._cmView;
+  const frame = htmlEditorPreviewFrame(panel), pane = fileEditorPanelPreviewPane(panel);
+  const doc = frame?._htmlPreviewDocument;
+  const map = view && frame && doc ? htmlSplitSourceMap(panel, frame, htmlSourceMapInputBudgetMs) : null;
+  const head = view?.state.selection.main.head;
+  const caret = map && Number.isInteger(head) ? htmlSplitCaretGeometry(frame, map, map.toSnapshot(head)) : null;
+  const peers = (panel._htmlSharePeers?.peers || []).map(peer => {
+    const marker = frame?._htmlShareCarets?.get(peer.clientID), box = marker?.getBoundingClientRect();
+    return {name: peer.name, head: peer.head, anchor: peer.anchor, drawn: marker && !marker.hidden ? [Math.round(box.top), Math.round(box.left)] : null};
+  });
+  const facts = {
+    path, mode: fileEditorPanelMode(panel), userAgent: navigator.userAgent,
+    status: pane?.querySelector('[data-html-viewedit-status]')?.dataset.htmlVieweditStatus,
+    writable: fileEditorStateWritable(state), dirty: Boolean(state?.dirty), readOnlyEditor: view?.state.readOnly,
+    live: {active: Boolean(state?._shareActive), localOnly: Boolean(state?._shareLocalOnly), connected: Boolean(panel._shareConnection)},
+    source: {length: view?.state.doc.length, head, focused: Boolean(view?.hasFocus)},
+    page: {frames: pane?.querySelectorAll('.file-editor-html-preview').length, staged: Boolean(pane?._htmlStagedFrame),
+      loaded: Boolean(doc) && doc === frame.contentDocument, sourceLength: frame?._htmlPreviewSource?.length,
+      sameText: Boolean(view) && frame?._htmlPreviewSource === view.state.doc.toString(), elements: frame?._htmlPreviewElements?.length,
+      receivesEvents: doc ? htmlPreviewReceivesEvents(doc) : null, scrollTop: Math.round(doc?.scrollingElement?.scrollTop || 0)},
+    map: map ? {records: map.records.length, mapped: map.elements.size, foreign: map.foreign, missing: map.missing, editsSinceDrawn: Boolean(map.snapshot.changes), body: [map.body.from, map.body.to]} : null,
+    caret: caret ? {top: Math.round(caret.position.top), left: Math.round(caret.position.left), element: htmlViewEditNodeLabel(caret.element)} : null,
+    editing: {host: Boolean(frame?._htmlViewEditHost), hostConnected: Boolean(frame?._htmlViewEditHost?.isConnected),
+      pageFocus: doc?.hasFocus?.() ?? null, active: htmlViewEditNodeLabel(doc?.activeElement), windowFocus: document.hasFocus()},
+    peers,
+  };
+  return [`ViewEdit details ${diagnosticPacificWallTime(Date.now())}`, JSON.stringify(facts, null, 1),
+    'Problems:', ...htmlViewEditProblemLines(panel), 'History:', ...(panel._htmlViewEditTrace || [])].join('\n');
+}
+
+// ViewEdit failures are silent by nature (an ignored click). Record why, in YO!Stats Logs and the status popover.
+function reportHtmlViewEditProblem(panel, reason, details = {}, {flag = true} = {}) {
+  if (!panel) return;
+  traceHtmlViewEdit(panel, `problem: ${reason}`, details);
+  const now = Date.now(), last = panel._htmlViewEditLastProblem;
+  if (last?.reason === reason && now - last.at < htmlViewEditProblemRepeatMs) return;
+  panel._htmlViewEditLastProblem = {reason, at: now};
+  const message = `ViewEdit: ${reason} ${JSON.stringify({path: fileEditorPanelPath(panel), mode: fileEditorPanelMode(panel), ...details})}`;
+  recordJsDebugEvent('viewedit', {category: 'viewedit', ok: !flag, message});
+  if (!flag) return;
+  const problems = panel._htmlViewEditProblems ||= [];
+  problems.push(`${diagnosticPacificWallTime(now)} ${message}`);
+  problems.splice(0, Math.max(0, problems.length - htmlViewEditProblemLimit));
+  syncHtmlViewEditStatus(fileEditorPanelPreviewPane(panel));
+}
+
+function htmlViewEditProblemLines(panel) {
+  const errors = jsDebugEvents.filter(event => event.type === 'error' || event.type === 'unhandledrejection')
+    .slice(-htmlViewEditProblemLimit)
+    .map(event => `${event.wallTime} JS ${event.type}: ${debugEventDetailText(event)}`);
+  return [...errors, ...(panel?._htmlViewEditProblems || [])];
+}
+
+// The debug capture in 10_core_utils records the error first, since it registered earlier.
+for (const type of ['error', 'unhandledrejection']) {
+  window.addEventListener(type, () => {
+    for (const panel of document.querySelectorAll('.file-editor-panel')) syncHtmlViewEditProblems(panel);
+  });
+}
+
+function syncHtmlViewEditProblems(pane) {
+  const list = pane?.querySelector('[data-html-viewedit-problems]');
+  if (!list) return;
+  const lines = htmlViewEditProblemLines(pane.closest('.file-editor-panel'));
+  const text = lines.join('\n');
+  pane.querySelector('[data-html-viewedit-info]')?.toggleAttribute('data-html-viewedit-problem', lines.length > 0);
+  list.hidden = !lines.length;
+  const log = list.querySelector('pre');
+  if (log.textContent !== text) log.textContent = text;
+}
+
+function retryHtmlViewEditLoad(panel, pane) {
+  delete pane._htmlViewEditLoad;
+  renderFileEditorPanel(panel, fileEditorPanelItem(panel));
+}
+
+function syncHtmlViewEditStatus(pane) {
+  const badge = pane?.querySelector('[data-html-viewedit-status]');
+  if (!badge) return;
+  syncHtmlViewEditProblems(pane);
+  const panel = pane.closest('.file-editor-panel');
+  const path = fileEditorPanelPath(panel), mode = fileEditorPanelMode(panel), state = fileEditorPanelState(panel);
+  const frame = pane.querySelector('.file-editor-html-preview');
+  const attempt = pane._htmlViewEditLoad;
+  const restriction = htmlViewEditRestriction(panel, path, state);
+  const failed = attempt?.path === path && attempt.mode === mode && attempt.failed;
+  const ready = !restriction && !failed && frame?._htmlSplitViewGuide &&
+    frame._htmlPreviewDocument === frame.contentDocument && htmlViewEditSourceEditor(panel, path, state);
+  const status = restriction ? 'readonly' : failed ? 'unavailable' : ready ? 'ready' : 'loading';
+  const label = restriction ? t(restriction) : failed ? t('editor.htmlViewUnavailable')
+    : ready ? t('editor.htmlViewReady') : t('editor.htmlViewPreparing');
+  if (badge.dataset.htmlVieweditStatus !== status) {
+    badge.dataset.htmlVieweditStatus = status;
+    if (ready) frame._wakeHtmlViewEditInput?.();
+  }
+  if (badge.textContent !== label) badge.textContent = label;
+  const retry = pane.querySelector('[data-html-viewedit-retry]');
+  retry.hidden = !failed || Boolean(restriction);
+  const retryLabel = t('common.retry');
+  if (retry.textContent !== retryLabel) retry.textContent = retryLabel;
+}
+
+function renderHtmlPreviewInto(container, path, text, stage = false) {
+  let embeddedScrollPosition = previewEmbeddedScrollPosition(container);
+  container._previewEmbeddedScrollPosition = embeddedScrollPosition;
   const children = [];
-  if (htmlPreviewHasDisabledJavaScript(text)) {
-    const notice = document.createElement('div');
-    notice.className = 'file-editor-html-js-notice';
-    const message = document.createElement('span');
-    message.textContent = t('preview.jsDisabled');
+  const panel = container.closest('.file-editor-panel');
+  const hasDisabledJavaScript = htmlPreviewHasDisabledJavaScript(text);
+  const info = document.createElement('div');
+  info.className = 'file-editor-html-extra-info';
+  let problems = null, details = null;
+  // Retry lives inside the status popover. Close it, so it does not cover the preview being retried.
+  let closeStatusPopover = () => {};
+  if (panel) {
+    const badge = document.createElement('span');
+    badge.dataset.htmlVieweditStatus = 'loading';
+    badge.setAttribute('role', 'status');
+    const retry = makeButton({label: t('common.retry'), onClick: event => {
+      event.stopPropagation();
+      closeStatusPopover();
+      retryHtmlViewEditLoad(panel, container);
+    }});
+    retry.dataset.htmlVieweditRetry = '';
+    retry.hidden = true;
+    info.append(retry, document.createTextNode(' '), badge);
+    problems = document.createElement('div');
+    problems.dataset.htmlVieweditProblems = '';
+    problems.hidden = true;
+    const copy = makeButton({label: t('common.copy'), onClick: event => {
+      event.stopPropagation();
+      copyTextWithFeedback(problems.querySelector('pre').textContent, {statusText: t('debug.copied')});
+    }});
+    problems.append(document.createElement('pre'), copy);
+    details = makeButton({label: t('editor.htmlViewCopyDetails'), onClick: event => {
+      event.stopPropagation();
+      copyTextWithFeedback(htmlViewEditDiagnostics(panel), {statusText: t('debug.copied')});
+    }});
+    details.dataset.htmlVieweditDetails = '';
+    details.insertAdjacentHTML('afterbegin', fileContextMenuIcon('copy'));
+  }
+  if (hasDisabledJavaScript) {
     const link = document.createElement('a');
     link.href = htmlPreviewUrl(path);
     link.target = '_blank';
@@ -1996,19 +2384,95 @@ function renderHtmlPreviewInto(container, path, text) {
       openHtmlPreviewWithAuth(path);
     });
     link.textContent = t('preview.openWithJs');
-    notice.append(message, link);
-    children.push(notice);
+    info.append(document.createTextNode(` ${t('preview.jsDisabled')} `), link);
+  }
+  // Keep the status sentence contiguous. Problems, when present, and the details button follow it.
+  if (problems) info.append(problems, details);
+  if (panel || hasDisabledJavaScript) {
+    const status = document.createElement('div');
+    status.className = 'file-editor-html-status';
+    const popover = document.createElement('div');
+    popover.className = 'file-editor-html-status-popover';
+    const setOpen = open => {
+      popover.hidden = !open;
+      trigger.setAttribute('aria-expanded', String(open));
+    };
+    closeStatusPopover = () => setOpen(false);
+    const dismiss = () => {
+      setOpen(false);
+      trigger.focus({preventScroll: true});
+    };
+    const trigger = makeButton({label: 'ⓘ', ariaLabel: t('preview.htmlTitle'),
+      onClick: () => setOpen(true), events: {pointerenter: event => {
+        if (event.pointerType === 'mouse') setOpen(true);
+      }},
+    });
+    trigger.dataset.htmlVieweditInfo = '';
+    const close = makeButton({label: '×', ariaLabel: t('common.close'), onClick: dismiss});
+    close.dataset.htmlVieweditInfoClose = '';
+    popover.append(info, close);
+    status.append(trigger, popover);
+    setOpen(false);
+    status.addEventListener('pointerleave', event => {
+      if (event.pointerType === 'mouse' && !status.contains(document.activeElement)) setOpen(false);
+    });
+    status.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || popover.hidden) return;
+      event.stopPropagation();
+      dismiss();
+    });
+    children.push(status);
   }
   const frame = document.createElement('iframe');
   frame.className = 'file-editor-html-preview';
-  // Scripts remain disabled. Same-origin access is needed only so the shared Preview owner can
-  // observe the iframe document's native touch/scroll state instead of treating it as a second,
-  // invisible scroll surface.
+  // The host reads the rendered document for link actions and scroll sync. Scripts remain disabled.
   frame.setAttribute('sandbox', 'allow-same-origin');
   frame.setAttribute('title', t('preview.htmlTitle'));
+  frame._htmlPreviewSource = String(text ?? '').replace(/\r\n?/g, '\n');
+  const sourceView = panel?._cmPath === path ? panel._cmView : null;
+  // Start following edits now, so typing while the frame loads does not strand it.
+  if (sourceView) htmlPreviewSourceSnapshot(frame, sourceView.state);
   frame.addEventListener('load', () => {
-    restorePreviewEmbeddedScrollPosition(container, frame, embeddedScrollPosition);
+    if (frame.parentElement !== container) return;
     const frameDocument = frame.contentDocument;
+    if (frameDocument?.URL !== 'about:srcdoc') return;
+    if (container._htmlStagedFrame === frame) {
+      const view = panel?._cmPath === path ? panel._cmView : null;
+      if (view && !view.state.readOnly && !htmlPreviewSourceSnapshot(frame, view.state)) {
+        traceHtmlViewEdit(panel, 'page dropped: source moved on while it loaded');
+        retireStagedHtmlPreview(container);
+        return;
+      }
+      embeddedScrollPosition = previewEmbeddedScrollPosition(container);
+      rememberSharedHtmlPreviewSelection(container, path, frame._htmlPreviewSource, frame._htmlSourceSnapshot?.toSnapshot);
+      delete container._htmlStagedFrame;
+      releasePreviewSurfaceResources(container);
+      // Reparenting an iframe navigates it again. Retire its siblings in place.
+      for (const sibling of Array.from(container.children)) if (sibling !== frame) sibling.remove();
+      for (const child of children) container.insertBefore(child, frame);
+      frame.classList.remove('html-preview-staged-frame');
+      frame.removeAttribute('aria-hidden');
+      frame.removeAttribute('tabindex');
+    }
+    frame._disposeHtmlViewEdit?.();
+    frame._disposeHtmlPreviewScroll?.();
+    container._htmlPreviewLinks?.();
+    container._htmlPreviewLinks = null;
+    restorePreviewEmbeddedScrollPosition(container, frame, embeddedScrollPosition);
+    frame._htmlPreviewDocument = frameDocument;
+    const receivesEvents = frame._htmlPreviewDocument && htmlPreviewReceivesEvents(frameDocument);
+    traceHtmlViewEdit(panel, 'page loaded', {length: frame._htmlPreviewSource.length, receivesEvents, linked: Boolean(frame._htmlSourceSnapshot)});
+    if (frame._htmlPreviewDocument && !receivesEvents) {
+      repaintWebKitHtmlPreview(frame);
+      setTimeout(() => repaintWebKitHtmlPreview(frame), webKitHtmlPreviewSettleMs);
+    }
+    if (frame._htmlPreviewDocument) {
+      // Capture the browser's parse before preview enhancements add elements.
+      frame._htmlPreviewElements = Array.from(frameDocument.querySelectorAll('*'));
+      frame._htmlPreviewElementKeys = frame._htmlPreviewElements.map(htmlElementAlignmentKey);
+      container._htmlPreviewLinks = installHtmlPreviewLinks(container, frame, frameDocument, path, receivesEvents);
+    }
+    frame._htmlSplitMap = null;
     const mathStylesheet = document.querySelector('link[data-katex-stylesheet]');
     if (frameDocument && mathStylesheet && !frameDocument.querySelector('link[data-katex-stylesheet]')) {
       const stylesheet = frameDocument.createElement('link');
@@ -2018,10 +2482,1495 @@ function renderHtmlPreviewInto(container, path, text) {
       frameDocument.head?.append(stylesheet);
     }
     renderTexMathInElement(frameDocument?.body);
+    if (panel && frame._htmlPreviewDocument) {
+      installHtmlPreviewScrollSync(panel, frame, receivesEvents);
+      installHtmlViewEdit(panel, path, frame, receivesEvents);
+      panel._shareConnection?.syncPreviewInput();
+      syncHtmlViewEditStatus(container);
+      scheduleSplitEditorCaret(panel);
+    }
   });
   frame.srcdoc = String(text ?? '');
-  children.push(frame);
-  container.replaceChildren(...children);
+  traceHtmlViewEdit(panel, 'page render', {staged: stage, length: frame._htmlPreviewSource.length, linked: Boolean(sourceView)});
+  if (stage) {
+    frame.classList.add('html-preview-staged-frame');
+    frame.setAttribute('aria-hidden', 'true');
+    frame.tabIndex = -1;
+    container._htmlStagedFrame = frame;
+    container.append(frame);
+  } else container.replaceChildren(...children, frame);
+  syncHtmlViewEditStatus(container);
+}
+
+// Safari can leave part of a srcdoc frame unpainted after it is shown, scrolled, or edited, until
+// the frame is resized or scrolled. A one-pixel resize alone does not always repaint a scrolled
+// page, so also scroll it by one pixel, then put both back on the next frame. Requests made while
+// one is pending share it.
+function repaintWebKitHtmlPreview(frame) {
+  if (frame._webKitRepaintPending) return;
+  frame._webKitRepaintPending = true;
+  requestAnimationFrame(() => {
+    if (!frame.isConnected) { frame._webKitRepaintPending = false; return; }
+    const scroller = previewEmbeddedScrollElement(frame);
+    const top = scroller ? scroller.scrollTop : 0;
+    const nudged = scroller ? (top > 0 ? top - 1 : top + 1) : top;
+    frame.style.setProperty('width', 'calc(100% - 1px)');
+    if (scroller) writeOwnedElementScroll(scroller, {top: nudged}, 'webkit-html-repaint');
+    requestAnimationFrame(() => {
+      frame.style.removeProperty('width');
+      // A user scroll in between wins.
+      if (scroller && scroller.scrollTop === nudged) writeOwnedElementScroll(scroller, {top}, 'webkit-html-repaint');
+      frame._webKitRepaintPending = false;
+    });
+  });
+}
+
+// Scroll restoration and late styles can move a new page after its first repaint.
+const webKitHtmlPreviewSettleMs = 300;
+
+function htmlSplitPreviewFrame(panel) {
+  if (!panel || fileEditorPanelMode(panel) !== 'split') return null;
+  return htmlEditorPreviewFrame(panel);
+}
+
+function htmlEditorPreviewFrame(panel) {
+  const pane = fileEditorPanelPreviewPane(panel);
+  const frame = pane && !pane.hidden && pane.querySelector('.file-editor-html-preview');
+  return frame?._htmlPreviewDocument && frame.contentDocument === frame._htmlPreviewDocument ? frame : null;
+}
+
+function installHtmlPreviewScrollSync(panel, frame, receivesEvents) {
+  const doc = frame._htmlPreviewDocument;
+  const isCurrentSplit = () => htmlSplitPreviewFrame(panel) === frame;
+  const sync = (rootScroll, observedPreviewScroll = false) => {
+    if (htmlEditorPreviewFrame(panel) !== frame) return;
+    if (rootScroll && isCurrentSplit()) {
+      const source = observedPreviewScroll ? 'preview' : fileEditorPreviewScrollSyncSource(panel);
+      scheduleFileEditorSplitScrollSync(panel, source, {observedPreviewScroll});
+    }
+    scheduleSplitEditorCaret(panel);
+  };
+  if (receivesEvents) {
+    doc.addEventListener('scroll', event => sync(event.target === doc), {capture: true, passive: true});
+    doc.defaultView.addEventListener('resize', () => sync(false));
+    return;
+  }
+  const scroller = previewEmbeddedScrollElement(frame);
+  if (!scroller) return;
+  const size = () => [scroller.clientWidth, scroller.clientHeight];
+  let position = ownedElementScrollPosition(scroller);
+  let [width, height] = size();
+  let pending = 0;
+  const sample = () => {
+    pending = 0;
+    if (!frame.isConnected || htmlEditorPreviewFrame(panel) !== frame) return;
+    const next = ownedElementScrollPosition(scroller);
+    const [nextWidth, nextHeight] = size();
+    const resized = width !== nextWidth || height !== nextHeight;
+    // The repaint nudge is not a scroll the source should follow, so compare against the position before it.
+    const nudging = frame._webKitRepaintPending;
+    const moved = !nudging && (next.top !== position.top || next.left !== position.left);
+    if (!nudging) position = next;
+    width = nextWidth;
+    height = nextHeight;
+    if (moved || resized) sync(moved, moved && !resized);
+    pending = requestAnimationFrame(sample);
+  };
+  // WebKit scrolls the sandbox natively even when it suppresses its scroll events.
+  // Sample only while the current preview is visible, since wheel input need not focus it.
+  const observer = new IntersectionObserver(([entry]) => {
+    if (entry.isIntersecting) {
+      if (!pending) pending = requestAnimationFrame(sample);
+    } else {
+      cancelAnimationFrame(pending);
+      pending = 0;
+      position = ownedElementScrollPosition(scroller);
+      [width, height] = size();
+    }
+  });
+  observer.observe(frame);
+  frame._disposeHtmlPreviewScroll = () => {
+    observer.disconnect();
+    cancelAnimationFrame(pending);
+    delete frame._disposeHtmlPreviewScroll;
+  };
+}
+
+const htmlElementAlignmentMaxEdits = 256;
+
+// Tag names alone would pair a removed paragraph's neighbour with the wrong paragraph, so an
+// element's alignment key also carries its id, class, and own text. Rendered keys are read when the
+// page loads, before ViewEdit hosts or math rendering change the page.
+function htmlElementAlignmentKey(element) {
+  let text = '';
+  for (const child of element.childNodes) {
+    // A ViewEdit editing host holds the element's own text while it is edited.
+    if (child.nodeType === 3 || child.matches?.('[data-html-viewedit]')) text += child.textContent;
+  }
+  return [element.namespaceURI, element.localName, element.id, element.getAttribute('class') || '',
+    text.replace(/\s+/g, ' ').trim().slice(0, 64)].join('\0');
+}
+
+// In-place ViewEdit typing changes an element's own text without reloading the page.
+function refreshHtmlPreviewElementKey(frame, element) {
+  const index = frame._htmlPreviewElements.indexOf(element);
+  if (index >= 0) frame._htmlPreviewElementKeys[index] = htmlElementAlignmentKey(element);
+}
+
+// Pair two key sequences the way a text diff pairs lines (Myers' algorithm). Returns, per `a`
+// index, its `b` index or -1, or null when they differ too much.
+function htmlElementAlignment(a, b) {
+  const n = a.length, m = b.length, max = Math.min(n + m, htmlElementAlignmentMaxEdits), offset = max + 1;
+  const v = new Int32Array(2 * max + 3), trace = [];
+  for (let d = 0; d <= max; d++) {
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1]) ? v[offset + k + 1] : v[offset + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+      v[offset + k] = x;
+      if (x < n || y < m) continue;
+      const pairs = new Int32Array(n).fill(-1);
+      for (let step = d; step > 0; step--) {
+        const previous = trace[step], diagonal = x - y;
+        const fromK = diagonal === -step || (diagonal !== step && previous[offset + diagonal - 1] < previous[offset + diagonal + 1])
+          ? diagonal + 1 : diagonal - 1;
+        const fromX = previous[offset + fromK], fromY = fromX - fromK;
+        while (x > fromX && y > fromY) pairs[--x] = --y;
+        x = fromX;
+        y = fromY;
+      }
+      while (x > 0 && y > 0) pairs[--x] = --y;
+      return pairs;
+    }
+  }
+  return null;
+}
+
+function htmlSplitMappedElements(source, tree, rendered, renderedKeys) {
+  let attribute = 'data-yomux-source-index';
+  const lowerSource = source.toLowerCase();
+  while (lowerSource.includes(attribute)) attribute += '-';
+  const syntaxNodes = [], parts = [];
+  let copied = 0;
+  tree.iterate({enter(node) {
+    if (node.name === 'Element') {
+      const syntax = node.node;
+      const tag = syntax.firstChild?.getChild('TagName');
+      if (!tag) return;
+      parts.push(source.slice(copied, tag.to), ` ${attribute}="${syntaxNodes.length}"`);
+      copied = tag.to;
+      syntaxNodes.push(syntax);
+    } else if (node.name === 'AttributeName' &&
+        /^(src|srcset|srcdoc|imagesrcset|href|xlink:href|poster|data|background)$/i.test(source.slice(node.from, node.to))) {
+      // Only the displayed iframe should load document resources.
+      parts.push(source.slice(copied, node.from), `${attribute}-resource`);
+      copied = node.to;
+    }
+  }});
+  parts.push(source.slice(copied));
+  // Parse a detached copy so the same HTML tree builder can insert, move, or ignore tags.
+  const indexed = new DOMParser().parseFromString(parts.join(''), 'text/html').querySelectorAll('*');
+  // Browser extensions can add, wrap, or remove elements on a same-origin page. Pair the rest, so a
+  // change costs only the elements it touched instead of the whole page.
+  const pairs = htmlElementAlignment(Array.from(indexed, htmlElementAlignmentKey), renderedKeys);
+  if (!pairs) return Object.assign([], {foreign: Array.from(rendered), missing: indexed.length});
+  const used = new Set(pairs);
+  const foreign = Array.from(rendered).filter((_element, index) => !used.has(index));
+  const matched = Array.from(pairs, index => index < 0 ? undefined : rendered[index]);
+  const elements = new Map();
+  const ambiguous = new Set();
+  indexed.forEach((element, index) => {
+    const key = element.getAttribute(attribute);
+    // The browser can clone formatting elements when it repairs misnested tags.
+    if (key === null) return;
+    if (elements.has(key)) ambiguous.add(key);
+    else elements.set(key, matched[index]);
+  });
+  return Object.assign(syntaxNodes.map((syntax, index) => {
+    const key = String(index);
+    return {syntax, element: elements.get(key), exact: !ambiguous.has(key)};
+  }), {foreign, missing: pairs.filter(index => index < 0).length});
+}
+
+// The editor state whose text the frame rendered, plus the edits made since then.
+function htmlPreviewSourceSnapshot(frame, state) {
+  let snapshot = frame._htmlSourceSnapshot;
+  if (snapshot?.doc === state.doc) return snapshot;
+  // Edits are only composed while their chain is unbroken. Otherwise the text must match again.
+  const source = frame._htmlPreviewSource;
+  if (state.doc.length !== source.length || state.doc.toString() !== source) return null;
+  snapshot = frame._htmlSourceSnapshot = {
+    state, doc: state.doc, changes: null,
+    toCurrent: (pos, assoc = -1) => snapshot.changes ? snapshot.changes.mapPos(pos, assoc) : pos,
+    toSnapshot: (pos, assoc = -1) => snapshot.changes ? snapshot.changes.invertedDesc.mapPos(pos, assoc) : pos,
+  };
+  return snapshot;
+}
+
+function mapHtmlPreviewSources(panel, transaction) {
+  for (const frame of fileEditorPanelPreviewPane(panel)?.querySelectorAll('.file-editor-html-preview') || []) {
+    const snapshot = frame._htmlSourceSnapshot;
+    if (snapshot?.doc !== transaction.startState.doc) continue;
+    snapshot.changes = snapshot.changes ? snapshot.changes.compose(transaction.changes) : transaction.changes;
+    snapshot.doc = transaction.newDoc;
+    // Text that returns to the rendered source maps one to one again, even after a whole-document replace.
+    const source = frame._htmlPreviewSource;
+    if (snapshot.doc.length === source.length && snapshot.doc.toString() === source) snapshot.changes = null;
+  }
+}
+
+// Repaints retry on the next frame, so they parse briefly. Input must not lose a click to a busy CPU.
+const htmlSourceMapPaintBudgetMs = 20;
+const htmlSourceMapInputBudgetMs = 500;
+
+function htmlSplitSourceMap(panel, frame, budgetMs = htmlSourceMapPaintBudgetMs) {
+  const view = panel._cmView;
+  if (!view) return null;
+  // Geometry belongs to the loaded snapshot. Offsets are mapped through edits until the next iframe loads.
+  const snapshot = htmlPreviewSourceSnapshot(frame, view.state);
+  if (!snapshot) {
+    reportHtmlViewEditProblem(panel, 'lost the link between the page and the source', {
+      docLength: view.state.doc.length, pageSourceLength: frame._htmlPreviewSource.length,
+      chain: Boolean(frame._htmlSourceSnapshot), pageLoaded: frame._htmlPreviewDocument === frame.contentDocument,
+    });
+    return null;
+  }
+  if (frame._htmlSplitMap?.snapshot === snapshot) return frame._htmlSplitMap;
+  const {state} = snapshot;
+  const tree = panel._cmApi.ensureSyntaxTree(state, state.doc.length, budgetMs);
+  if (!tree) {
+    if (budgetMs >= htmlSourceMapInputBudgetMs) {
+      reportHtmlViewEditProblem(panel, 'source parse did not finish in time', {docLength: state.doc.length, budgetMs});
+    }
+    return null;
+  }
+  const source = frame._htmlPreviewSource;
+  const doc = frame._htmlPreviewDocument;
+  const records = [];
+  let bodySyntax = tree.topNode;
+  let body = null;
+  const mapped = htmlSplitMappedElements(source, tree, frame._htmlPreviewElements, frame._htmlPreviewElementKeys);
+  if ((mapped.foreign.length || mapped.missing) && !frame._htmlForeignElementsTraced) {
+    frame._htmlForeignElementsTraced = true;
+    traceHtmlViewEdit(panel, 'page differs from the source', {added: mapped.foreign.slice(0, 8).map(htmlViewEditNodeLabel),
+      missing: mapped.missing, matched: mapped.length > 0});
+  }
+  for (const {syntax, element, exact} of mapped) {
+    if (element === doc.documentElement) bodySyntax = syntax;
+    if (!element || !doc.body.contains(element)) continue;
+    const record = {syntax, element, exact, from: syntax.from, to: syntax.to};
+    if (element === doc.body) body = record;
+    records.push(record);
+  }
+  if (!body) {
+    // With an implied body, its direct text is written under <html> or the document root.
+    body = {syntax: bodySyntax, element: doc.body, exact: true, from: 0, to: source.length};
+    records.unshift(body);
+  }
+  const elements = new Map(records.filter(record => record !== body).map(record => [record.from, record.element]));
+  const {toCurrent, toSnapshot} = snapshot;
+  return (frame._htmlSplitMap = {snapshot, tree, records, body, elements, toCurrent, toSnapshot, foreign: mapped.foreign.length, missing: mapped.missing});
+}
+
+// Moves a rendered run into current source coordinates. Returns null when its source text changed.
+function htmlPreviewCurrentTarget(map, doc, target) {
+  const {changes} = map.snapshot;
+  if (!changes) return target;
+  if (!target.raw) return changes.touchesRange(target.from) ? null : {...target, from: changes.mapPos(target.from)};
+  const from = changes.mapPos(target.from, 1), to = changes.mapPos(target.from + target.raw.length, -1);
+  return to - from === target.raw.length && doc.sliceString(from, to) === target.raw ? {...target, from} : null;
+}
+
+function htmlSplitTextNodeCaretRect(text, offset) {
+  const range = text.ownerDocument.createRange();
+  range.setStart(text, offset);
+  range.collapse(true);
+  const rect = range.getBoundingClientRect();
+  return rect.height > 0 ? rect : null;
+}
+
+function htmlSplitBoundaryCaretRect(node, forward) {
+  const sibling = forward ? 'nextSibling' : 'previousSibling';
+  const child = forward ? 'firstChild' : 'lastChild';
+  for (; node; node = node[sibling]) {
+    if (node.nodeType === 3 && node.data.trim()) {
+      const rect = htmlSplitTextNodeCaretRect(node, forward ? 0 : node.length);
+      if (rect) return rect;
+    }
+    if (node.nodeType !== 1 || !previewSourceAnchorIsRendered(node) ||
+        node.ownerDocument.defaultView.getComputedStyle(node).visibility !== 'visible') continue;
+    const rect = htmlSplitBoundaryCaretRect(node[child], forward) || node.getClientRects()[0];
+    if (rect?.height > 0) return rect;
+  }
+  return null;
+}
+
+function htmlSourceTextToken(token) {
+  return /^(Text|EntityReference|CharacterReference|InvalidEntity)$/.test(token?.name);
+}
+
+function* htmlMappedTextRuns(record, map, source, editingHost = null) {
+  let next = record.element.firstChild;
+  for (let token = record.syntax.firstChild; token; token = token.nextSibling) {
+    if (token.name === 'Element') {
+      const element = map.elements.get(token.from);
+      if (element?.parentNode === record.element) next = element.nextSibling;
+      continue;
+    }
+    if (token.name === 'Comment') {
+      const data = source.slice(token.from, token.to).slice(4).replace(/--!?>$/, '');
+      let comment = next;
+      while (comment?.nodeType === 3 || (comment && comment === editingHost)) comment = comment.nextSibling;
+      if (comment?.nodeType === 8 && comment.data === data) {
+        next = comment.nextSibling;
+        yield {node: comment, from: token.from, to: token.to};
+      }
+      continue;
+    }
+    if (!htmlSourceTextToken(token)) continue;
+    const from = token.from;
+    while (htmlSourceTextToken(token.nextSibling) && token.to === token.nextSibling.from) token = token.nextSibling;
+    // Consume a single DOM run. A mismatch must not search past a comment for duplicate text.
+    const node = next && next === editingHost ? next.firstChild : next;
+    if (node?.nodeType !== 3) continue;
+    next = next.nextSibling;
+    yield {node, from, to: token.to, raw: source.slice(from, token.to)};
+  }
+}
+
+function htmlSplitTextCaretRect(frame, map, record, offset) {
+  for (const {node, from, to, raw} of htmlMappedTextRuns(record, map, frame._htmlPreviewSource, frame._htmlViewEditHost)) {
+    if (offset < from) break;
+    if (node.nodeType === 8) {
+      if (offset < to) {
+        return htmlSplitBoundaryCaretRect(node.nextSibling, true) || htmlSplitBoundaryCaretRect(node.previousSibling, false);
+      }
+      continue;
+    }
+    if (offset > to) continue;
+    const offsets = htmlViewEditTextOffsets(node.ownerDocument, raw, node.data);
+    if (offsets === false) continue;
+    const relative = offset - from;
+    const rendered = offsets ? offsets.findLastIndex(position => position <= relative) : relative;
+    const rect = htmlSplitTextNodeCaretRect(node, rendered);
+    if (rect) return rect;
+  }
+  return null;
+}
+
+function htmlSplitCaretClip(element, viewport = null) {
+  const clip = viewport ? {left: 0, top: 0, right: viewport.width, bottom: viewport.height}
+    : {left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity};
+  const doc = element.ownerDocument;
+  for (; element && element !== doc.body && element !== doc.documentElement; element = element.parentElement) {
+    const style = doc.defaultView.getComputedStyle(element);
+    if (style.display === 'inline' || style.display === 'contents' ||
+        (style.overflowX === 'visible' && style.overflowY === 'visible')) continue;
+    const rect = element.getBoundingClientRect();
+    if (style.overflowX !== 'visible') {
+      const left = rect.left + element.clientLeft;
+      clip.left = Math.max(clip.left, left);
+      clip.right = Math.min(clip.right, left + element.clientWidth);
+    }
+    if (style.overflowY !== 'visible') {
+      const top = rect.top + element.clientTop;
+      clip.top = Math.max(clip.top, top);
+      clip.bottom = Math.min(clip.bottom, top + element.clientHeight);
+    }
+  }
+  return clip;
+}
+
+function htmlSplitCaretOutsideClip(position, end, clip) {
+  return position.left < clip.left || position.left > clip.right || end <= clip.top || position.top >= clip.bottom;
+}
+
+function paintHtmlSplitSelection(frame, map, selections, layerClass) {
+  const pane = frame.parentElement;
+  let layer = pane.querySelector(`.${layerClass}`);
+  if (!selections.length) {
+    layer?.remove();
+    return;
+  }
+  const viewport = frame.getBoundingClientRect();
+  const domRange = frame.contentDocument.createRange();
+  const rectangles = [];
+  const paint = (element, rects, peer) => {
+    const clip = htmlSplitCaretClip(element, viewport);
+    for (const rect of rects) {
+      const left = Math.max(clip.left, rect.left), right = Math.min(clip.right, rect.right);
+      const top = Math.max(clip.top, rect.top), bottom = Math.min(clip.bottom, rect.bottom);
+      if (right > left && bottom > top) rectangles.push({left, top, width: right - left, height: bottom - top, peer});
+    }
+  };
+  const targets = htmlViewEditTextTargets(frame, map, frame._htmlViewEditHost, {selection: true});
+  for (const selection of selections) {
+    for (const {node, from, raw, offsets} of targets.values()) {
+      const start = Math.max(0, selection.from - from), end = Math.min(raw.length, selection.to - from);
+      if (start >= end) continue;
+      domRange.setStart(node, offsets ? offsets.findLastIndex(offset => offset <= start) : start);
+      domRange.setEnd(node, offsets ? offsets.findIndex(offset => offset >= end) : end);
+      paint(node.parentElement, domRange.getClientRects(), selection.peer);
+    }
+    for (const {element, exact, from, to} of map.records) {
+      if (exact && from < selection.to && to > selection.from && element.matches(htmlViewEditGraphic) &&
+          previewSourceAnchorIsRendered(element) && frame.contentWindow.getComputedStyle(element).visibility === 'visible') {
+        paint(element, element.getClientRects(), selection.peer);
+      }
+    }
+  }
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = `html-split-selection-layer ${layerClass}`;
+    layer.setAttribute('aria-hidden', 'true');
+    pane.append(layer);
+  }
+  layer.replaceChildren(...rectangles.map(rect => {
+    const marker = document.createElement('span');
+    marker.className = rect.peer ? 'share-remote-selection' : 'split-editor-selection';
+    if (rect.peer) marker.setAttribute('style', shareParticipantStyle(rect.peer));
+    Object.assign(marker.style, {
+      left: `${viewport.left + rect.left}px`, top: `${viewport.top + rect.top}px`,
+      width: `${rect.width}px`, height: `${rect.height}px`,
+    });
+    return marker;
+  }));
+}
+
+function htmlSplitCaretGeometry(frame, map, offset) {
+  const visible = record => previewSourceAnchorIsRendered(record.element)
+    && frame.contentWindow.getComputedStyle(record.element).visibility === 'visible';
+  const enclosing = map.records.findLast(entry => entry.from <= offset && offset < entry.to &&
+    entry !== map.body && visible(entry));
+  const textOwner = enclosing || map.body;
+  const textPosition = visible(textOwner) ? htmlSplitTextCaretRect(frame, map, textOwner, offset) : null;
+  const fallback = textPosition ? null : enclosing
+    || map.records.findLast(entry => entry.from <= offset && visible(entry))
+    || map.records.find(visible);
+  const position = textPosition || fallback?.element.getClientRects()[0];
+  const viewport = frame.getBoundingClientRect();
+  if (!position || viewport.width <= 0 || viewport.height <= 0) return null;
+  const height = Math.min(viewport.height, Math.max(2, Math.min(18, position.height)));
+  // Container tags map to their start, even when the element spans the whole page.
+  const end = textPosition ? position.bottom : position.top + height;
+  return {position, viewport, height, end, element: textPosition ? textOwner.element : fallback.element};
+}
+
+function paintHtmlSplitCaret(panel, frame, reveal = false) {
+  const container = frame.parentElement;
+  let marker = container.querySelector('.html-split-caret.split-editor-caret');
+  if (marker) marker.hidden = true;
+  const view = panel._cmView;
+  const map = panel.isConnected && view?.hasFocus ? htmlSplitSourceMap(panel, frame) : null;
+  const selection = map ? view.state.selection.main : null;
+  const head = selection && map.toSnapshot(selection.head);
+  const caret = selection && (selection.empty || reveal) ? htmlSplitCaretGeometry(frame, map, head) : null;
+  if (reveal && view?.hasFocus && !caret) {
+    traceHtmlViewEdit(panel, 'source caret not found on the page', {head: selection?.head, map: Boolean(map)});
+  }
+  if (reveal && caret && !htmlSplitCaretOutsideClip(caret.position, caret.end, htmlSplitCaretClip(caret.element))) {
+    const {position, viewport, height, end} = caret;
+    const source = view.coordsAtPos(selection.head, selection.head === selection.from ? 1 : -1);
+    const targetTop = source
+      ? Math.max(0, Math.min(viewport.height - height, source.top - viewport.top))
+      : viewport.height * fileEditorHtmlSplitScrollFocusRatio;
+    if ((source || end <= 0 || position.top >= viewport.height) &&
+        revealSplitCaret(panel, previewEmbeddedScrollElement(frame), position.top, targetTop)) {
+      paintHtmlSplitCaret(panel, frame);
+      return;
+    }
+  }
+  const selected = selection && !selection.empty
+    ? [{from: map.toSnapshot(selection.from, 1), to: map.toSnapshot(selection.to)}] : [];
+  paintHtmlSplitSelection(frame, map, selected, 'html-local-selection');
+  if (!selection?.empty || !caret) return;
+  if (!marker) {
+    marker = createSplitEditorCaret();
+    marker.classList.add('html-split-caret');
+    container.append(marker);
+  }
+  positionHtmlPreviewCaret(marker, map, head, caret, true);
+}
+
+function positionHtmlPreviewCaret(marker, map, offset, caret, pinComment = false) {
+  const {position, viewport, height, end, element} = caret;
+  const inComment = pinComment && map.tree.resolve(offset, 1).name === 'Comment';
+  const clip = !inComment && htmlSplitCaretClip(element, viewport);
+  if (clip && htmlSplitCaretOutsideClip(position, end, clip)) return;
+  const top = inComment ? Math.max(0, Math.min(position.top, viewport.height - height)) : Math.max(clip.top, position.top);
+  const left = inComment ? Math.max(0, Math.min(position.left, viewport.width - 2)) : position.left;
+  const bottom = inComment ? top + height : Math.min(clip.bottom, end);
+  Object.assign(marker.style, {
+    left: `${viewport.left + left}px`,
+    top: `${viewport.top + top}px`,
+    height: `${bottom - top}px`,
+  });
+  marker.hidden = false;
+}
+
+function paintSharedHtmlPresence(panel, frame) {
+  const cached = panel._htmlSharePeers;
+  const map = cached?.peers.length && cached.doc === panel._cmView?.state.doc ? htmlSplitSourceMap(panel, frame) : null;
+  const pane = frame.parentElement;
+  const markers = frame._htmlShareCarets ||= new Map();
+  const peers = map ? cached.peers : [];
+  const ids = new Set(peers.map(peer => peer.clientID));
+  for (const [id, marker] of markers) {
+    if (ids.has(id)) continue;
+    marker.remove();
+    markers.delete(id);
+  }
+  const selections = [];
+  for (const peer of peers) {
+    const anchor = map.toSnapshot(peer.anchor), head = map.toSnapshot(peer.head);
+    if (anchor !== head && !peer.approximate) {
+      selections.push({from: Math.min(anchor, head), to: Math.max(anchor, head), peer});
+    }
+    let marker = markers.get(peer.clientID);
+    if (!marker) {
+      marker = document.createElement('span');
+      marker.className = 'html-split-caret share-rich-caret';
+      marker.setAttribute('aria-hidden', 'true');
+      markers.set(peer.clientID, marker);
+      pane.append(marker);
+    }
+    marker.hidden = true;
+    marker.style.cssText = shareParticipantStyle(peer);
+    marker.dataset.shareCaretName = peer.name;
+    marker.toggleAttribute('data-share-caret-follower', peer.follower);
+    marker.toggleAttribute('data-share-caret-primary', !peer.follower);
+    // A peer caret outside <body> (for example a fresh page at offset 0) has no place on the page.
+    // The geometry fallback would put it at the top-left, which reads as a real position.
+    const caret = map.body.from <= head && head < map.body.to ? htmlSplitCaretGeometry(frame, map, head) : null;
+    if (caret) {
+      marker._htmlCaretElement = caret.element;
+      positionHtmlPreviewCaret(marker, map, head, caret);
+    }
+  }
+  paintHtmlSplitSelection(frame, map, selections, 'html-shared-selection');
+  if (peers.length) refreshLegacyShareCaretColors?.();
+}
+
+const htmlViewEditElements = 'address,article,aside,b,blockquote,caption,code,dd,div,dt,em,figcaption,h1,h2,h3,h4,h5,h6,i,li,p,pre,section,span,strong,td,th,u';
+const htmlViewEditProtected = 'a[href],button,canvas,iframe,input,math,noembed,noframes,noscript,option,plaintext,script,select,style,svg,template,textarea,title,xmp,[contenteditable],[hidden],[inert]';
+const htmlViewEditGraphic = 'img,svg';
+
+function htmlViewEditTextOffsets(doc, raw, rendered) {
+  if (raw === rendered && !raw.includes('&')) return null;
+  const decoder = doc.createElement('textarea');
+  const positions = [0];
+  let text = '', end = 0;
+  for (const entity of raw.matchAll(/&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]*);?/gi)) {
+    const spelling = entity[0];
+    decoder.innerHTML = spelling;
+    const decoded = decoder.value;
+    if (decoded === spelling) continue;
+    // Legacy named references may decode only a prefix, as in &copycat → ©cat.
+    let suffix = 0;
+    while (suffix < decoded.length - 1 &&
+        spelling.at(-suffix - 1) === decoded.at(-suffix - 1)) suffix++;
+    for (; end < entity.index; end++) { text += raw[end]; positions.push(end + 1); }
+    const value = decoded.slice(0, decoded.length - suffix);
+    end += spelling.length - suffix;
+    text += value;
+    for (let index = 1; index < value.length; index++) positions.push(undefined);
+    positions.push(end);
+  }
+  for (; end < raw.length; end++) { text += raw[end]; positions.push(end + 1); }
+  return text === rendered && htmlDecodedText(decoder, raw) === rendered ? positions : false;
+}
+
+// The text a run of HTML source renders as. Escaping '<' keeps any markup as literal text.
+function htmlDecodedText(decoder, raw) {
+  decoder.innerHTML = raw.replaceAll('<', '&lt;');
+  return decoder.value;
+}
+
+function htmlViewEditTextTargets(frame, map, editingHost = null, {selection = false} = {}) {
+  const targets = new Map();
+  const source = frame._htmlPreviewSource;
+  for (const record of map.records) {
+    const element = record.element;
+    if (!record.exact || (!selection && element.closest(htmlViewEditProtected))) continue;
+    const style = element.ownerDocument.defaultView.getComputedStyle(element);
+    if (style.visibility !== 'visible' || (!previewSourceAnchorIsRendered(element) &&
+        !(selection && style.display === 'contents' && !elementHiddenByClosedDetails(element)))) continue;
+    for (const {node, from, raw} of htmlMappedTextRuns(record, map, source, editingHost)) {
+      if (node.nodeType !== 3) continue;
+      const offsets = htmlViewEditTextOffsets(node.ownerDocument, raw, node.data);
+      if (offsets !== false) targets.set(node, {node, from, raw, offsets});
+    }
+  }
+  return targets;
+}
+
+function htmlViewEditPatch(target, from, to, value, preformatted) {
+  const sourceFrom = target.offsets ? target.offsets[from] : from;
+  const sourceTo = target.offsets ? target.offsets[to] : to;
+  if (!Number.isInteger(sourceFrom) || !Number.isInteger(sourceTo)) return null;
+  const text = value.replace(/\r\n?/g, '\n').replaceAll('\0', '\ufffd');
+  let insert = text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  const structural = target.wrap || (!preformatted && text.includes('\n'));
+  if (!preformatted) insert = insert.replaceAll('\n', '<br>');
+  const caret = target.from + sourceFrom + insert.length + (target.wrap ? 3 : 0);
+  if (target.wrap) insert = `<p>${insert}</p>`;
+  return {changes: {from: target.from + sourceFrom, to: target.from + sourceTo, insert}, caret, structural, text};
+}
+
+function htmlViewEditDeletionBoundary(text, offset, backward, sourceOffsets) {
+  const boundaries = [...new Intl.Segmenter(undefined, {granularity: 'grapheme'}).segment(text)]
+    .map(item => item.index).concat(text.length)
+    .filter(position => !sourceOffsets || Number.isInteger(sourceOffsets[position]));
+  return (backward ? boundaries.findLast(position => position < offset) : boundaries.find(position => position > offset)) ?? offset;
+}
+
+function clearHtmlViewEditRestore(panel, restore = panel._htmlViewEditRestore) {
+  if (!restore || panel._htmlViewEditRestore !== restore) return;
+  delete panel._htmlViewEditRestore;
+  restore.events.abort();
+  clearTimeout(restore.timeout);
+}
+
+function rememberHtmlViewEditRestore(panel, path, source, {anchor, head}) {
+  clearHtmlViewEditRestore(panel);
+  const restore = {source, anchor, head, path, events: new AbortController()};
+  const cancel = event => {
+    if (event.isTrusted) clearHtmlViewEditRestore(panel, restore);
+  };
+  for (const type of ['pointerdown', 'keydown']) {
+    document.addEventListener(type, cancel, {capture: true, signal: restore.events.signal});
+  }
+  restore.timeout = setTimeout(() => clearHtmlViewEditRestore(panel, restore), 1000);
+  panel._htmlViewEditRestore = restore;
+}
+
+function htmlPreviewReceivesEvents(doc) {
+  const event = new Event('yomux-preview-probe');
+  let received = false;
+  const listener = () => { received = true; };
+  doc.addEventListener(event.type, listener);
+  doc.dispatchEvent(event);
+  doc.removeEventListener(event.type, listener);
+  return received;
+}
+
+function installHtmlViewEdit(panel, path, frame, receivesEvents) {
+  const doc = frame._htmlPreviewDocument, pane = frame.parentElement;
+  // WebKit suppresses callbacks in script-disabled documents, even for listeners installed
+  // by their same-origin parent. Keep trusted native input in the application document.
+  const input = receivesEvents ? null : document.createElement('span');
+  const inputSurface = input || doc;
+  const inputDocument = inputSurface.ownerDocument || doc;
+  let caret = null;
+  const inputSourceMap = () => htmlSplitSourceMap(panel, frame, htmlSourceMapInputBudgetMs);
+  let active = null, composition = null, applyingOwnEdit = false;
+  let verticalCaretX = null;
+  const documentView = () => {
+    const state = fileEditorPanelState(panel), mode = fileEditorPanelMode(panel);
+    return panel.isConnected && pane.contains(frame) && frame.contentDocument === doc &&
+      ['split', 'preview'].includes(mode) ? htmlViewEditSourceEditor(panel, path, state) : null;
+  };
+  const sourceOffset = (target, offset) => target.from + (target.offsets ? target.offsets[offset] : offset);
+  const selectSource = (view, from, to) => {
+    if (Number.isInteger(from) && Number.isInteger(to) &&
+        (view.state.selection.main.anchor !== from || view.state.selection.main.head !== to)) {
+      view.dispatch({selection: {anchor: from, head: to}});
+    }
+  };
+  const dissolve = () => {
+    if (!active) return;
+    const {host, target, text} = active;
+    active = composition = null;
+    delete frame._htmlViewEditHost;
+    if (text) {
+      const node = target.node || doc.createTextNode('');
+      node.data = text;
+      host.replaceWith(node);
+    } else host.remove();
+    if (input) {
+      input.hidden = true;
+      caret.hidden = true;
+    }
+    scheduleSplitEditorCaret(panel);
+  };
+  const inputHost = () => input || active?.host;
+  const ownsInput = event => active && inputHost().contains(event.target);
+  const hasEditFocus = () => input ? document.activeElement === input :
+    document.activeElement === frame && doc.activeElement === active?.host && doc.hasFocus();
+  const selection = () => {
+    const current = inputDocument.getSelection(), host = inputHost();
+    if (!active || !current?.rangeCount || !host.contains(current.anchorNode) || !host.contains(current.focusNode)) return null;
+    const range = current.getRangeAt(0), prefix = inputDocument.createRange();
+    prefix.setStart(host, 0);
+    prefix.setEnd(range.startContainer, range.startOffset);
+    const from = prefix.toString().length;
+    prefix.setEnd(range.endContainer, range.endOffset);
+    const to = prefix.toString().length;
+    const backward = current.anchorNode !== range.startContainer || current.anchorOffset !== range.startOffset;
+    return {from, to, anchor: backward ? to : from, head: backward ? from : to};
+  };
+  const activeCaretRect = offset => {
+    const node = active.host.firstChild;
+    const rect = node?.nodeType === 3 && offset <= node.length && htmlSplitTextNodeCaretRect(node, offset);
+    return rect || active.host.getClientRects()[0];
+  };
+  const paintBridgedSelection = range => {
+    if (!active || !hasEditFocus() || !range) {
+      caret.hidden = true;
+      return;
+    }
+    const node = active.host.firstChild;
+    const visible = doc.getSelection();
+    if (visible.anchorNode !== node || visible.focusNode !== node || visible.anchorOffset !== range.anchor || visible.focusOffset !== range.head) {
+      visible.setBaseAndExtent(node, range.anchor, node, range.head);
+    }
+    const rect = activeCaretRect(range.head);
+    const viewport = frame.getBoundingClientRect();
+    const clip = htmlSplitCaretClip(active.host, viewport);
+    const onScreen = rect && rect.left >= clip.left && rect.left <= clip.right && rect.bottom > clip.top && rect.top < clip.bottom;
+    caret.hidden = !onScreen || range.from !== range.to;
+    if (!onScreen) return;
+    const left = `${viewport.left + rect.left}px`, top = `${viewport.top + Math.max(rect.top, clip.top)}px`;
+    Object.assign(input.style, {left, top});
+    Object.assign(caret.style, {left, top, height: `${Math.min(rect.bottom, clip.bottom) - Math.max(rect.top, clip.top)}px`,
+      backgroundColor: doc.defaultView.getComputedStyle(active.host).color});
+  };
+  const place = (host, anchor, head = anchor) => {
+    const target = input || host;
+    // An empty inline span can have no line box for the caret overlay to measure.
+    if (active.text) {
+      host.style.removeProperty('display');
+      host.style.removeProperty('min-block-size');
+    } else {
+      host.style.setProperty('display', 'inline-block', 'important');
+      host.style.setProperty('min-block-size', '1em', 'important');
+    }
+    if (input && (input.childNodes.length !== 1 || input.firstChild?.data !== active.text)) {
+      input.replaceChildren(document.createTextNode(active.text));
+    }
+    if (input) input.hidden = false;
+    target.focus({preventScroll: true});
+    const node = target.firstChild;
+    inputDocument.getSelection().setBaseAndExtent(node, anchor, node, head);
+    if (input) paintBridgedSelection({anchor, head, from: Math.min(anchor, head), to: Math.max(anchor, head)});
+    scheduleSplitEditorCaret(panel);
+  };
+  const selectedSourceOffsets = (target, start, end) => {
+    const {offsets, from, raw} = target;
+    const first = sourceOffset(target, start), last = sourceOffset(target, end);
+    return {
+      from: Number.isInteger(first) ? first : from + (offsets.slice(0, start).findLast(Number.isInteger) ?? 0),
+      to: Number.isInteger(last) ? last : from + (offsets.slice(end).find(Number.isInteger) ?? raw.length),
+    };
+  };
+  const selectionGuide = (bounds, forward, rects, host = null) => {
+    const viewport = frame.getBoundingClientRect();
+    const clip = host ? htmlSplitCaretClip(host, viewport)
+      : {left: 0, right: frame.clientWidth, top: 0, bottom: frame.clientHeight};
+    const visible = rect => rect.height > 0 && (bounds.from === bounds.to || rect.width > 0) &&
+      rect.bottom > clip.top && rect.top < clip.bottom && rect.right >= clip.left && rect.left <= clip.right;
+    const boxes = Array.from(rects || []);
+    const edge = forward ? boxes.findLast(visible) : boxes.find(visible);
+    const clientTop = edge ? viewport.top + Math.max(clip.top, edge.top) : null;
+    return {...bounds, head: forward ? bounds.to : bounds.from, clientTop};
+  };
+  frame._htmlSplitViewGuide = () => {
+    const selected = doc.getSelection();
+    const range = selected?.rangeCount ? selected.getRangeAt(0) : null;
+    const current = hasEditFocus() && (composition || selection());
+    if (current && documentView()?.state.doc === active?.sourceDoc) {
+      if (composition || current.from === current.to) {
+        const point = sourceOffset(active.target, current.head);
+        if (!Number.isInteger(point)) return null;
+        const rect = activeCaretRect(current.head);
+        return selectionGuide({from: point, to: point}, true, rect ? [rect] : [], active.host);
+      }
+      const bounds = selectedSourceOffsets(active.target, current.from, current.to);
+      return selectionGuide(bounds, current.head !== current.from, range?.getClientRects(), active.host);
+    }
+    if (document.activeElement !== frame || !doc.hasFocus()) return null;
+    if (!range || selected.isCollapsed) return null;
+    const map = htmlSplitSourceMap(panel, frame);
+    if (!map) return null;
+    let from = Infinity, to = -1;
+    for (const target of htmlViewEditTextTargets(frame, map, active?.host, {selection: true}).values()) {
+      const {node} = target;
+      if (!range.intersectsNode(node)) continue;
+      const start = range.startContainer === node ? range.startOffset : 0;
+      const end = range.endContainer === node ? range.endOffset : node.length;
+      if (start >= end) continue;
+      const bounds = selectedSourceOffsets(target, start, end);
+      from = Math.min(from, bounds.from);
+      to = Math.max(to, bounds.to);
+    }
+    const forward = selected.anchorNode === range.startContainer && selected.anchorOffset === range.startOffset;
+    return from < to
+      ? selectionGuide({from: map.toCurrent(from, 1), to: map.toCurrent(to)}, forward, range.getClientRects()) : null;
+  };
+  const logicalCaret = (x, y) => {
+    const point = doc.caretPositionFromPoint?.(x, y);
+    if (point) return {node: point.offsetNode, offset: point.offset};
+    const range = doc.caretRangeFromPoint?.(x, y);
+    return range && {node: range.startContainer, offset: range.startOffset};
+  };
+  const activate = (rendered, offset, view, head = offset) => {
+    // Map targets carry rendered-snapshot offsets. Unchanged runs stay editable while a newer frame loads.
+    const map = inputSourceMap();
+    const target = map && htmlPreviewCurrentTarget(map, view.state.doc, rendered);
+    if (!target) {
+      // Expected while a newer page loads after this text changed. It is logged, not flagged.
+      if (map) reportHtmlViewEditProblem(panel, 'clicked text changed since the page was drawn', {}, {flag: false});
+      return;
+    }
+    const anchorPosition = sourceOffset(target, offset), headPosition = sourceOffset(target, head);
+    if (!Number.isInteger(anchorPosition) || !Number.isInteger(headPosition)) return;
+    const host = doc.createElement('span');
+    host.setAttribute('data-html-viewedit', '');
+    host.style.setProperty('all', 'unset', 'important');
+    host.style.setProperty('white-space', 'inherit', 'important');
+    // Chromium forces pre-wrap on plaintext-only hosts. Source transactions and the paste
+    // handler already enforce text input, so use an editing host that respects authored CSS.
+    if (!input) host.contentEditable = 'true';
+    const text = target.node?.data || '';
+    host.append(doc.createTextNode(text));
+    if (target.node) target.node.replaceWith(host);
+    else if (target.sibling) target.sibling[target.before ? 'before' : 'after'](host);
+    else target.element.append(host);
+    active = {host, target, text, sourceDoc: view.state.doc, previewStale: Boolean(map.snapshot.changes)};
+    frame._htmlViewEditHost = host;
+    traceHtmlViewEdit(panel, 'editing started', {source: anchorPosition, editsSinceDrawn: active.previewStale});
+    selectSource(view, headPosition, headPosition);
+    place(host, offset, head);
+  };
+  const activateSourceCaret = (view, map, offset, defaultToVisible = false, anchor = offset) => {
+    let first = null, visible = null;
+    const head = map.toSnapshot(offset), tail = map.toSnapshot(anchor);
+    for (const target of htmlViewEditTextTargets(frame, map).values()) {
+      const positionInRun = source => {
+        const relative = source - target.from;
+        return relative < 0 || relative > target.raw.length ? -1
+          : target.offsets ? target.offsets.indexOf(relative) : relative;
+      };
+      const position = positionInRun(head);
+      if (position >= 0) {
+        const start = positionInRun(tail);
+        activate(target, start < 0 ? position : start, view, position);
+        return true;
+      }
+      if (!defaultToVisible || !target.node.data.trim()) continue;
+      first ??= target;
+      const rect = target.node.parentElement.getBoundingClientRect();
+      if (!visible && rect.bottom > 0 && rect.top < doc.defaultView.innerHeight) visible = target;
+    }
+    if (!visible && !first) return false;
+    activate(visible || first, 0, view);
+    return true;
+  };
+  const render = (view, caret) => {
+    const source = view.state.doc.toString();
+    rememberHtmlViewEditRestore(panel, path, source, {anchor: caret, head: caret});
+    dissolve();
+    renderFileEditorPreviewSurface(panel, pane, path, source, {force: true, context: fileEditorPanelMode(panel), state: fileEditorPanelState(panel)});
+  };
+  const apply = (range, value, eventType, prior = range) => {
+    const view = documentView();
+    if (!range || !active || !view || view.state.doc !== active.sourceDoc || range.from === range.to && !value) return;
+    if (range.from < 0 || range.to > active.text.length) return;
+    const edit = htmlViewEditPatch(active.target, range.from, range.to, value, Boolean(active.host.closest('pre')));
+    if (!edit) return;
+    const {host, target, text} = active;
+    // Native selectionchange can lag behind the first key. History needs the pre-edit selection.
+    selectSource(view, sourceOffset(target, prior.anchor), sourceOffset(target, prior.head));
+    applyingOwnEdit = true;
+    try { view.dispatch({changes: edit.changes, selection: {anchor: edit.caret}, userEvent: eventType}); }
+    finally { applyingOwnEdit = false; }
+    const insertedBreak = edit.structural && !target.wrap && edit.text === '\n';
+    if (edit.structural && !insertedBreak) {
+      render(view, edit.caret);
+      return;
+    }
+    const source = view.state.doc.toString();
+    const end = target.from + target.raw.length + edit.changes.insert.length - (edit.changes.to - edit.changes.from);
+    const prefix = text.slice(0, range.from), suffix = text.slice(range.to);
+    const from = insertedBreak ? edit.caret : target.from;
+    const next = insertedBreak ? suffix : prefix + edit.text + suffix;
+    const raw = source.slice(from, end);
+    const offsets = htmlViewEditTextOffsets(doc, raw, next);
+    if (offsets === false) { render(view, edit.caret); return; }
+    if (insertedBreak) {
+      // Keep the native input focused so the next key can arrive before an iframe load.
+      const lineBreak = doc.createElement('br');
+      if (prefix) host.before(doc.createTextNode(prefix));
+      host.before(lineBreak);
+      const elements = frame._htmlPreviewElements;
+      const following = elements.findIndex(element => lineBreak.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const at = following < 0 ? elements.length : following;
+      elements.splice(at, 0, lineBreak);
+      frame._htmlPreviewElementKeys.splice(at, 0, htmlElementAlignmentKey(lineBreak));
+      active.target = {node: doc.createTextNode(suffix), from, raw, offsets};
+    } else Object.assign(target, {raw, offsets});
+    active.text = next;
+    active.sourceDoc = view.state.doc;
+    // A current frame now shows this source. A stale one keeps its snapshot and maps this edit too.
+    if (!active.previewStale) {
+      frame._htmlPreviewSource = source;
+      frame._htmlSplitMap = frame._htmlSourceSnapshot = null;
+    }
+    host.replaceChildren(doc.createTextNode(next));
+    if (!active.previewStale) refreshHtmlPreviewElementKey(frame, host.parentElement);
+    place(host, insertedBreak ? 0 : range.from + edit.text.length);
+    if (!receivesEvents) repaintWebKitHtmlPreview(frame);
+  };
+  const alignSelection = () => {
+    if (composition) return;
+    scheduleSplitEditorCaret(panel);
+    const view = documentView(), range = selection();
+    if (!view || !range || view.state.doc !== active.sourceDoc) return;
+    const head = sourceOffset(active.target, range.head);
+    selectSource(view, head, head);
+    if (input) paintBridgedSelection(range);
+  };
+  const rebaseActiveText = transaction => {
+    if (!hasEditFocus()) return false;
+    const {target} = active;
+    const range = !composition && selection();
+    if (!range || !target.raw.length) return false;
+    const start = target.from, end = start + target.raw.length;
+    const outerEnd = transaction.changes.mapPos(end, 1);
+    const tree = panel._cmApi.ensureSyntaxTree(panel._cmView.state, outerEnd, 20);
+    const matchingRun = (from, to) => {
+      if (from >= to) return null;
+      const token = tree?.resolveInner(from, 1);
+      if (!htmlSourceTextToken(token) || token.from !== from) return null;
+      const tag = token.parent?.firstChild?.getChild('TagName');
+      if (tag && transaction.newDoc.sliceString(tag.from, tag.to).toLowerCase() !== active.host.parentElement.localName) return null;
+      let last = token;
+      while (htmlSourceTextToken(last.nextSibling) && last.to === last.nextSibling.from) last = last.nextSibling;
+      return last.to === to ? {from, to} : null;
+    };
+    // Text inserted at a boundary joins this run. Structural markup can instead leave it intact.
+    const run = matchingRun(transaction.changes.mapPos(start, -1), outerEnd) ||
+      matchingRun(transaction.changes.mapPos(start, 1), transaction.changes.mapPos(end, -1));
+    if (!run) return false;
+    const {from, to} = run;
+    const raw = transaction.newDoc.sliceString(from, to);
+    const changed = raw !== target.raw;
+    let rendered, offsets, anchor, head;
+    if (changed) {
+      const sourceAnchor = sourceOffset(target, range.anchor), sourceHead = sourceOffset(target, range.head);
+      if (!Number.isInteger(sourceAnchor) || !Number.isInteger(sourceHead)) return false;
+      rendered = htmlDecodedText(doc.createElement('textarea'), raw);
+      offsets = htmlViewEditTextOffsets(doc, raw, rendered);
+      if (offsets === false) return false;
+      const mappedRange = panel._cmApi.EditorSelection.range(sourceAnchor, sourceHead).map(transaction.changes);
+      const position = source => {
+        const mapped = source - from;
+        return offsets ? offsets.findLastIndex(boundary => boundary <= mapped) : mapped;
+      };
+      anchor = position(mappedRange.anchor);
+      head = position(mappedRange.head);
+      if (Math.min(anchor, head) < 0 || Math.max(anchor, head) > rendered.length) return false;
+    }
+    // Use the accepted offsets for the live text run while the rest of the iframe catches up.
+    target.from = from;
+    active.sourceDoc = transaction.newDoc;
+    active.previewStale = true;
+    if (changed) {
+      Object.assign(target, {raw, offsets});
+      active.text = rendered;
+      active.host.replaceChildren(doc.createTextNode(rendered));
+      place(active.host, anchor, head);
+    }
+    return true;
+  };
+  // Any outside edit (TextEdit, a peer, a reload) either moves the live text run or retires it.
+  // A stale editing host would otherwise keep accepting clicks while dropping every keystroke.
+  frame._htmlRebaseActiveText = transaction => {
+    if (!active || applyingOwnEdit || active.sourceDoc !== transaction.startState.doc) return;
+    if (!rebaseActiveText(transaction)) dissolve();
+  };
+  frame._htmlViewEditRestoreSelection = () => {
+    const range = active?.previewStale && hasEditFocus() && selection();
+    if (!range || documentView()?.state.doc !== active.sourceDoc) return null;
+    const anchor = sourceOffset(active.target, range.anchor), head = sourceOffset(active.target, range.head);
+    return Number.isInteger(anchor) && Number.isInteger(head) ? {anchor, head} : null;
+  };
+  const history = redo => {
+    const view = documentView();
+    if (!view || view.state.doc !== active?.sourceDoc) return;
+    const binding = panel._cmApi.historyKeymap.find(item => item.key === (redo ? 'Mod-y' : 'Mod-z'));
+    if (binding?.run(view)) render(view, view.state.selection.main.head);
+  };
+  const moveAcrossTextRuns = (view, key) => {
+    const range = selection();
+    if (!range || range.from !== range.to || view.state.doc !== active.sourceDoc) return false;
+    const rtl = doc.defaultView.getComputedStyle(active.host).direction === 'rtl';
+    const backward = (key === 'arrowleft') !== rtl;
+    if (range.head !== (backward ? 0 : active.text.length)) return false;
+    const map = inputSourceMap();
+    if (!map) return false;
+    const direction = backward ? Node.DOCUMENT_POSITION_PRECEDING : Node.DOCUMENT_POSITION_FOLLOWING;
+    const candidates = Array.from(htmlViewEditTextTargets(frame, map, active.host).values())
+      .filter(({node}) => !active.host.contains(node) && node.data.trim() &&
+        (active.host.compareDocumentPosition(node) & direction));
+    candidates.sort((a, b) => a.node.compareDocumentPosition(b.node) & direction ? -1 : 1);
+    const target = candidates[0];
+    if (!target) return false;
+    dissolve();
+    activate(target, backward ? target.node.length : 0, view);
+    active?.host.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    return true;
+  };
+  const moveVertically = (view, direction) => {
+    const current = selection();
+    if (!current || view.state.doc !== active.sourceDoc) return;
+    const node = active.host.firstChild;
+    const offset = current.head;
+    const origin = (node?.nodeType === 3 && htmlSplitTextNodeCaretRect(node, Math.min(offset, node.length)))
+      || active.host.getClientRects()[0];
+    if (!origin) return;
+    const map = inputSourceMap();
+    if (!map) return;
+    const targets = htmlViewEditTextTargets(frame, map, active.host);
+    const row = (origin.top + origin.bottom) / 2;
+    verticalCaretX ??= origin.left;
+    const goal = verticalCaretX;
+    const candidates = [];
+    const measure = doc.createRange();
+    for (const target of targets.values()) {
+      measure.selectNodeContents(target.node);
+      for (const rect of measure.getClientRects()) {
+        const y = (rect.top + rect.bottom) / 2;
+        const distance = (y - row) * direction;
+        if (rect.width <= 0 || rect.height <= 0 || distance < Math.min(rect.height, origin.height) / 2) continue;
+        const x = Math.max(rect.left, Math.min(goal, rect.right));
+        candidates.push({target, rect, distance, x, y});
+      }
+    }
+    // A visual line can contain several inline runs. Use distance from the preferred column
+    // to choose between runs on the same line.
+    candidates.sort((a, b) => Math.abs(a.distance - b.distance) > 2
+      ? a.distance - b.distance : Math.abs(a.x - goal) - Math.abs(b.x - goal));
+    const destination = candidates[0];
+    if (!destination) return;
+    const {target, rect, x, y} = destination;
+    const scroller = doc.scrollingElement;
+    const previous = scroller.scrollTop;
+    const height = doc.defaultView.innerHeight;
+    if (y < 0) scroller.scrollTop += rect.top;
+    else if (y >= height) scroller.scrollTop += rect.bottom - height;
+    const point = logicalCaret(Math.max(rect.left + 0.1, Math.min(x, rect.right - 0.1)),
+      y + previous - scroller.scrollTop);
+    if (point?.node !== target.node || !Number.isInteger(sourceOffset(target, point.offset))) return;
+    if (active.host.contains(target.node)) {
+      const position = sourceOffset(active.target, point.offset);
+      place(active.host, point.offset);
+      selectSource(view, position, position);
+    } else {
+      dissolve();
+      activate(target, point.offset, view);
+    }
+  };
+  const activateSelection = allowCaret => {
+    const selected = doc.getSelection(), view = documentView();
+    if (!view) return false;
+    if (!selected?.rangeCount || (!allowCaret && (selected.isCollapsed || selection()))) return true;
+    const endpoint = (node, offset) => {
+      if (node?.nodeType === 3) return {node, offset};
+      if (node?.childNodes.length !== 1) return null;
+      const child = node.firstChild === active?.host ? active.host.firstChild : node.firstChild;
+      return child?.nodeType === 3 ? {node: child, offset: offset ? child.length : 0} : null;
+    };
+    const anchor = endpoint(selected.anchorNode, selected.anchorOffset);
+    const head = endpoint(selected.focusNode, selected.focusOffset);
+    if (!anchor || anchor.node !== head?.node) return true;
+    if (active?.host.contains(anchor.node)) {
+      if (view.state.doc !== active.sourceDoc) return false;
+      place(active.host, anchor.offset, head.offset);
+      alignSelection();
+      return true;
+    }
+    const map = inputSourceMap();
+    if (!map) return false;
+    const target = htmlViewEditTextTargets(frame, map, active?.host).get(anchor.node);
+    if (!target) return true;
+    dissolve();
+    activate(target, anchor.offset, view, head.offset);
+    return true;
+  };
+  const activateSelectedText = event => {
+    if (event.button === 0 && !event.ctrlKey && !event.metaKey) activateSelection(false);
+  };
+  const revealGraphic = graphic => {
+    if (htmlSplitPreviewFrame(panel) !== frame || panel._cmPath !== path) return false;
+    const element = graphic.closest('picture') || graphic;
+    const map = inputSourceMap();
+    const record = map?.records.find(entry => entry.element === element && entry.exact);
+    if (!record) return false;
+    dissolve();
+    revealSplitEditorSourceSelection(panel, map.toCurrent(record.from, 1), map.toCurrent(record.to));
+    return true;
+  };
+  const activateEmptyBlock = (target, view, map = inputSourceMap()) => {
+    const element = target?.closest(htmlViewEditElements);
+    if (!element || element.closest(htmlViewEditProtected)) return false;
+    const sibling = element.firstChild;
+    if (sibling && (sibling.nextSibling || !sibling.matches?.('br'))) return false;
+    const record = map?.records.find(entry => entry.element === element && entry.exact);
+    const opening = record?.syntax.firstChild;
+    if (opening?.name !== 'OpenTag') return false;
+    dissolve();
+    activate({element, sibling, before: true, from: opening.to, raw: ''}, 0, view);
+    return true;
+  };
+  let pendingClick = null;
+  const clickPreview = (event, savedPoint = null) => {
+    pendingClick = null;
+    const clicked = {target: htmlViewEditNodeLabel(event.target), x: Math.round(event.clientX), y: Math.round(event.clientY)};
+    if (active?.host.contains(event.target)) return traceHtmlViewEdit(panel, 'click inside the editing text', clicked);
+    if (event.button !== 0 || event.ctrlKey || event.metaKey) return;
+    const graphic = event.target.closest?.(htmlViewEditGraphic);
+    if (graphic && revealGraphic(graphic)) return traceHtmlViewEdit(panel, 'click on graphic', clicked);
+    if (event.target.closest?.(htmlViewEditProtected) || !doc.getSelection()?.isCollapsed) {
+      return traceHtmlViewEdit(panel, 'click skipped: protected element or text selection', clicked);
+    }
+    const view = documentView();
+    if (!view) {
+      traceHtmlViewEdit(panel, 'click: no source editor', clicked);
+      // The rendered page can receive input before its source editor finishes loading.
+      if (pane.querySelector('[data-html-viewedit-status="loading"]')) {
+        pendingClick = {event, point: logicalCaret(event.clientX, event.clientY)};
+      } else if (pane.querySelector('[data-html-viewedit-status="ready"]')) {
+        // Only a page that claims to be editable fails silently. Other states already say why.
+        const state = fileEditorPanelState(panel);
+        reportHtmlViewEditProblem(panel, 'click ignored: no editable source', {
+          sameFile: panel._cmPath === path,
+          shared: Boolean(state?._shareActive), connected: Boolean(panel._shareConnection),
+          currentPage: frame.contentDocument === doc, attached: pane.contains(frame),
+        });
+      }
+      return;
+    }
+    dissolve();
+    const map = inputSourceMap();
+    if (!map) return traceHtmlViewEdit(panel, 'click: no source map', clicked);
+    const point = savedPoint || logicalCaret(event.clientX, event.clientY);
+    const target = htmlViewEditTextTargets(frame, map).get(point?.node);
+    clicked.point = htmlViewEditNodeLabel(point?.node);
+    clicked.offset = point?.offset;
+    if (target && (point.node.parentElement.contains(event.target) ||
+        (event.target.matches?.(htmlViewEditElements) && event.target.contains(point.node)))) {
+      traceHtmlViewEdit(panel, 'click on text', {...clicked, source: target.from});
+      activate(target, point.offset, view);
+      return;
+    }
+    if (activateEmptyBlock(event.target, view, map)) return traceHtmlViewEdit(panel, 'click on empty block', clicked);
+    traceHtmlViewEdit(panel, 'click not on editable text', {...clicked, mappedText: Boolean(target)});
+    const element = event.target.closest?.(`hr,br,${htmlViewEditElements}`);
+    const record = map.records.find(entry => entry.element === element && entry.exact);
+    if (!record) {
+      if ((event.target === doc.body || event.target === doc.documentElement) && !doc.body.childElementCount && !doc.body.textContent.trim()) {
+        const last = map.body.syntax.lastChild;
+        const from = last?.name === 'CloseTag' ? last.from : map.body.to;
+        activate({element: doc.body, from, raw: '', wrap: true}, 0, view);
+      }
+      return;
+    }
+    if (element.matches('hr,br')) {
+      const box = element.getBoundingClientRect();
+      const before = event.clientY < (box.top + box.bottom) / 2;
+      activate({sibling: element, before, from: before ? record.from : record.to, raw: '', wrap: element.matches('hr')}, 0, view);
+    }
+  };
+  if (!input) {
+    frame._htmlViewEditInputDocument = doc;
+    // A tap made before the source editor is ready replays once it is ready and the page has focus.
+    // Starting the editor can move focus briefly, so a blur keeps the tap and the next focus replays it.
+    frame._wakeHtmlViewEditInput = () => {
+      const click = pendingClick;
+      if (!click) return;
+      if (!click.event.target.isConnected) {
+        pendingClick = null;
+        return;
+      }
+      if (document.activeElement === frame && doc.hasFocus()) clickPreview(click.event, click.point);
+    };
+    doc.addEventListener('selectionchange', alignSelection);
+    doc.addEventListener('pointerdown', event => {
+      verticalCaretX = null;
+      if (event.isTrusted) clearHtmlViewEditRestore(panel);
+    }, true);
+    doc.addEventListener('mouseup', activateSelectedText);
+    doc.addEventListener('dblclick', activateSelectedText);
+    doc.addEventListener('click', clickPreview, true);
+    doc.defaultView.addEventListener('blur', () => scheduleSplitEditorCaret(panel));
+    doc.defaultView.addEventListener('focus', () => {
+      if (documentView()) frame._wakeHtmlViewEditInput();
+      scheduleSplitEditorCaret(panel);
+    });
+  }
+  const editInput = (type, data, event) => {
+    const range = selection();
+    if (!range) return;
+    if (type === 'insertText' || type === 'insertReplacementText') apply(range, data || '', 'input.type');
+    if (type === 'insertParagraph' || type === 'insertLineBreak') apply(range, '\n', 'input.type');
+    if (type === 'historyUndo' || type === 'historyRedo') history(type === 'historyRedo');
+    if (/^delete(?:Content|Word|SoftLine|HardLine)(Backward|Forward)$/.test(type)) {
+      const prior = {...range};
+      if (range.from === range.to) {
+        const target = event?.getTargetRanges?.()[0];
+        if (type === 'deleteContentBackward') {
+          range.from = htmlViewEditDeletionBoundary(active.text, range.from, true, active.target.offsets);
+        } else if (type === 'deleteContentForward') {
+          range.to = htmlViewEditDeletionBoundary(active.text, range.to, false, active.target.offsets);
+        } else if (target &&
+            target.startContainer === inputHost().firstChild && target.endContainer === inputHost().firstChild) {
+          range.from = target.startOffset;
+          range.to = target.endOffset;
+        } else if (type.startsWith('deleteWord')) {
+          const current = inputDocument.getSelection();
+          current.modify('extend', type.endsWith('Backward') ? 'backward' : 'forward', 'word');
+          const word = selection();
+          current.collapse(inputHost().firstChild, prior.head);
+          if (word) Object.assign(range, word);
+        }
+      }
+      apply(range, '', type.endsWith('Backward') ? 'delete.backward' : 'delete.forward', prior);
+    }
+  };
+  inputSurface.addEventListener('beforeinput', event => {
+    if (!ownsInput(event) || (event.isComposing && composition) || !event.cancelable) return;
+    event.preventDefault();
+    editInput(event.inputType, event.data, event);
+  });
+  const resetInput = () => inputHost().replaceChildren(inputDocument.createTextNode(active.text));
+  inputSurface.addEventListener('input', event => {
+    if (ownsInput(event) && !composition) {
+      resetInput();
+      place(active.host, active.text.length);
+    }
+  });
+  inputSurface.addEventListener('compositionstart', event => {
+    if (ownsInput(event) && documentView()?.state.doc === active.sourceDoc) composition = selection();
+  });
+  inputSurface.addEventListener('compositionend', event => {
+    if (!composition || !active) return;
+    const range = composition;
+    composition = null;
+    resetInput();
+    place(active.host, range.from);
+    if (documentView()?.state.doc === active.sourceDoc && event.data) apply(range, event.data, 'input.type.compose');
+  });
+  inputSurface.addEventListener('paste', event => {
+    if (!ownsInput(event)) return;
+    event.preventDefault();
+    apply(selection(), event.clipboardData?.getData('text/plain') || '', 'input.paste');
+  });
+  inputSurface.addEventListener('cut', event => {
+    if (!ownsInput(event)) return;
+    const range = selection();
+    event.preventDefault();
+    if (!range || !event.clipboardData) return;
+    event.clipboardData.setData('text/plain', active.text.slice(range.from, range.to));
+    apply(range, '', 'delete.cut');
+  });
+  inputSurface.addEventListener('drop', event => {
+    if (ownsInput(event)) event.preventDefault();
+  });
+  const handleKeydown = event => {
+    const view = documentView(), key = event.key.toLowerCase();
+    if (!view) { event.preventDefault(); dissolve(); return; }
+    if ((key === 'arrowup' || key === 'arrowdown') && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault();
+      moveVertically(view, key === 'arrowup' ? -1 : 1);
+      return;
+    }
+    if (!['shift', 'alt', 'control', 'meta'].includes(key)) verticalCaretX = null;
+    if ((key === 'arrowleft' || key === 'arrowright') && !event.shiftKey && !event.altKey && !event.ctrlKey &&
+        !event.metaKey && moveAcrossTextRuns(view, key)) {
+      event.preventDefault();
+      return;
+    }
+    if (key === 'enter' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      apply(selection(), '\n', 'input.type');
+    }
+    if ((event.metaKey || event.ctrlKey) && ['s', 'z', 'y'].includes(key)) {
+      event.preventDefault();
+      if (key === 's') { void saveFileEditor(path, panel); return; }
+      history(key === 'y' || event.shiftKey);
+    }
+    if (key === 'escape') { event.preventDefault(); dissolve(); }
+  };
+  inputSurface.addEventListener('keydown', event => {
+    if (ownsInput(event) && !event.isComposing) handleKeydown(event);
+  });
+  frame._htmlViewEditMobileKey = (action, key, shiftKey) => {
+    const view = documentView(), range = selection();
+    if (!range || !hasEditFocus() || composition || view?.state.doc !== active.sourceDoc) return false;
+    const owner = active, revision = active.sourceDoc;
+    if (fileEditorMobileClipboard(action, active.text.slice(range.from, range.to), value => {
+      const current = selection();
+      if (active === owner && documentView()?.state.doc === revision && hasEditFocus() &&
+          current?.anchor === range.anchor && current?.head === range.head) apply(range, value, 'input.paste');
+    })) return true;
+    if (!key) return false;
+    const event = new KeyboardEvent('keydown', {key, shiftKey, cancelable: true});
+    handleKeydown(event);
+    if (event.defaultPrevented) return true;
+    if (key === 'Backspace' || key === 'Delete') {
+      editInput(key === 'Backspace' ? 'deleteContentBackward' : 'deleteContentForward');
+    } else if (key === 'Tab') {
+      if (!shiftKey) editInput('insertText', '\t');
+    } else {
+      const line = key === 'Home' || key === 'End';
+      const vertical = key === 'ArrowUp' || key === 'ArrowDown';
+      const direction = {Home: 'backward', End: 'forward', ArrowUp: 'backward', ArrowDown: 'forward',
+        ArrowLeft: 'left', ArrowRight: 'right'}[key];
+      if (direction) {
+        inputDocument.getSelection().modify(shiftKey ? 'extend' : 'move', direction,
+          line ? 'lineboundary' : vertical ? 'line' : 'character');
+        if (selection()) alignSelection();
+        else place(active.host, range.anchor, range.head);
+      }
+    }
+    return true;
+  };
+  frame._focusHtmlViewEditMobile = () => {
+    if (hasEditFocus()) return;
+    const view = documentView(), map = view && inputSourceMap();
+    if (!map) return;
+    dissolve();
+    if (activateSourceCaret(view, map, view.state.selection.main.head, true)) {
+      active?.host.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    }
+  };
+  inputSurface.addEventListener('focusout', () => {
+    const checkFocus = () => {
+      if (active && !hasEditFocus() && (!input || document.activeElement !== frame)) dissolve();
+    };
+    // WebKit runs focusout microtasks while focus is between the bridge and iframe.
+    // Keep the rendered text node alive until the native click establishes its selection.
+    if (input) {
+      caret.hidden = true;
+      requestAnimationFrame(checkFocus);
+    } else queueMicrotask(checkFocus);
+  });
+  if (input) {
+    const events = new AbortController();
+    const options = {signal: events.signal};
+    if (browserUsesCoarsePointer()) {
+      // WebKit only transfers touch focus from a script-disabled frame for focusable content.
+      // Give rendered text owners a focus target without adding them to the Tab order.
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const element = node.parentElement;
+        if (node.data.trim() && !element.hasAttribute('tabindex') && !element.closest(`${htmlViewEditProtected},label,summary`)) {
+          element.tabIndex = -1;
+        }
+      }
+    }
+    input.contentEditable = 'plaintext-only';
+    input.tabIndex = -1;
+    input.className = 'html-viewedit-input';
+    input.hidden = true;
+    input.setAttribute('role', 'textbox');
+    input.setAttribute('aria-multiline', 'true');
+    input.setAttribute('aria-label', t('editor.surface.viewEditor'));
+    caret = document.createElement('span');
+    caret.className = 'html-viewedit-caret';
+    caret.hidden = true;
+    caret.setAttribute('aria-hidden', 'true');
+    pane.append(input, caret);
+    let pending = 0;
+    let pressedTarget = null, lastSelection = [];
+    const activeTarget = () => Array.from(doc.querySelectorAll(':active')).at(-1);
+    const schedule = () => {
+      if (!pending) pending = requestAnimationFrame(checkFocus);
+    };
+    frame._wakeHtmlViewEditInput = schedule;
+    const checkFocus = () => {
+      pending = 0;
+      if (!frame.isConnected || frame.contentDocument !== doc || !document.hasFocus()) return;
+      if (document.activeElement === frame) {
+        // The browser still tracks :active while sandboxed pointer callbacks are suppressed.
+        if (doc.documentElement.matches(':active')) {
+          clearHtmlViewEditRestore(panel);
+          pressedTarget ||= activeTarget();
+          schedule();
+          return;
+        }
+        const selected = doc.getSelection();
+        const leftControl = doc.activeElement === doc.body && lastSelection[0]?.closest(htmlViewEditProtected);
+        const target = pressedTarget?.matches(':hover') ? pressedTarget
+          : leftControl ? Array.from(doc.querySelectorAll(':hover')).at(-1) : null;
+        pressedTarget = null;
+        const graphic = target?.closest(htmlViewEditGraphic);
+        if (graphic && revealGraphic(graphic)) {
+          frame.blur();
+          return;
+        }
+        const view = documentView();
+        if (target && view && activateEmptyBlock(target, view)) return;
+        const snapshot = [doc.activeElement, selected?.anchorNode, selected?.anchorOffset,
+          selected?.focusNode, selected?.focusOffset];
+        if (!view) {
+          // A tap before the source editor arrives must still be eligible when it becomes ready.
+          lastSelection = [];
+        } else if (snapshot.some((value, index) => value !== lastSelection[index])) {
+          verticalCaretX = null;
+          if (doc.activeElement?.closest(htmlViewEditProtected) || activateSelection(true)) lastSelection = snapshot;
+          scheduleSplitEditorCaret(panel);
+        }
+      }
+      if (hasEditFocus()) {
+        lastSelection = [];
+        if (active?.sourceDoc !== documentView()?.state.doc) dissolve();
+        else if (!composition) paintBridgedSelection(selection());
+      }
+      if (hasEditFocus() || document.activeElement === frame) schedule();
+    };
+    window.addEventListener('blur', () => {
+      if (document.activeElement === frame) {
+        pressedTarget = activeTarget();
+        lastSelection = [];
+      }
+      schedule();
+    }, options);
+    window.addEventListener('focus', schedule, options);
+    input.addEventListener('focus', schedule, options);
+    document.addEventListener('selectionchange', alignSelection, options);
+    frame._disposeHtmlViewEdit = () => {
+      events.abort();
+      cancelAnimationFrame(pending);
+      input.remove();
+      caret.remove();
+      delete frame._htmlSplitViewGuide;
+      delete frame._wakeHtmlViewEditInput;
+      delete frame._htmlViewEditMobileKey;
+      delete frame._focusHtmlViewEditMobile;
+      delete frame._disposeHtmlViewEdit;
+    };
+  }
+  const restore = panel._htmlViewEditRestore;
+  if (restore?.path === path && restore.source === frame._htmlPreviewSource) {
+    const restoreCaret = () => {
+      if (panel._htmlViewEditRestore !== restore || !pane.contains(frame) || frame.contentDocument !== doc) return;
+      if (active || (document.activeElement === frame && doc.activeElement?.closest(htmlViewEditProtected))) {
+        clearHtmlViewEditRestore(panel, restore);
+        return;
+      }
+      const view = documentView(), map = view && inputSourceMap();
+      if (!map) { requestAnimationFrame(restoreCaret); return; }
+      clearHtmlViewEditRestore(panel, restore);
+      // The restore offsets belong to this frame's source. The caret helper expects current offsets.
+      if (activateSourceCaret(view, map, map.toCurrent(restore.head), false, map.toCurrent(restore.anchor))) return;
+      const leaf = map.records.find(record => record.exact && record.element.matches('br') && record.to === restore.head);
+      if (leaf) activate({sibling: leaf.element, from: leaf.to, raw: ''}, 0, view);
+    };
+    requestAnimationFrame(restoreCaret);
+  }
 }
 
 const PREVIEW_SURFACE_CLASSES = Object.freeze([
@@ -2054,6 +4003,12 @@ function disconnectPreviewZoomSurfaces(root) {
 }
 
 function releasePreviewSurfaceResources(container, {retainPdf = false} = {}) {
+  retireStagedHtmlPreview(container);
+  const frame = container?.querySelector?.('.file-editor-html-preview');
+  frame?._disposeHtmlViewEdit?.();
+  frame?._disposeHtmlPreviewScroll?.();
+  container?._htmlPreviewLinks?.();
+  if (container) container._htmlPreviewLinks = null;
   container?._officePreviewController?.abort();
   if (container) container._officePreviewController = null;
   container?._texPreviewSyncCleanup?.();
@@ -2299,9 +4254,47 @@ function renderSQLitePreviewStrategy({container, path, signature}) {
   return true;
 }
 
+function retireStagedHtmlPreview(container) {
+  const frame = container?._htmlStagedFrame;
+  if (!frame) return;
+  delete container._htmlStagedFrame;
+  container._retainedPreviewSignature = null;
+  frame.remove();
+}
+
+// The restore offsets belong to `source`. toSource maps current editor offsets into it.
+function rememberSharedHtmlPreviewSelection(container, path, source, toSource = pos => pos) {
+  const panel = container.closest('.file-editor-panel');
+  if (!panel?._shareConnection || panel._htmlViewEditRestore) return;
+  const selection = htmlEditorPreviewFrame(panel)?._htmlViewEditRestoreSelection?.();
+  if (selection) rememberHtmlViewEditRestore(panel, path, source, {anchor: toSource(selection.anchor), head: toSource(selection.head)});
+}
+
 function renderHtmlPreviewStrategy({container, path, text, context, signature}) {
-  if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-html-preview')) return false;
-  renderHtmlPreviewInto(container, path, text);
+  const frame = container.querySelector('.file-editor-html-preview');
+  // The frame keeps its source with \n line endings. Compare the same form, or a saved file
+  // with \r\n endings reloads the page on every render.
+  const source = String(text ?? '').replace(/\r\n?/g, '\n');
+  const retain = frame?._htmlPreviewDocument && frame._htmlViewEditContext === context &&
+    frame._htmlViewEditPath === path && frame._htmlPreviewDocument === frame.contentDocument;
+  if (retain && frame._htmlPreviewSource === source) {
+    retireStagedHtmlPreview(container);
+    container._retainedPreviewSignature = signature;
+    return false;
+  }
+  if (retain) {
+    if (container._htmlStagedFrame && container._retainedPreviewSignature === signature) return false;
+    retireStagedHtmlPreview(container);
+    container._retainedPreviewSignature = signature;
+  } else {
+    if (frame?._htmlPreviewDocument) container._retainedPreviewSignature = null;
+    rememberSharedHtmlPreviewSelection(container, path, source);
+    if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-html-preview')) return false;
+  }
+  renderHtmlPreviewInto(container, path, text, retain);
+  const current = container._htmlStagedFrame || container.querySelector('.file-editor-html-preview');
+  current._htmlViewEditPath = path;
+  current._htmlViewEditContext = context;
   return true;
 }
 function renderImagePreviewStrategy({container, path, state, context, signature, snapshot}) {

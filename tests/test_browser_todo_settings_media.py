@@ -25,15 +25,25 @@ def test_description_preferences_use_independent_model_and_supported_effort(brow
         interval:document.querySelector('[data-setting-path="tabber.description_interval_minutes"]').value};
     """)
     assert initial == {'enabled': True, 'model': 'gpt-6-luna', 'effort': 'low', 'interval': '10'}, initial
-    for model in ['gpt-6-astra', 'gpt-6-luna']:
+    models = browser.execute_script("""
+      const select = document.querySelector('[data-setting-path="tabber.codex_model"]');
+      const claude = select.querySelector('option[value="claude-sonnet-5-5"]');
+      applyAgentAvailabilityPayload({availableAgents: ['codex', 'claude'],
+        agentAuth: {codex: {available: true}, claude: {available: false}}});
+      const unavailable = claude.disabled;
+      applyAgentAvailabilityPayload({agentAuth: {codex: {available: true}, claude: {available: true}}});
+      return {unavailable, enabled: !claude.disabled, retired: !!select.querySelector('option[value="gpt-5.6-sol"]')};
+    """)
+    assert models == {'unavailable': True, 'enabled': True, 'retired': False}, models
+    for model in ['gpt-6-astra', 'claude-sonnet-5-5', 'gpt-6-luna']:
         select_current_value(browser, '[data-setting-path="tabber.codex_model"]', model)
         wait.until(lambda driver: driver.execute_script("return initialSetting('tabber.codex_model')===arguments[0]", model))
         state = browser.execute_script("""
-          const model=initialSetting('tabber.codex_model');
+          const model=initialSetting('tabber.codex_model'), claude=model.startsWith('claude-');
           return {options:[...document.querySelectorAll('[data-setting-path="tabber.codex_effort"]')].map(node=>node.value),
-            expected:settingChoiceMetadata('tabber.codex_model')[model].effort_options,
+            expected:claude ? ['low', 'medium', 'high'] : settingChoiceMetadata('tabber.codex_model')[model].effort_options,
             selected:document.querySelector('[data-setting-path="tabber.codex_effort"]:checked')?.value,
-            expectedSelected:settingChoiceMetadata('tabber.codex_model')[model].default_effort,
+            expectedSelected:claude ? 'low' : settingChoiceMetadata('tabber.codex_model')[model].default_effort,
             independent:initialSetting('yoagent.codex_model')===window.__descriptionOtherModel
               && initialSetting('yoagent.codex_effort')===window.__descriptionOtherEffort};
         """)

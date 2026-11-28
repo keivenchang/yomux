@@ -58,7 +58,6 @@ type sessionFilesDiscovery struct {
 	fromRef          string
 	toRef            string
 	repoRefs         map[string]map[string]string
-	candidateRoots   []string
 	repositories     []string
 	touched          map[string]*sessionFileAttribution
 	repositoryScopes map[string]*gitHistoryScope
@@ -70,46 +69,197 @@ func (discovery sessionFilesDiscovery) closeRepositoryScopes() {
 	}
 }
 
-func sessionFilesCandidateRoots(roots []string, agents []SessionFileAgent) []string {
-	candidateRoots := make([]string, 0, len(roots)+len(agents))
-	seen := make(map[string]bool, len(roots)+len(agents))
-	add := func(raw string) {
+// sessionFilesExplicitRoots keeps only repository paths the caller asked for directly, such as
+// the repositories visible in Finder. Pane and agent start directories are deliberately absent:
+// every YOmux session starts in its own checkout, so those directories say nothing about which
+// repositories the session's agents worked in.
+func sessionFilesExplicitRoots(roots []string) []string {
+	explicit := make([]string, 0, len(roots))
+	seen := make(map[string]bool, len(roots))
+	for _, raw := range roots {
 		root := strings.TrimSpace(raw)
 		if root == "" || seen[root] {
-			return
+			continue
 		}
 		seen[root] = true
-		candidateRoots = append(candidateRoots, root)
+		explicit = append(explicit, root)
+		if len(explicit) == maxSessionFileRoots {
+			break
+		}
 	}
-	for _, root := range roots {
-		add(root)
-	}
-	for _, agent := range agents {
-		add(agent.CWD)
-	}
-	if len(candidateRoots) > maxSessionFileRoots {
-		candidateRoots = candidateRoots[:maxSessionFileRoots]
-	}
-	return candidateRoots
+	return explicit
 }
 
-func sessionFilesRepositoryScopePath(rawPath string, missingIsFile bool) string {
+// sessionFilesExistingDirectory returns the nearest existing directory for a touched path: the
+// path itself when it is a directory, otherwise its closest existing ancestor. Deleted files and
+// directories therefore still resolve to the repository that contained them. A path whose
+// ancestry cannot be inspected, such as one below an unreadable directory, has no directory:
+// Differ cannot show it, and one such path must not hide the agent's other repositories.
+func sessionFilesExistingDirectory(path string) string {
+	for candidate := strings.TrimSpace(path); candidate != ""; {
+		info, err := os.Stat(candidate)
+		if err == nil && info.IsDir() {
+			return candidate
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return ""
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			break
+		}
+		candidate = parent
+	}
+	return ""
+}
+
+// sessionFilesGitMarkerAncestor returns the nearest directory at or above directory that holds a
+// .git entry, or "" when there is none. It only groups directories that are probably in one
+// repository; Git still decides the repository for each group.
+func sessionFilesGitMarkerAncestor(directory string) string {
+	for current := filepath.Clean(directory); ; {
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+type sessionFilesTouchedResolution struct {
+	scope *gitHistoryScope
+	err   *Error
+}
+
+// sessionFilesTouchedRepositories maps touched paths to repositories. Paths are reduced to
+// distinct directories and grouped by their nearest .git marker. The shallowest directory of each
+// group is resolved with Git, groups in parallel with the repository worker bound; the rest of a
+// group reuses that scope by path prefix, so Git starts once per repository rather than once per
+// touched directory. Opened scopes are stored in scopes for the repository pass to reuse.
+// A directory Git cannot open (permissions, a directory removed meanwhile, unsafe metadata) is
+// skipped with a warning so one unreadable path does not hide the agent's other repositories.
+func (s *Service) sessionFilesTouchedRepositories(ctx context.Context, touched map[string]*sessionFileAttribution, scopes map[string]*gitHistoryScope) ([]string, []string, *Error) {
+	directories := make(map[string]bool)
+	for path := range touched {
+		if directory := sessionFilesExistingDirectory(path); directory != "" {
+			directories[directory] = true
+		}
+	}
+	ordered := make([]string, 0, len(directories))
+	for directory := range directories {
+		ordered = append(ordered, directory)
+	}
+	// Shallow directories first so each group's leader is its directory closest to the root.
+	sort.Slice(ordered, func(i, j int) bool {
+		if len(ordered[i]) != len(ordered[j]) {
+			return len(ordered[i]) < len(ordered[j])
+		}
+		return ordered[i] < ordered[j]
+	})
+	groups := make(map[string][]string)
+	leaders := make([]string, 0)
+	for _, directory := range ordered {
+		key := sessionFilesGitMarkerAncestor(directory)
+		if key == "" {
+			key = directory
+		}
+		if len(groups[key]) == 0 {
+			leaders = append(leaders, directory)
+		}
+		groups[key] = append(groups[key], directory)
+	}
+
+	resolutions := make([]sessionFilesTouchedResolution, len(leaders))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for range min(sessionFilesRepositoryWorkers, len(leaders)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				scope, finderErr := s.openGitHistoryScopeWithOptions(ctx, leaders[index], gitHistoryScopeOptions{})
+				resolutions[index] = sessionFilesTouchedResolution{scope: scope, err: finderErr}
+			}
+		}()
+	}
+	for index := range leaders {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
+
+	repositories := make([]string, 0)
+	warnings := make([]string, 0)
+	found := make(map[string]bool)
+	record := func(directory string, resolution sessionFilesTouchedResolution) {
+		if resolution.err != nil {
+			if resolution.err.Code != "not_git_repo" && resolution.err.Code != "cancelled" {
+				warnings = append(warnings, fmt.Sprintf("skipped %s: %s", directory, resolution.err.Message))
+			}
+			return
+		}
+		repo := filepath.Clean(resolution.scope.repo)
+		if existing := scopes[repo]; existing != nil {
+			resolution.scope.close()
+		} else {
+			scopes[repo] = resolution.scope
+		}
+		if !found[repo] {
+			found[repo] = true
+			repositories = append(repositories, repo)
+		}
+	}
+	for index, leader := range leaders {
+		record(leader, resolutions[index])
+	}
+	if ctx.Err() != nil {
+		return nil, nil, cancelled("")
+	}
+	// Remaining members normally lie inside their leader's repository. A member that does not,
+	// such as one below an unregistered nested repository, is resolved on its own.
+	for _, leader := range leaders {
+		key := sessionFilesGitMarkerAncestor(leader)
+		if key == "" {
+			continue
+		}
+		for _, directory := range groups[key][1:] {
+			if ctx.Err() != nil {
+				return nil, nil, cancelled(directory)
+			}
+			if repo, known := sessionFilesKnownRepository(directory, scopes); known {
+				if !found[repo] {
+					found[repo] = true
+					repositories = append(repositories, repo)
+				}
+				continue
+			}
+			scope, finderErr := s.openGitHistoryScopeWithOptions(ctx, directory, gitHistoryScopeOptions{})
+			record(directory, sessionFilesTouchedResolution{scope: scope, err: finderErr})
+		}
+	}
+	sort.Strings(repositories)
+	return repositories, warnings, nil
+}
+
+// sessionFilesRepositoryScopePath maps an explicit repository path to the directory Git opens: a
+// file's parent, or the path itself. A missing path stays as given so Git reports it as missing.
+func sessionFilesRepositoryScopePath(rawPath string) string {
 	path := strings.TrimSpace(rawPath)
 	if path == "" {
 		return ""
 	}
 	info, err := os.Stat(path)
-	if err == nil && info.IsDir() {
-		return path
-	}
-	if err == nil || missingIsFile && os.IsNotExist(err) {
+	if err == nil && !info.IsDir() {
 		return filepath.Dir(path)
 	}
 	return path
 }
 
-// Transcript paths often point below a repository already opened from a live pane. Reuse its
-// pinned scope instead of rediscovering .git for every distinct transcript directory.
+// Touched directories often lie below a repository already resolved for this request. Reuse its
+// pinned scope by path prefix instead of starting Git for every distinct touched directory.
 func sessionFilesKnownRepository(rawPath string, scopes map[string]*gitHistoryScope) (string, bool) {
 	path := canonicalSessionFilesPath(rawPath)
 	bestRepo := ""
@@ -143,39 +293,6 @@ func sessionFilesHasNestedGitBoundary(directory, repo string) bool {
 	return false
 }
 
-func (s *Service) sessionFilesRepositoryForTouchedPath(ctx context.Context, rawPath string) (string, *Error) {
-	root := sessionFilesRepositoryScopePath(rawPath, true)
-	for root != "" {
-		repo, finderErr := s.sessionFilesRepositoryForTarget(ctx, root, false)
-		if finderErr == nil || finderErr.Code != "path_not_found" {
-			return repo, finderErr
-		}
-		parent := filepath.Dir(root)
-		if parent == root {
-			return "", finderErr
-		}
-		root = parent
-	}
-	return "", notFound(rawPath)
-}
-
-func (s *Service) sessionFilesRepositoryForTarget(ctx context.Context, rawPath string, missingIsFile bool) (string, *Error) {
-	if ctx.Err() != nil {
-		return "", cancelled(rawPath)
-	}
-	root := sessionFilesRepositoryScopePath(rawPath, missingIsFile)
-	if root == "" {
-		return "", nil
-	}
-	scope, finderErr := s.openGitHistoryScopeWithOptions(ctx, root, gitHistoryScopeOptions{})
-	if finderErr != nil {
-		return "", finderErr
-	}
-	repo := filepath.Clean(scope.repo)
-	scope.close()
-	return repo, nil
-}
-
 func (s *Service) sessionFilesRepositoryViewsBounded(ctx context.Context, discovery sessionFilesDiscovery, paths []string, emit func(int, sessionFilesRepositoryView) error) ([]sessionFilesRepositoryView, map[string]int, *Error) {
 	if len(paths) == 0 {
 		return []sessionFilesRepositoryView{}, make(map[string]int), nil
@@ -192,8 +309,10 @@ func (s *Service) sessionFilesRepositoryViewsBounded(ctx context.Context, discov
 	workerCount := min(sessionFilesRepositoryWorkers, len(paths))
 	workerContext, cancel := context.WithCancel(ctx)
 	defer cancel()
-	jobs := make(chan string, len(paths))
-	results := make(chan result, len(paths))
+	// Transcript roots can outnumber live panes by a wide margin. Feed and collect concurrently so
+	// the one-pass candidate list does not require channels sized to every path.
+	jobs := make(chan string, workerCount)
+	results := make(chan result, workerCount)
 	var workers sync.WaitGroup
 	var claimMu sync.Mutex
 	claimed := make(map[string]bool, len(paths))
@@ -216,7 +335,7 @@ func (s *Service) sessionFilesRepositoryViewsBounded(ctx context.Context, discov
 					return
 				}
 				resolutionStarted := time.Now()
-				scopePath := sessionFilesRepositoryScopePath(path, false)
+				scopePath := sessionFilesRepositoryScopePath(path)
 				scope := discovery.repositoryScopes[filepath.Clean(scopePath)]
 				ownedScope := false
 				if scope == nil {
@@ -262,10 +381,16 @@ func (s *Service) sessionFilesRepositoryViewsBounded(ctx context.Context, discov
 			}
 		}()
 	}
-	for _, path := range paths {
-		jobs <- path
-	}
-	close(jobs)
+	go func() {
+		defer close(jobs)
+		for _, path := range paths {
+			select {
+			case jobs <- path:
+			case <-workerContext.Done():
+				return
+			}
+		}
+	}()
 	go func() {
 		workers.Wait()
 		close(results)
@@ -573,17 +698,28 @@ func (s *Service) SessionFilesWithAgentsStreamHints(ctx context.Context, session
 		}
 	}
 	boundedHours := boundedSessionFilesHours(hours)
-	candidateRoots := sessionFilesCandidateRoots(roots, agents)
-	// Do not scan current or historical transcripts before the first Git repository has painted.
-	// That scan is useful attribution enrichment, but it can walk many large JSONL files; the
-	// Finder's first repository chunk must be driven by the cheap root discovery plus Git diff only.
-	touched := make(map[string]*sessionFileAttribution)
+	explicitRoots := sessionFilesExplicitRoots(roots)
+	transcriptsStarted := time.Now()
+	touched, window := s.sessionFileAttributions(ctx, agents, boundedHours)
+	phases["transcript_ms"] = time.Since(transcriptsStarted).Milliseconds()
+	if ctx.Err() != nil {
+		return nil, cancelled(session)
+	}
 	discovery := sessionFilesDiscovery{
 		session: session, hours: boundedHours, fromRef: fromRef, toRef: toRef, repoRefs: repoRefs,
-		candidateRoots: candidateRoots, touched: touched, repositoryScopes: make(map[string]*gitHistoryScope), metrics: &sessionFilesPhaseMetrics{},
+		touched: make(map[string]*sessionFileAttribution), repositoryScopes: make(map[string]*gitHistoryScope), metrics: &sessionFilesPhaseMetrics{},
 	}
-	candidates := append(append([]string(nil), candidateRoots...), hints...)
 	defer discovery.closeRepositoryScopes()
+	repositoryResolutionStarted := time.Now()
+	touchedRepos, touchedWarnings, finderErr := s.sessionFilesTouchedRepositories(ctx, touched, discovery.repositoryScopes)
+	phases["repository_resolution_wall_ms"] = time.Since(repositoryResolutionStarted).Milliseconds()
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	candidates := make([]string, 0, len(explicitRoots)+len(hints)+len(touchedRepos))
+	candidates = append(candidates, explicitRoots...)
+	candidates = append(candidates, hints...)
+	candidates = append(candidates, touchedRepos...)
 	views, viewIndexByRepo, finderErr := s.sessionFilesRepositoryViewsBounded(ctx, discovery, candidates, func(_ int, view sessionFilesRepositoryView) error {
 		if emit == nil {
 			return nil
@@ -608,66 +744,8 @@ func (s *Service) SessionFilesWithAgentsStreamHints(ctx context.Context, session
 		}
 		return nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: session, Retryable: true, Message: enrichmentErr.Error()}
 	}
-	// Attribution is deliberately a second phase. It can discover a repository that is no longer
-	// represented by a live pane, or add agent/window metadata to files already emitted above. Those
-	// updates replace one repository at a time, so the browser stays interactive throughout the scan.
-	transcriptsStarted := time.Now()
-	touched = s.sessionFileAttributions(ctx, agents, candidateRoots, boundedHours)
-	phases["transcript_ms"] = time.Since(transcriptsStarted).Milliseconds()
-	if ctx.Err() != nil {
-		return nil, cancelled(session)
-	}
-	discovery.touched = touched
 	attributionReady = true
-	initialViewCount := len(views)
-	repositoryResolutionStarted := time.Now()
-	touchedRepos := make(map[string]bool)
-	repoByDirectory := make(map[string]string)
-	for path := range touched {
-		if ctx.Err() != nil {
-			return nil, cancelled(session)
-		}
-		directory := sessionFilesRepositoryScopePath(path, true)
-		repo, resolved := repoByDirectory[directory]
-		if !resolved {
-			if knownRepo, ok := sessionFilesKnownRepository(directory, discovery.repositoryScopes); ok {
-				repo = knownRepo
-			} else {
-				var finderErr *Error
-				repo, finderErr = s.sessionFilesRepositoryForTouchedPath(ctx, path)
-				if finderErr != nil {
-					continue
-				}
-			}
-			repoByDirectory[directory] = repo
-		}
-		if repo == "" || touchedRepos[repo] {
-			continue
-		}
-		touchedRepos[repo] = true
-		if _, visible := viewIndexByRepo[repo]; !visible {
-			discovered, indexes, discoveryErr := s.sessionFilesRepositoryViewsBounded(ctx, discovery, []string{repo}, func(_ int, view sessionFilesRepositoryView) error {
-				if emit == nil {
-					return nil
-				}
-				return emit(sessionFilesRepositoryChunk(discovery, view, false))
-			})
-			if discoveryErr != nil {
-				return nil, discoveryErr
-			}
-			for root, index := range indexes {
-				viewIndexByRepo[root] = len(views) + index
-			}
-			views = append(views, discovered...)
-		}
-	}
-	phases["repository_resolution_wall_ms"] = time.Since(repositoryResolutionStarted).Milliseconds()
-	reposWithAttributions := make([]string, 0, len(touchedRepos))
-	for repo := range touchedRepos {
-		reposWithAttributions = append(reposWithAttributions, repo)
-	}
-	sort.Strings(reposWithAttributions)
-	for _, repo := range reposWithAttributions {
+	for _, repo := range touchedRepos {
 		index, visible := viewIndexByRepo[repo]
 		if !visible {
 			continue
@@ -677,33 +755,32 @@ func (s *Service) SessionFilesWithAgentsStreamHints(ctx context.Context, session
 			return nil, repositoryErr
 		}
 		views[index] = view
-		if index < initialViewCount && emit != nil {
+		if emit != nil {
 			if err := emit(sessionFilesRepositoryChunk(discovery, view, true)); err != nil {
 				return nil, &Error{Status: 500, Code: "session_files_stream_failed", Message: err.Error()}
 			}
 		}
 	}
-	// Every discovered repository uses the same enrichment parent after its early
-	// Git chunk. Discovery must not bypass metadata/ref completion for old panes.
-	if enrichmentErr := s.enrichSessionFilesViewsStagedBounded(ctx, views[initialViewCount:], []sessionFilesViewEnricher{s.enrichSessionFilesFileMetadata, s.enrichSessionFilesRepository}, func(_ int, view sessionFilesRepositoryView) error {
-		if emit == nil {
-			return nil
-		}
-		return emit(sessionFilesRepositoryChunk(discovery, view, true))
-	}); enrichmentErr != nil {
-		if ctx.Err() != nil {
-			return nil, cancelled(session)
-		}
-		return nil, &Error{Status: 500, Code: "session_files_stream_failed", Message: enrichmentErr.Error()}
-	}
 
-	if s.attributionIndex == nil || !s.AttributionPreparation().Partial {
+	// Completeness belongs to the attribution snapshot captured for this request.
+	// Global preparation retains historical gaps for diagnostics only.
+	preparation := s.AttributionPreparation()
+	preparation.Partial = window.partial
+	if window.partial {
+		if preparation.State == "ready" {
+			preparation.State = "indexing"
+		}
+	} else {
+		preparation.State = "ready"
+		preparation.Error = ""
+	}
+	if s.attributionIndex == nil || !preparation.Partial {
 		allowed := make(map[string]bool)
-		for repo := range touchedRepos {
+		for _, repo := range touchedRepos {
 			allowed[repo] = true
 		}
-		for _, root := range candidateRoots {
-			if repo, ok := sessionFilesKnownRepository(sessionFilesRepositoryScopePath(root, false), discovery.repositoryScopes); ok {
+		for _, root := range explicitRoots {
+			if repo, ok := sessionFilesKnownRepository(sessionFilesRepositoryScopePath(root), discovery.repositoryScopes); ok {
 				allowed[repo] = true
 			}
 		}
@@ -726,6 +803,9 @@ func (s *Service) SessionFilesWithAgentsStreamHints(ctx context.Context, session
 		discovery.repositories = append(discovery.repositories, repo)
 	}
 	payload := sessionFilesPayloadFromViews(discovery, views)
+	for _, warning := range touchedWarnings {
+		payload["warnings"] = append(payload["warnings"].([]any), warning)
+	}
 	if emit != nil {
 		for _, view := range views {
 			if !completedRepos[sessionFilesRepositoryPath(view)] {
@@ -742,8 +822,12 @@ func (s *Service) SessionFilesWithAgentsStreamHints(ctx context.Context, session
 	phases["repositories"] = len(views)
 	phases["attributed_paths"] = len(touched)
 	payload["phases"] = phases
+	payload["stretched"] = window.stretched
+	if window.stretched {
+		payload["last_activity"] = window.lastActivity
+	}
 	if s.attributionIndex != nil || s.attributionUnavailable != nil {
-		payload["preparation"] = s.AttributionPreparation()
+		payload["preparation"] = preparation
 	}
 	return payload, nil
 }
@@ -758,9 +842,17 @@ func AggregateSessionFiles(payloads []map[string]any, hours float64, fromRef, to
 	refsByRepo := make(map[string]any)
 	errorsPayload := make([]any, 0)
 	warnings := make([]any, 0)
+	preparation := AttributionProgress{State: "ready"}
 	for _, payload := range payloads {
 		if payload == nil {
 			continue
+		}
+		if child, ok := payload["preparation"].(AttributionProgress); ok && child.Partial {
+			preparation.Partial = true
+			preparation.State = "indexing"
+			if child.Error != "" {
+				preparation.State, preparation.Error = "error", child.Error
+			}
 		}
 		if rows, ok := payload["files"].([]map[string]any); ok {
 			files = append(files, rows...)
@@ -836,7 +928,7 @@ func AggregateSessionFiles(payloads []map[string]any, hours float64, fromRef, to
 		return left < right
 	})
 	return map[string]any{
-		"session": "", "hours": boundedSessionFilesHours(hours), "files": files,
+		"preparation": preparation, "session": "", "hours": boundedSessionFilesHours(hours), "files": files,
 		"repos": repositoryRows, "refs_by_repo": refsByRepo, "from_ref": sessionFilesPayloadRef(fromRef, "default"),
 		"to_ref": sessionFilesPayloadRef(toRef, "base"), "errors": errorsPayload, "warnings": warnings, "loaded": true,
 	}

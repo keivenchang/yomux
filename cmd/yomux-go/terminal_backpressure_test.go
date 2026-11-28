@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestTerminalDisconnectDuringSlowChildInput(t *testing.T) {
@@ -37,7 +39,7 @@ func TestTerminalDisconnectDuringSlowChildInput(t *testing.T) {
 			script = []byte(strings.Replace(string(script), "exec cat", `stty raw -echo
   : > "$TERMINAL_CONTROL_FIXTURE/raw"
   exec sleep 30`, 1))
-			if err := os.WriteFile(scriptPath, script, 0700); err != nil {
+			if err := testsupport.WriteExecutable(scriptPath, script, 0700); err != nil {
 				t.Fatal(err)
 			}
 			serverSide, clientSide := net.Pipe()

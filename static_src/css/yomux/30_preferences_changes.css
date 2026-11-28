@@ -11,8 +11,6 @@
 .pane-tab-close::after,
 .panel-detail-close::before,
 .panel-detail-close::after,
-.tabs .pane-close::before,
-.tabs .pane-close::after,
 .tabs .pane-detail-toggle::before,
 .tabs .pane-detail-toggle::after,
 .tabs .pane-minimize::before,
@@ -1174,7 +1172,7 @@
   z-index: var(--z-layer-control);
   padding: var(--space-12);
   color: var(--text);
-  background: var(--inactive-pane-overlay);
+  background: color-mix(in srgb, var(--panel) 85%, transparent);
   pointer-events: none;
 }
 .js-debug-history-overlay[hidden] {

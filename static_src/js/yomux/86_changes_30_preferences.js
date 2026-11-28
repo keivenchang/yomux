@@ -86,7 +86,8 @@ function settingPatchForPath(path, value) {
   }
   if (path === 'yoagent.codex_model' || path === 'tabber.codex_model') {
     const section = path.split('.')[0];
-    const defaultEffort = codexModelDefaultEffort(value, path);
+    const defaultEffort = section === 'tabber' && descriptionModelBackend(value) === 'claude'
+      ? 'low' : codexModelDefaultEffort(value, path);
     if (defaultEffort) patch[section] = {...(patch[section] || {}), codex_effort: defaultEffort};
   }
   return patch;
@@ -176,7 +177,7 @@ function savePreferenceControl(control) {
     applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
     renderSessionButtons();  // keep the View -> Theme active marker in sync with the Preferences radio
   }
-  if (path === 'appearance.inactive_pane_opacity') {
+  if (path === 'appearance.inactive_pane_dim_opacity') {
     applyInactivePaneOpacity(value);
   }
   if (path === 'appearance.pane_ring_opacity') {

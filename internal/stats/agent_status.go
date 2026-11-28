@@ -110,10 +110,11 @@ type AgentStatusResult struct {
 // AgentStatusSources are the only live-system seams used by ClassifyAgentStatus.
 // A nil seam means that the corresponding evidence is unavailable, not true.
 type AgentStatusSources struct {
-	CapturePane   func(context.Context, string) (AgentStatusPane, error)
-	Process       func(context.Context, int) (AgentStatusProcess, error)
-	OpenCodeState func(context.Context, AgentStatusRequest) (string, []string, error)
-	CodexTurn     func(context.Context, int, float64) AgentStatus
+	CapturePane    func(context.Context, string) (AgentStatusPane, error)
+	Process        func(context.Context, int) (AgentStatusProcess, error)
+	OpenCodeState  func(context.Context, AgentStatusRequest) (string, []string, error)
+	CodexTurn      func(context.Context, int, float64) AgentStatus
+	claudeActivity *claudePaneActivity
 }
 
 // ClassifyAgentStatus classifies one inventory record. Claude and Codex use
@@ -152,6 +153,7 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 		return unavailable("pane-capture-unavailable")
 	}
 	processStartedAt := float64(0)
+	processIdentity := ""
 	if request.PID > 0 && sources.Process != nil {
 		process, err := sources.Process(ctx, request.PID)
 		processObservedAt := time.Now()
@@ -165,6 +167,7 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 			request.Command = process.Command
 		}
 		processStartedAt = process.StartedAt
+		processIdentity = process.StartedIdentity
 	}
 	pane, err := sources.CapturePane(ctx, request.PaneTarget)
 	if pane.ObservedAt.IsZero() {
@@ -180,7 +183,20 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 	if strings.TrimSpace(text) == "" {
 		return unavailableAt("empty-pane-capture", pane.ObservedAt)
 	}
+	request.Kind = kind
 	classified := classifyPaneStatus(pane, request)
+	if kind == "claude" && sources.claudeActivity != nil {
+		frame := claudeActivityFrame{}
+		screenMayBeRunning := classified.RawStatus == "" &&
+			(classified.Status == AgentStatusRun || classified.Status == AgentStatusIdle || classified.Status == AgentStatusTransition)
+		if screenMayBeRunning {
+			frame = currentClaudeActivityFrame(text)
+		}
+		advanced := sources.claudeActivity.observe(request, processIdentity, pane.ObservedAt, frame)
+		if advanced && screenMayBeRunning && classified.Status != AgentStatusRun {
+			classified = result(AgentStatusRun, []string{"claude-advancing-activity"})
+		}
+	}
 	if kind == "codex" && sources.CodexTurn != nil && (classified.Status == AgentStatusIdle || classified.Status == AgentStatusTransition || (classified.Status == AgentStatusUnavailable && classified.Reason == "ambiguous-pane-evidence")) {
 		// Codex removes its busy row while streaming commentary. A composer is
 		// not proof of completion while this process is still emitting turn events.
@@ -200,7 +216,7 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 		text := currentAgentPaneText(pane.VisibleText)
 		lines := strings.Split(text, "\n")
 		if classified.QueuedFollowupQuestion {
-			for index := currentWorkingFooterIndex(lines) + 1; index < len(lines); index++ {
+			for index := currentWorkingFooterIndex(lines, kind) + 1; index < len(lines); index++ {
 				line := lines[index]
 				if strings.Contains(strings.ToLower(line), "queued follow-up inputs") {
 					lines = lines[index:min(index+6, len(lines))]
@@ -241,7 +257,7 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 	case "approval", "needs-approval", "needs-input", "attention", "interrupted":
 		result.Status = AgentStatusAsk
 		result.Evidence = []string{"structured-ask-status"}
-		result.AttentionKind = agentAttentionKind(pane.VisibleText)
+		result.AttentionKind = agentAttentionKind(request.Kind, pane.VisibleText)
 		if raw == "approval" || raw == "needs-approval" {
 			result.AttentionKind = "approval"
 		}
@@ -270,7 +286,7 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 		window = DefaultAgentTransitionWindow
 	}
 	if raw == "" {
-		legacy := classifyVisibleAgentText(pane.VisibleText)
+		legacy := classifyVisibleAgentText(request.Kind, pane.VisibleText)
 		legacy.RawStatus = raw
 		legacy.Acknowledged = acknowledged
 		legacy.WorkingStoppedAt = stoppedAt
@@ -467,7 +483,7 @@ func currentAgentPaneText(text string) string {
 	return strings.TrimRight(strings.ReplaceAll(text, "\r", ""), " \t\n")
 }
 
-func classifyVisibleAgentText(text string) AgentStatusResult {
+func classifyVisibleAgentText(kind, text string) AgentStatusResult {
 	// A visible Codex pane commonly contains old completion text above the live
 	// `Ask Codex to do anything` composer. Limit evidence to the current tail and
 	// let a current idle composer win over stale completion words.
@@ -480,7 +496,6 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 	tail := strings.Join(lines[tailStart:], "\n")
 	approvalText := currentUnquotedPromptText(lines[tailStart:])
 	ask := containsAny(approvalText, "enter to select", "esc to cancel", "yes, and don't ask", "yes/no", "what should claude", "what should codex", "approve this", "approve command", "approval required", "approval needed", "allow this", "would you like to run the following")
-	run := containsWorkingScreenSignal(tail)
 	transition := containsStatusLinePrefix(tail, "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished")
 	// Generic words such as "errors" can be part of an idle suggestion. Keep
 	// error evidence to explicit failure-shaped markers, matching the prompt
@@ -492,10 +507,11 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 	// unavailable state over a live working pane. Only error evidence at or below
 	// the current working footer can conflict with that footer.
 	visibleLines := lines[tailStart:]
-	workingFooter := currentWorkingFooterIndex(visibleLines)
+	workingFooter := currentWorkingFooterIndex(visibleLines, kind)
+	run := workingFooter >= 0
 	workedForFooter := currentWorkedForFooterIndex(visibleLines)
 	interruptedIndex := currentConversationInterruptedIndex(visibleLines)
-	interruptionWins := interruptedIndex > workingFooter && interruptedIndex > workedForFooter && !containsWorkingScreenSignal(strings.Join(visibleLines[interruptedIndex+1:], "\n"))
+	interruptionWins := interruptedIndex > workingFooter && interruptedIndex > workedForFooter
 	workedForCompletion := workedForFooter > workingFooter && workedForFooter > interruptedIndex
 	if workedForCompletion {
 		// Codex leaves this duration footer after finishing a turn. It is a newer
@@ -506,7 +522,7 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 		approvalText = currentUnquotedPromptText(completionLines)
 		ask = containsAny(approvalText, "enter to select", "esc to cancel", "yes, and don't ask", "yes/no", "what should claude", "what should codex", "approve this", "approve command", "approval required", "approval needed", "allow this", "would you like to run the following")
 		workingFooter = -1
-		run = containsWorkingScreenSignal(completionText)
+		run = false
 		transition = containsStatusLinePrefix(completionText, "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished")
 		errorState = containsStatusLinePrefix(completionText, "error:", "fatal", "traceback", "command failed", "exited with code")
 	}
@@ -518,9 +534,6 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 		statusText := currentPromptStatusText(approvalText)
 		transition = containsStatusLinePrefix(statusText, "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished")
 		errorState = containsStatusLinePrefix(statusText, "error:", "fatal", "traceback", "command failed", "exited with code")
-		if workingFooter < 0 {
-			run = containsWorkingScreenSignal(statusText)
-		}
 	}
 	queuedFollowupQuestion := workingFooter >= 0 && codexQueuedFollowupQuestionAfter(lines[tailStart:], workingFooter)
 	if workingFooter >= 0 {
@@ -546,12 +559,6 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 		return result(AgentStatusTransition, []string{"completion-screen"})
 	}
 	idle := containsAny(tail, "ask anything", "ask codex to do anything", "type your message", "use /", "new task", "claude code") || hasIdleComposerLine(lines[tailStart:], !transition)
-	// A live status counter is stronger than generic footer words such as
-	// "background terminals running". Compaction and background-terminal wait
-	// lines are also working states without the interrupt affordance.
-	if !containsWorkingScreenSignal(tail) {
-		run = false
-	}
 	if idle && !ask && !run && !errorState {
 		return result(AgentStatusIdle, []string{"idle-composer"})
 	}
@@ -586,12 +593,12 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 	return unavailable("ambiguous-pane-evidence")
 }
 
-func agentAttentionKind(text string) string {
-	kind := classifyVisibleAgentText(text).AttentionKind
-	if kind == "" {
+func agentAttentionKind(kind, text string) string {
+	attention := classifyVisibleAgentText(kind, text).AttentionKind
+	if attention == "" {
 		return "unknown"
 	}
-	return kind
+	return attention
 }
 
 func agentAttentionKindFromEvidence(promptText string, composerQuestion bool) string {
@@ -629,7 +636,7 @@ func codexQueuedFollowupQuestionAfter(lines []string, workingFooter int) bool {
 	return false
 }
 
-func currentWorkingFooterIndex(lines []string) int {
+func currentWorkingFooterIndex(lines []string, kind string) int {
 	latest := -1
 	for index := 0; index < len(lines); index++ {
 		text := strings.TrimSpace(lines[index])
@@ -647,7 +654,8 @@ func currentWorkingFooterIndex(lines []string) int {
 		if strings.HasPrefix(text, ">") || strings.HasPrefix(text, "`") || strings.HasPrefix(text, "\"") || strings.HasPrefix(text, "'") || strings.HasPrefix(text, "$") {
 			continue
 		}
-		if isWorkingStatusLine(lines[index]) || currentClaudeInterruptFooter(lines, index) {
+		if (kind == "claude" && currentClaudeInterruptFooter(lines, index)) ||
+			(kind == "codex" && isCodexWorkingStatusLine(lines[index])) {
 			latest = index
 		}
 	}
@@ -673,7 +681,9 @@ func currentClaudeInterruptFooter(lines []string, index int) bool {
 	}
 	for _, later := range lines[index+1:] {
 		text := strings.TrimSpace(later)
-		if strings.HasPrefix(text, "❯") || strings.HasPrefix(text, "›") {
+		// Claude's task list can render `› ● main` below the interrupt footer. Only
+		// Claude's `❯` composer can supersede this footer; `›` is Codex's composer.
+		if strings.HasPrefix(text, "❯") {
 			return false
 		}
 	}
@@ -695,6 +705,106 @@ func currentClaudeInterruptFooter(lines []string, index int) bool {
 		}
 	}
 	return false
+}
+
+type claudeActivityFrame struct {
+	elapsed time.Duration
+	spinner rune
+}
+
+var claudeActivityLine = regexp.MustCompile(`^(\S)\s+\S.*?(?:…|\.\.\.)\s+\(((?:[0-9]+[hms] *)+)(?: · [^()]*)?\)$`)
+var claudeLabelledComposerRule = regexp.MustCompile(`^[─━]{2,} .+ [─━]{2,}$`)
+
+func currentClaudeActivityFrame(text string) claudeActivityFrame {
+	lines := strings.Split(currentAgentPaneText(text), "\n")
+	lines = lines[max(0, len(lines)-24):]
+	for index := len(lines) - 2; index >= 2; index-- {
+		line := strings.TrimSpace(lines[index])
+		if !strings.HasPrefix(line, "❯") {
+			continue
+		}
+		upperRule := strings.TrimSpace(lines[index-1])
+		if (!capacityRuleLine(upperRule) && !claudeLabelledComposerRule.MatchString(upperRule)) ||
+			!capacityRuleLine(strings.TrimSpace(lines[index+1])) {
+			break
+		}
+		for _, footer := range lines[index+2:] {
+			footer = strings.ToLower(strings.TrimSpace(footer))
+			if footer != "" && !claudeInterruptFooter.MatchString(footer) &&
+				!agentComposerShortcutChrome.MatchString(strings.TrimSuffix(footer, " · ← for agents")) {
+				return claudeActivityFrame{}
+			}
+		}
+		for previous := index - 2; previous >= 0; previous-- {
+			line := strings.TrimSpace(lines[previous])
+			if line == "" || line == "✔ Update installed · Restart to update" {
+				continue
+			}
+			match := claudeActivityLine.FindStringSubmatch(line)
+			if match == nil {
+				break
+			}
+			spinner, _ := utf8.DecodeRuneInString(match[1])
+			elapsed, err := time.ParseDuration(strings.ReplaceAll(match[2], " ", ""))
+			if err == nil && (unicode.IsSymbol(spinner) || strings.ContainsRune("*·•∙⋅", spinner)) {
+				return claudeActivityFrame{elapsed: elapsed, spinner: spinner}
+			}
+			break
+		}
+		break
+	}
+	return claudeActivityFrame{}
+}
+
+type claudePaneActivity struct {
+	mu    sync.Mutex
+	panes map[string]claudeActivitySample
+}
+
+type claudeActivitySample struct {
+	pid          int
+	process      string
+	observedAt   time.Time
+	lastProgress time.Time
+	frame        claudeActivityFrame
+}
+
+func (activity *claudePaneActivity) observe(request AgentStatusRequest, process string, at time.Time, frame claudeActivityFrame) bool {
+	const hold = 2 * AgentStatusActiveCadence
+	activity.mu.Lock()
+	defer activity.mu.Unlock()
+	previous := activity.panes[request.PaneTarget]
+	sameProcess := request.PID == previous.pid && process == previous.process
+	if !at.After(previous.observedAt) {
+		return sameProcess && !previous.lastProgress.IsZero() && previous.observedAt.Sub(previous.lastProgress) < hold
+	}
+	if previous.observedAt.IsZero() && frame.spinner == 0 {
+		return false
+	}
+	sample := claudeActivitySample{pid: request.PID, process: process, observedAt: at, frame: frame}
+	// A recent unchanged frame can be an animation phase sampled twice.
+	if sameProcess && at.Sub(previous.observedAt) <= 2*time.Minute && previous.frame.spinner != 0 &&
+		frame.spinner != 0 && frame.elapsed >= previous.frame.elapsed {
+		sample.lastProgress = previous.lastProgress
+		if frame.elapsed > previous.frame.elapsed || frame.spinner != previous.frame.spinner {
+			sample.lastProgress = at
+		}
+	}
+	if activity.panes == nil {
+		activity.panes = make(map[string]claudeActivitySample)
+	}
+	if previous.observedAt.IsZero() && len(activity.panes) >= MaxAgentStatusEntries {
+		var oldest time.Time
+		var target string
+		for pane, entry := range activity.panes {
+			if oldest.IsZero() || entry.observedAt.Before(oldest) {
+				target, oldest = pane, entry.observedAt
+			}
+		}
+		delete(activity.panes, target)
+	}
+	activity.panes[request.PaneTarget] = sample
+	return !sample.lastProgress.IsZero() && at.Sub(sample.lastProgress) < hold
 }
 
 func currentWorkedForFooterIndex(lines []string) int {
@@ -732,10 +842,6 @@ func currentConversationInterruptedIndex(lines []string) int {
 	return -1
 }
 
-func containsWorkingScreenSignal(text string) bool {
-	return currentWorkingFooterIndex(strings.Split(text, "\n")) >= 0
-}
-
 func containsStatusLinePrefix(text string, prefixes ...string) bool {
 	for _, line := range strings.Split(text, "\n") {
 		line = normalizedStatusLine(line)
@@ -748,7 +854,7 @@ func containsStatusLinePrefix(text string, prefixes ...string) bool {
 	return false
 }
 
-func isWorkingStatusLine(line string) bool {
+func isCodexWorkingStatusLine(line string) bool {
 	line = normalizedStatusLine(line)
 	for _, marker := range []string{"working", "thinking", "pursuing goal", "goal active", "still running", "tool use", "compacting context", "waiting for background terminal"} {
 		if !strings.HasPrefix(line, marker) {
@@ -801,7 +907,7 @@ func currentPromptStatusText(text string) string {
 	current := []string{}
 	for _, line := range strings.Split(text, "\n") {
 		line = normalizedStatusLine(line)
-		for _, prefix := range []string{"working", "thinking", "pursuing goal", "goal active", "still running", "tool use", "compacting context", "waiting for background terminal", "esc to interrupt", "goal achieved", "all tasks complete", "task completed", "finished", "error:", "fatal", "traceback", "command failed", "exited with code"} {
+		for _, prefix := range []string{"goal achieved", "all tasks complete", "task completed", "finished", "error:", "fatal", "traceback", "command failed", "exited with code"} {
 			if hasStatusLinePrefix(line, prefix) {
 				current = append(current, line)
 				break

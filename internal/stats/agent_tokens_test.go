@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -5254,6 +5255,56 @@ func TestCodexForkRepairSourceUsesThreadIDWhenSessionMetaHasNoID(t *testing.T) {
 	}
 	if source == nil || source.ThreadID != "child-from-thread-id" || source.AgentID != "child-from-thread-id" {
 		t.Fatalf("fork repair source = %+v, want child identity from thread_id", source)
+	}
+}
+
+// The header budget must charge the bytes physically read. Reading through
+// 64 KiB ingestion pages while counting 4 KiB buffered reads undercounted by
+// up to 16x, so the header is read from the file and every byte is charged.
+// The kernel's per-thread read counter supplies the physical byte count; the
+// goroutine is locked to its thread so runtime reads elsewhere are excluded.
+func TestCodexForkRepairSourceChargesPhysicalHeaderBytes(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	path := filepath.Join(t.TempDir(), "rollout-large.jsonl")
+	writeJSONL(t, path, map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"id": "child", "forked_from_id": "parent", "thread_source": "subagent"},
+	}, map[string]any{"type": "event_msg", "payload": map[string]any{"padding": strings.Repeat("x", 1<<20)}})
+	processReadBytes := func() (int64, int64) {
+		data, err := os.ReadFile("/proc/thread-self/io")
+		if err != nil {
+			t.Skipf("per-thread read counter unavailable: %v", err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if value, ok := strings.CutPrefix(line, "rchar: "); ok {
+				count, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return count, int64(len(data))
+			}
+		}
+		t.Fatalf("rchar missing from %q", data)
+		return 0, 0
+	}
+	for _, budget := range []int64{1 << 20, 50} {
+		before, counterRead := processReadBytes()
+		source, readBytes, budgetCut, err := codexForkRepairSource(filepath.Dir(path), path, budget)
+		after, _ := processReadBytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// rchar includes the first counter read, which completes after sampling.
+		if physical := after - before - counterRead; readBytes != physical || readBytes > 4096 {
+			t.Fatalf("budget %d: charged %d header bytes, physically read %d", budget, readBytes, physical)
+		}
+		if budget == 50 && (!budgetCut || source != nil) {
+			t.Fatalf("budget %d: cut=%t source=%+v", budget, budgetCut, source)
+		}
+		if budget != 50 && (budgetCut || source == nil || source.ThreadID != "child") {
+			t.Fatalf("budget %d: cut=%t source=%+v", budget, budgetCut, source)
+		}
 	}
 }
 

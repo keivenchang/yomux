@@ -61,6 +61,7 @@ func goRuntimeLabel() string {
 
 type server struct {
 	shares                 shareRegistry
+	memoryCache            memoryCache
 	producerContext        context.Context
 	runtimeMemory          runtimeMemoryState
 	cpuCaptureMu           sync.Mutex
@@ -112,6 +113,10 @@ type server struct {
 	updateJobMu                         sync.Mutex
 	texInstallMu                        work.ContextMutex
 	texCompileMu                        work.ContextMutex
+	texBackgroundMu                     sync.Mutex
+	texBackground                       map[uint64]context.CancelCauseFunc
+	texBackgroundSerial                 uint64
+	texInteractive                      int
 	texProgressMu                       sync.Mutex
 	texProgress                         map[string]texProgressState
 	officePreviewMu                     sync.Mutex
@@ -1193,7 +1198,7 @@ func main() {
 	if productenv.Value("STATS_SYNTHETIC_INVENTORY") == "1" {
 		statusSources = stats.SyntheticAgentStatusSources(opencodeDatabase)
 	}
-	statusSources.CodexTurn = stats.CodexTurnStateReader(transcriptRoot("codex"))
+	statusSources.CodexTurn = stats.CodexTurnStateReader(transcriptRoot("codex"), &s.transcriptIngestion)
 	s.agentProcessSnapshot = statusSources.Process
 	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
 		return stats.ClassifyAgentStatus(ctx, request, statusSources)
@@ -1356,6 +1361,9 @@ func main() {
 	}
 	if s.yoagent != nil && !s.startBackgroundWork(func() { s.runNativeYOAgentJobs(shutdownContext) }) {
 		slog.Error("native YO!agent job loop was not admitted")
+	}
+	if !s.startBackgroundWork(func() { s.warmStaticGzip(shutdownContext) }) {
+		slog.Error("static asset warm-up was not admitted")
 	}
 	scheme := "https"
 	if *httpMode {
@@ -1726,7 +1734,7 @@ func (s *server) diagnosticsPerformance(w http.ResponseWriter, r *http.Request) 
 		"record_count": len(records), "summary": []any{}, "top_payload_bytes": []any{}, "recent": recent,
 		"capture": map[string]any{"capacity": goPerformanceRecordLimit, "retained": len(recent), "total": captureTotal, "evicted": max(0, int(captureTotal)-len(recent)), "first_sequence": max(1, captureTotal-uint64(len(recent))+1), "last_sequence": captureTotal},
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"perf": perf, "transport": map[string]any{"teardowns_total": 0, "teardowns_by_exception": map[string]any{}}, "shared_phase_counters": []any{}, "repeated_work": []any{}, "browser_profiles": map[string]any{}, "browser_observation_status": map[string]any{}})
+	jsonResponse(w, http.StatusOK, map[string]any{"perf": perf, "transport": map[string]any{"teardowns_total": 0, "teardowns_by_exception": map[string]any{}}, "shared_phase_counters": []any{}, "repeated_work": []any{}, "browser_profiles": map[string]any{}, "browser_observation_status": map[string]any{}, "memory_cache": s.memoryCache.snapshot()})
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
@@ -5208,6 +5216,9 @@ func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 		payload["index_synchronization_error"] = err.Error()
 	}
 	payload["index_settings_status"] = s.finderIndexSettingsStatus()
+	if r.Method == http.MethodPost {
+		s.applyStaticGzipSettings(payload)
+	}
 	if r.Method == http.MethodPost && s.finder != nil {
 		s.finder.SetUploadLimits(finder.UploadLimits{
 			MaxBytes:         s.fileTransferMaxBytes(),
@@ -5578,6 +5589,12 @@ func (s *server) static(w http.ResponseWriter, r *http.Request) {
 	if path != staticRoot && !strings.HasPrefix(path, staticRoot+string(filepath.Separator)) {
 		http.NotFound(w, r)
 		return
+	}
+	if staticAssetCompressible(path) {
+		w.Header().Add("Vary", "Accept-Encoding")
+		if s.serveStaticGzip(w, r, path) {
+			return
+		}
 	}
 	http.ServeFile(w, r, path)
 }

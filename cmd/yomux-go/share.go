@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -15,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,6 +33,14 @@ import (
 
 const shareTextLimit = 1 << 20
 
+func normalizeShareText(text string) string {
+	return strings.ReplaceAll(text, "\r\n", "\n")
+}
+
+func shareTextSupported(data []byte) bool {
+	return len(data) <= shareTextLimit && utf8.Valid(data) && !bytes.ContainsRune(data, 0) && !strings.ContainsRune(normalizeShareText(string(data)), '\r')
+}
+
 type shareRegistry struct {
 	historyBytes atomic.Int64
 	publication  uint64
@@ -38,7 +48,20 @@ type shareRegistry struct {
 	grants       map[string]*shareGrant
 	documents    map[string]*shareDocument
 	hostHues     map[string]int
+	// Owner browser tabs that have a file open, by path and tab. Two or more
+	// open tabs collaborate through the same document as a share would.
+	editors map[string]map[string]shareLocalEditor
 }
+
+type shareLocalEditor struct {
+	at    time.Time
+	clean bool
+}
+
+// Background tabs can be throttled to about one timer per minute, so allow
+// for that before treating a tab as closed.
+const shareLocalEditorWindow = 90 * time.Second
+
 type shareGrant struct {
 	lifetime   context.Context
 	cancel     context.CancelFunc
@@ -56,6 +79,8 @@ type shareGrant struct {
 	browsers   map[[32]byte]*shareBrowser
 	messages   []shareChatMessage
 	stopped    bool
+
+	TerminalWriteConfirmed bool `json:"terminal_write_confirmed,omitempty"`
 }
 
 const shareMaxMinutes = 86700 / 60
@@ -137,6 +162,8 @@ type sharePermission struct {
 
 type shareResource struct {
 	Assets             map[string]string `json:"assets,omitempty"`
+	images             map[string]shareImage
+	ownerCaret         *shareOwnerCaret
 	pdfSource          string
 	pdfSerial          uint64
 	ID                 string `json:"id"`
@@ -153,6 +180,15 @@ type shareResource struct {
 	permission         *sharePermission
 	pdf                []byte
 	pdfRevision        int
+}
+type shareImage struct {
+	relative    string
+	contentType string
+	file        *finder.GrantedFile
+}
+type shareOwnerCaret struct {
+	digest [sha256.Size]byte
+	cursor sharePresence
 }
 type shareAppearance struct {
 	Theme  string `json:"theme"`
@@ -171,12 +207,13 @@ func (appearance shareAppearance) valid() bool {
 }
 
 type shareSelection struct {
-	ID           string  `json:"id"`
-	Kind         string  `json:"kind"`
-	Path         string  `json:"path"`
-	Pane         string  `json:"pane"`
-	Writable     bool    `json:"writable"`
-	SavedContent *string `json:"saved_content"`
+	ID           string   `json:"id"`
+	Kind         string   `json:"kind"`
+	Path         string   `json:"path"`
+	Pane         string   `json:"pane"`
+	Writable     bool     `json:"writable"`
+	SavedContent *string  `json:"saved_content"`
+	ImagePaths   []string `json:"image_paths"`
 }
 
 func shareRandom() (string, error) {
@@ -194,6 +231,19 @@ func newShareInviteToken() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(entropy[:]), nil
 }
+
+// shareClientToken validates the browser-generated client and page identifiers.
+func shareClientToken(value string) bool {
+	return len(value) >= 16 && len(value) <= 100 && !strings.ContainsAny(value, "\x00\r\n\t")
+}
+
+// writeShareBody sends raw bytes; a failure means the browser went away, which it cannot be told.
+func writeShareBody(w http.ResponseWriter, data []byte) {
+	if _, err := w.Write(data); err != nil {
+		slog.Debug("share response delivery failed", "error", err)
+	}
+}
+
 func shareFailure(w http.ResponseWriter, status int, reason string) {
 	jsonResponse(w, status, map[string]any{"error": reason})
 }
@@ -223,20 +273,165 @@ func (s *server) registerShareRoutes(mux *http.ServeMux) {
 				w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 			}
 			w.Header().Set("Cache-Control", "no-store")
-			w.Write(body)
+			writeShareBody(w, body)
 		})
 	}
 	mux.Handle("/api/share", s.protected(http.HandlerFunc(s.shareAdmin), "admin"))
 	mux.Handle("/api/share/chat", s.protected(http.HandlerFunc(s.shareHostChat), "admin"))
 	mux.Handle("/api/share/document", s.protected(http.HandlerFunc(s.shareHostDocument), "admin"))
+	mux.Handle("/api/share/editing", s.protected(http.HandlerFunc(s.shareLocalEditing), "admin"))
+	mux.Handle("/api/share/presence", s.protected(http.HandlerFunc(s.shareHostPresence), "admin"))
 	mux.Handle("/api/share/recovery", s.protected(http.HandlerFunc(s.shareRecovery), "admin"))
 	mux.HandleFunc("/share/", s.shareGuest)
+}
+
+func (s *server) shareHostPresence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		shareFailure(w, 405, "method_not_allowed")
+		return
+	}
+	var updates []struct {
+		Grant, Resource, Digest, Surface string
+		Anchor, Head                     int
+	}
+	if decodeJSONBody(r.Body, 24<<10, &updates) != nil || len(updates) > 64 {
+		shareFailure(w, 400, "invalid_presence")
+		return
+	}
+	user, _ := r.Context().Value(authContextKey{}).(authUser)
+	now := time.Now()
+	s.shares.mu.Lock()
+	defer s.shares.mu.Unlock()
+	for _, update := range updates {
+		grant := s.shares.grants[update.Grant]
+		if !shareLive(grant) || grant.owner != user.username {
+			continue
+		}
+		digest, err := hex.DecodeString(update.Digest)
+		if err != nil || len(digest) != sha256.Size || update.Anchor < 0 || update.Head < 0 ||
+			update.Anchor > shareTextLimit || update.Head > shareTextLimit {
+			continue
+		}
+		for _, resource := range grant.Resources {
+			if resource.ID != update.Resource || resource.Kind != "file" || resource.Writable || !resource.CanWrite {
+				continue
+			}
+			surface := "text"
+			if update.Surface == "view" {
+				surface = "view"
+			}
+			resource.ownerCaret = &shareOwnerCaret{
+				digest: [sha256.Size]byte(digest),
+				cursor: sharePresence{ClientID: "owner", Name: grant.owner, Owner: true, Hue: s.shareHostHueLocked(grant.owner),
+					Anchor: update.Anchor, Head: update.Head, Surface: surface, At: now},
+			}
+		}
+	}
+	jsonResponse(w, 200, map[string]bool{"ok": true})
 }
 func (s *server) shareInitLocked() {
 	if s.shares.grants == nil {
 		s.shares.grants = make(map[string]*shareGrant)
 		s.shares.documents = make(map[string]*shareDocument)
+		s.shares.editors = make(map[string]map[string]shareLocalEditor)
 	}
+}
+
+// shareLocalEditorsLocked counts the owner tabs that recently reported path open,
+// and whether all of them had saved their drafts.
+func (s *server) shareLocalEditorsLocked(path string, now time.Time) (int, bool) {
+	clean := true
+	for client, editor := range s.shares.editors[path] {
+		if now.Sub(editor.at) > shareLocalEditorWindow {
+			delete(s.shares.editors[path], client)
+			continue
+		}
+		clean = clean && editor.clean
+	}
+	if len(s.shares.editors[path]) == 0 {
+		delete(s.shares.editors, path)
+	}
+	return len(s.shares.editors[path]), clean
+}
+
+func (s *server) shareLocalDocumentActive(path string) bool {
+	count, _ := s.shareLocalEditorsLocked(path, time.Now())
+	return count >= 2
+}
+
+// shareLocalEditing records which files this owner tab has open. When two or more
+// tabs have the same saved file open, it starts a collaboration document for them.
+func (s *server) shareLocalEditing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		shareFailure(w, 405, "method_not_allowed")
+		return
+	}
+	var b struct {
+		Client string `json:"client"`
+		Files  []struct {
+			Path  string `json:"path"`
+			Clean bool   `json:"clean"`
+		} `json:"files"`
+	}
+	if decodeJSONBody(r.Body, 64<<10, &b) != nil || !shareClientToken(b.Client) || len(b.Files) > 64 {
+		shareFailure(w, 400, "invalid_editing")
+		return
+	}
+	now := time.Now()
+	s.shares.mu.Lock()
+	defer s.shares.mu.Unlock()
+	s.shareInitLocked()
+	for _, editors := range s.shares.editors {
+		delete(editors, b.Client)
+	}
+	failures := map[string]string{}
+	for _, file := range b.Files {
+		if !filepath.IsAbs(file.Path) {
+			failures[file.Path] = "invalid_path"
+			continue
+		}
+		if s.shares.editors[file.Path] == nil {
+			s.shares.editors[file.Path] = make(map[string]shareLocalEditor)
+		}
+		s.shares.editors[file.Path][b.Client] = shareLocalEditor{at: now, clean: file.Clean}
+	}
+	for _, file := range b.Files {
+		count, clean := s.shareLocalEditorsLocked(file.Path, now)
+		if count < 2 || !clean || s.shares.documents[file.Path] != nil {
+			continue
+		}
+		if code := s.openShareLocalDocumentLocked(r.Context(), file.Path); code != "" {
+			failures[file.Path] = code
+		}
+	}
+	s.sharePruneLocked()
+	jsonResponse(w, 200, map[string]any{"ok": true, "failures": failures})
+}
+
+func (s *server) openShareLocalDocumentLocked(ctx context.Context, path string) string {
+	if len(s.shares.documents) >= 32 {
+		return "document_capacity"
+	}
+	file, failure := s.finder.GrantFile(ctx, path)
+	if failure != nil {
+		return failure.Code
+	}
+	data, _, failure := file.ReadCurrent(ctx, shareTextLimit)
+	if failure != nil {
+		return failure.Code
+	}
+	if !shareTextSupported(data) {
+		return "unsupported_file"
+	}
+	doc, err := newShareDocument(file, shareDiskRecord(path, data))
+	if err != nil {
+		return "random_unavailable"
+	}
+	if failure := file.ReserveWrites(ctx); failure != nil {
+		return failure.Code
+	}
+	s.shares.documents[path] = doc
+	return ""
 }
 func shareLive(g *shareGrant) bool { return g != nil && !g.stopped && time.Now().Before(g.Expires) }
 func (s *server) shareAdmin(w http.ResponseWriter, r *http.Request) {
@@ -262,10 +457,13 @@ func (s *server) shareAdmin(w http.ResponseWriter, r *http.Request) {
 				out = append(out, g)
 			}
 		}
-		paths := []string{}
+		paths, localPaths := []string{}, []string{}
 		for path := range s.shares.documents {
 			if s.shareDocumentActive(path) {
 				paths = append(paths, path)
+				if !s.shareGrantDocumentActive(path) {
+					localPaths = append(localPaths, path)
+				}
 			}
 		}
 		generations := map[string]string{}
@@ -275,6 +473,21 @@ func (s *server) shareAdmin(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resourcePaths := map[string]string{}
+		pdfs := map[string]sharePDFStatus{}
+		if r.URL.Query().Get("pdf") == "1" {
+			path := r.URL.Query().Get("path")
+			for _, grant := range out {
+				for _, resource := range grant.Resources {
+					if resource.Path == path && len(resource.pdf) > 0 {
+						w.Header().Set("Content-Type", "application/pdf")
+						writeShareBody(w, resource.pdf)
+						return
+					}
+				}
+			}
+			shareFailure(w, 404, "pdf_unavailable")
+			return
+		}
 		peers := map[string][]shareGuestPeer{}
 		sort.Slice(out, func(i, j int) bool {
 			return out[i].Expires.Before(out[j].Expires) || out[i].Expires.Equal(out[j].Expires) && out[i].ID < out[j].ID
@@ -291,8 +504,21 @@ func (s *server) shareAdmin(w http.ResponseWriter, r *http.Request) {
 			sort.Slice(list, func(i, j int) bool { return list[i].JoinedAt.Before(list[j].JoinedAt) })
 			peers[grant.ID] = list
 			addShareResourcePaths(resourcePaths, grant.Resources)
+			for _, resource := range grant.Resources {
+				if resource.Kind == "file" && isShareTeX(resource.Path) {
+					status := sharePDFStatus{Revision: resource.pdfSerial}
+					if doc := s.shares.documents[resource.Path]; doc != nil {
+						doc.mu.Lock()
+						status.Stale = resource.pdfSource != doc.Saved
+						doc.mu.Unlock()
+					}
+					if current, ok := pdfs[resource.Path]; !ok || status.Revision > current.Revision {
+						pdfs[resource.Path] = status
+					}
+				}
+			}
 		}
-		body := map[string]any{"shares": out, "documents": paths, "resource_paths": resourcePaths, "document_generations": generations, "peers": peers}
+		body := map[string]any{"shares": out, "documents": paths, "local_documents": localPaths, "resource_paths": resourcePaths, "document_generations": generations, "peers": peers, "tex_pdfs": pdfs}
 		if r.URL.Query().Get("invites") == "1" {
 			invites := make(map[string]string, len(out))
 			for _, grant := range out {
@@ -377,13 +603,19 @@ func (s *server) shareAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	user, _ := r.Context().Value(authContextKey{}).(authUser)
 	g := &shareGrant{ID: id, Revision: 1, Appearance: b.Appearance, Guest: b.Guest, Limit: b.Limit, Expires: time.Now().Add(time.Duration(b.Minutes) * time.Minute), secret: sha256.Sum256([]byte(secret)), browsers: make(map[[32]byte]*shareBrowser), owner: user.username}
+	g.TerminalWriteConfirmed = b.TerminalWriteConfirmed
 	g.inviteURL = "https://" + r.Host + "/share/" + id + "#" + secret
 	// Prepare all resources before publishing any grant or collaboration session.
 	pending := map[string]*shareDocument{}
+	seen := make(map[string]bool, len(b.Resources))
 	for _, selection := range b.Resources {
 		resource, err := s.prepareShareResource(r.Context(), selection, b.TerminalWriteConfirmed, pending)
 		if err != nil {
 			shareFailure(w, 400, err.Error())
+			return
+		}
+		if !recordShareResourceIdentity(seen, resource) {
+			shareFailure(w, 400, "duplicate_resource")
 			return
 		}
 		g.Resources = append(g.Resources, resource)
@@ -413,6 +645,15 @@ func (s *server) shareAdmin(w http.ResponseWriter, r *http.Request) {
 	resourcePaths := make(map[string]string)
 	addShareResourcePaths(resourcePaths, g.Resources)
 	jsonResponse(w, 201, map[string]any{"share": g, "url": g.inviteURL, "resource_paths": resourcePaths})
+}
+
+func recordShareResourceIdentity(seen map[string]bool, resource *shareResource) bool {
+	key := resource.Kind + ":" + resource.Path + resource.Pane
+	if seen[key] {
+		return false
+	}
+	seen[key] = true
+	return true
 }
 
 func addShareResourcePaths(paths map[string]string, resources []*shareResource) {
@@ -583,8 +824,15 @@ func (s *server) prepareShareResource(ctx context.Context, b shareSelection, wri
 	ext := strings.ToLower(filepath.Ext(path))
 	passive := sharePassiveType(ext) != ""
 	resource.CanWrite = !passive
-	if !passive && (!utf8.Valid(data) || strings.ContainsRune(string(data), 0) || len(data) > shareTextLimit) {
+	if !passive && !shareTextSupported(data) {
 		return nil, errors.New("unsupported_file")
+	}
+	if ext == ".md" || ext == ".markdown" {
+		images, err := s.prepareShareImages(ctx, resource.Path, b.ImagePaths)
+		if err != nil {
+			return nil, err
+		}
+		resource.images = images
 	}
 	if b.Writable {
 		if passive {
@@ -602,15 +850,52 @@ func (s *server) prepareShareResource(ctx context.Context, b shareSelection, wri
 	return resource, nil
 }
 
+const shareMarkdownImageLimit = 64
+
+// Only the authenticated owner's share request can attach image capabilities.
+// Guest edits to the Markdown never admit additional filesystem paths.
+func (s *server) prepareShareImages(ctx context.Context, markdownPath string, paths []string) (map[string]shareImage, error) {
+	if len(paths) > shareMarkdownImageLimit {
+		return nil, errors.New("too_many_shared_images")
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	images := make(map[string]shareImage)
+	seen := make(map[string]bool)
+	directory := filepath.Dir(markdownPath)
+	for _, path := range paths {
+		relative := filepath.Clean(filepath.FromSlash(path))
+		contentType := sharePassiveType(strings.ToLower(filepath.Ext(relative)))
+		if !filepath.IsLocal(relative) || seen[relative] || !strings.HasPrefix(contentType, "image/") {
+			continue
+		}
+		seen[relative] = true
+		file, failure := s.finder.GrantFile(ctx, filepath.Join(directory, relative))
+		if failure != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		token, err := shareRandom()
+		if err != nil {
+			return nil, err
+		}
+		images[token] = shareImage{relative: filepath.ToSlash(relative), contentType: contentType, file: file}
+	}
+	return images, nil
+}
+
 func (s *server) prepareShareDocument(ctx context.Context, resource *shareResource, saved *string, pending map[string]*shareDocument) (*shareDocument, error) {
-	data, info, failure := resource.file.Read(ctx, shareTextLimit)
+	data, info, failure := resource.file.ReadCurrent(ctx, shareTextLimit)
 	if failure != nil {
 		return nil, errors.New(failure.Code)
 	}
-	if !utf8.Valid(data) || strings.ContainsRune(string(data), 0) {
+	if !shareTextSupported(data) {
 		return nil, errors.New("unsupported_file")
 	}
-	if saved == nil || strings.ReplaceAll(*saved, "\r\n", "\n") != strings.ReplaceAll(string(data), "\r\n", "\n") {
+	if saved == nil || normalizeShareText(*saved) != normalizeShareText(string(data)) {
 		return nil, errors.New("save_host_draft_first")
 	}
 	doc := s.shares.documents[resource.Path]
@@ -618,18 +903,23 @@ func (s *server) prepareShareDocument(ctx context.Context, resource *shareResour
 		doc = pending[resource.Path]
 	}
 	if doc != nil {
-		_, current, failure := doc.file.Read(ctx, shareTextLimit)
+		_, current, failure := doc.file.ReadCurrent(ctx, shareTextLimit)
 		if failure != nil || !os.SameFile(info, current) {
 			return nil, errors.New("file_unavailable")
 		}
 		return doc, nil
 	}
-	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	record := shareRecoveryRecord{Path: resource.Path, Text: text, Saved: text}
+	return newShareDocument(resource.file, shareDiskRecord(resource.Path, data))
+}
+
+// shareDiskRecord starts a document from file bytes, editing with LF and saving with the file's line ending.
+func shareDiskRecord(path string, data []byte) shareRecoveryRecord {
+	text := normalizeShareText(string(data))
+	record := shareRecoveryRecord{Path: path, Text: text, Saved: text}
 	if strings.Contains(string(data), "\r\n") {
 		record.LineEnding = "\r\n"
 	}
-	return newShareDocument(resource.file, record, info.ModTime().UnixNano())
+	return record
 }
 func sharePassiveType(ext string) string {
 	switch ext {
@@ -889,7 +1179,7 @@ func (s *server) shareGuest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path[1] == "chat" {
-		s.shareChatRequest(w, r, g, browser.Name, browser.Hue)
+		s.shareChatRequest(w, r, g, browser.Name, browser.Hue, false)
 		return
 	}
 	if path[1] == "state" && r.Method == http.MethodGet {
@@ -939,6 +1229,29 @@ func (s *server) shareGuest(w http.ResponseWriter, r *http.Request) {
 			shareFailure(w, 410, "share_ended")
 		}
 	}
+	if r.URL.Query().Has("image") {
+		image, ok := resource.images[r.URL.Query().Get("image")]
+		if !ok {
+			shareFailure(w, 404, "resource_unavailable")
+			return
+		}
+		if r.Method != http.MethodGet {
+			shareFailure(w, 403, "read_only")
+			return
+		}
+		data, _, failure := image.file.ReadCurrent(ctx, finder.MaxRawBytes)
+		if ctx.Err() != nil {
+			failCancelled()
+			return
+		}
+		if failure != nil || http.DetectContentType(data) != image.contentType {
+			shareFailure(w, 409, "file_unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", image.contentType)
+		writeShareBody(w, data)
+		return
+	}
 	if resource.Kind == "terminal" {
 		input, key := "", ""
 		var permission *sharePermission
@@ -984,7 +1297,7 @@ func (s *server) shareGuest(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Get("pdf") == "1" && len(resource.pdf) > 0 && r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/pdf")
-		w.Write(resource.pdf)
+		writeShareBody(w, resource.pdf)
 		return
 	}
 	if ctx.Err() != nil {
@@ -999,7 +1312,12 @@ func (s *server) shareGuest(w http.ResponseWriter, r *http.Request) {
 		shareFailure(w, 403, "read_only")
 		return
 	}
-	data, _, failure := resource.file.Read(ctx, finder.MaxRawBytes)
+	readLimit := int64(shareTextLimit)
+	contentType := sharePassiveType(strings.ToLower(filepath.Ext(resource.Path)))
+	if contentType != "" {
+		readLimit = finder.MaxRawBytes
+	}
+	data, _, failure := resource.file.ReadCurrent(ctx, readLimit)
 	if failure != nil {
 		shareFailure(w, 409, "file_unavailable")
 		return
@@ -1008,13 +1326,23 @@ func (s *server) shareGuest(w http.ResponseWriter, r *http.Request) {
 		failCancelled()
 		return
 	}
-	if contentType := sharePassiveType(strings.ToLower(filepath.Ext(resource.Path))); contentType != "" {
+	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", "inline; filename="+strconv.Quote(resource.Label))
-		w.Write(data)
+		writeShareBody(w, data)
 		return
 	}
-	jsonResponse(w, 200, map[string]any{"text": string(data), "extension": strings.ToLower(filepath.Ext(resource.Path)), "pdf_available": len(resource.pdf) > 0, "pdf_revision": resource.pdfSerial, "pdf_stale": string(data) != resource.pdfSource})
+	if !shareTextSupported(data) {
+		shareFailure(w, 409, "file_unavailable")
+		return
+	}
+	text := normalizeShareText(string(data))
+	response := map[string]any{"text": string(data), "extension": strings.ToLower(filepath.Ext(resource.Path)), "pdf_available": len(resource.pdf) > 0, "pdf_revision": resource.pdfSerial, "pdf_stale": text != resource.pdfSource}
+	if owner := resource.ownerCaret; owner != nil && time.Since(owner.cursor.At) < 8*time.Second &&
+		sha256.Sum256([]byte(text)) == owner.digest {
+		response["presence"] = []sharePresence{owner.cursor}
+	}
+	jsonResponse(w, 200, response)
 }
 
 // The caller holds doc.mu.
@@ -1025,14 +1353,17 @@ func shareCompiledRevision(doc *shareDocument, source string) int {
 	return len(doc.operations)
 }
 
-// Only an explicit host publication copies a compiled PDF into a grant. Guest
-// reads and source edits never call the compiler.
 func (s *server) sharePublishPDF(path, source string, pdf []byte) error {
+	s.shares.mu.Lock()
+	defer s.shares.mu.Unlock()
+	return s.sharePublishPDFLocked(path, source, pdf, nil)
+}
+
+// The caller holds the registry lock and may already hold lockedDoc.mu.
+func (s *server) sharePublishPDFLocked(path, source string, pdf []byte, lockedDoc *shareDocument) error {
 	if len(pdf) > 32<<20 {
 		return errors.New("pdf_too_large")
 	}
-	s.shares.mu.Lock()
-	defer s.shares.mu.Unlock()
 	total := 0
 	for _, g := range s.shares.grants {
 		for _, resource := range g.Resources {
@@ -1057,9 +1388,13 @@ func (s *server) sharePublishPDF(path, source string, pdf []byte) error {
 				r.pdfSource = source
 				r.pdfSerial = s.shares.publication
 				if r.document != nil {
-					r.document.mu.Lock()
+					if r.document != lockedDoc {
+						r.document.mu.Lock()
+					}
 					r.pdfRevision = shareCompiledRevision(r.document, source)
-					r.document.mu.Unlock()
+					if r.document != lockedDoc {
+						r.document.mu.Unlock()
+					}
 				}
 			}
 		}
@@ -1068,13 +1403,14 @@ func (s *server) sharePublishPDF(path, source string, pdf []byte) error {
 }
 
 type shareChatMessage struct {
-	Name string    `json:"name"`
-	Hue  int       `json:"hue"`
-	Text string    `json:"text"`
-	At   time.Time `json:"at"`
+	Name  string    `json:"name"`
+	Hue   int       `json:"hue"`
+	Owner bool      `json:"owner,omitempty"`
+	Text  string    `json:"text"`
+	At    time.Time `json:"at"`
 }
 
-func (s *server) shareChatRequest(w http.ResponseWriter, r *http.Request, g *shareGrant, name string, hue int) {
+func (s *server) shareChatRequest(w http.ResponseWriter, r *http.Request, g *shareGrant, name string, hue int, owner bool) {
 	if r.Method == http.MethodPost {
 		var b struct {
 			Text string `json:"text"`
@@ -1083,7 +1419,7 @@ func (s *server) shareChatRequest(w http.ResponseWriter, r *http.Request, g *sha
 			shareFailure(w, 400, "invalid_message")
 			return
 		}
-		g.messages = append(g.messages, shareChatMessage{Name: name, Hue: hue, Text: b.Text, At: time.Now()})
+		g.messages = append(g.messages, shareChatMessage{Name: name, Hue: hue, Owner: owner, Text: b.Text, At: time.Now()})
 		if len(g.messages) > 256 {
 			g.messages = append([]shareChatMessage(nil), g.messages[len(g.messages)-256:]...)
 		}
@@ -1120,7 +1456,7 @@ func (s *server) shareHostChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		hue = s.shareHostHueLocked(user.username)
 	}
-	s.shareChatRequest(w, r, g, user.username, hue)
+	s.shareChatRequest(w, r, g, user.username, hue, user.username == g.owner)
 }
 func (s *server) sharePruneLocked() {
 	for id, g := range s.shares.grants {
@@ -1135,7 +1471,11 @@ func (s *server) sharePruneLocked() {
 		if !doc.mu.TryLock() {
 			continue
 		}
-		if !s.shareDocumentActive(path) && doc.Text == doc.Saved {
+		active := s.shareDocumentActive(path)
+		if !s.shareGrantIncludes(path, false) {
+			doc.cancelTeX()
+		}
+		if !active && doc.Text == doc.Saved {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			failure := doc.file.ReleaseWrites(ctx)
 			cancel()
@@ -1154,6 +1494,9 @@ func shareResourceAssets(resources []*shareResource) {
 			continue
 		}
 		resource.Assets = make(map[string]string)
+		for token, image := range resource.images {
+			resource.Assets[image.relative] = resource.ID + "?image=" + token
+		}
 		for _, asset := range resources {
 			if asset.Kind != "file" || !strings.HasPrefix(sharePassiveType(strings.ToLower(filepath.Ext(asset.Path))), "image/") {
 				continue
@@ -1182,7 +1525,7 @@ func (s *server) changeShareMembershipLocked(w http.ResponseWriter, r *http.Requ
 	pending := map[string]*shareDocument{}
 	resources := make([]*shareResource, 0, len(selections))
 	changed := make(map[string]bool)
-	seen := map[string]bool{}
+	seen := make(map[string]bool, len(selections))
 	for _, selection := range selections {
 		var resource *shareResource
 		if selection.ID != "" {
@@ -1238,12 +1581,10 @@ func (s *server) changeShareMembershipLocked(w http.ResponseWriter, r *http.Requ
 				return
 			}
 		}
-		key := resource.Kind + ":" + resource.Path + resource.Pane
-		if seen[key] {
+		if !recordShareResourceIdentity(seen, resource) {
 			shareFailure(w, 400, "duplicate_resource")
 			return
 		}
-		seen[key] = true
 		resources = append(resources, resource)
 	}
 	if len(pending)+len(s.shares.documents) > 32 {
@@ -1293,6 +1634,7 @@ func (s *server) changeShareMembershipLocked(w http.ResponseWriter, r *http.Requ
 	}
 	shareResourceAssets(resources)
 	g.Resources = resources
+	g.TerminalWriteConfirmed = g.TerminalWriteConfirmed || confirmed
 	g.Revision++
 	s.sharePruneLocked()
 	if len(responseResource) > 0 {

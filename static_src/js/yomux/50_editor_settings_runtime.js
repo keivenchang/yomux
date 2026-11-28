@@ -22,8 +22,10 @@ function fileEditorWrapForPath(path, state = null) {
 
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
-  if (fileState.get(path)?._shareActive && mode !== 'edit' && mode !== 'split' && !(bootstrap.guestWorkspace && mode === 'preview')) mode = 'edit';
   const state = fileEditorStateForItem(path, item);
+  // A guest share needs the live editor. Sync between the owner's own tabs does not block Diff.
+  if (fileState.get(path)?._shareActive && !fileState.get(path)._shareLocalOnly && mode !== 'edit' && mode !== 'split' &&
+      !(mode === 'preview' && (bootstrap.guestWorkspace || ['html', 'markdown'].includes(previewKindForPath(path, state))))) mode = 'edit';
   if (state?.historical === true && mode !== 'preview' && mode !== 'diff') mode = 'diff';
   if (state?.historical !== true && mode !== 'diff' && previewRendererForPath(path, state)?.previewOnly === true) mode = 'preview';
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path, state)) mode = state?.historical === true ? 'diff' : 'edit';
@@ -234,7 +236,9 @@ function refreshOpenEditorThemePanels() {
     if (!path || state?.kind !== 'text') return;
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
     if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
-    else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    else if (previewKindForPath(path, state) !== 'html') {
+      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    }
     if (!reconfigured) {
       capturePaneViewState(item, panel);
       renderFileEditorPanel(panel, item);
@@ -1071,7 +1075,7 @@ function applyEditorCursorStyle() {
 
 function applyInactivePaneOpacity(value) {
   const number = Number(value);
-  const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 60;
+  const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 12;
   document.documentElement?.style.setProperty('--inactive-pane-opacity-scale', String(percent / 100));
 }
 
@@ -1107,7 +1111,7 @@ function uiColorVisualPreset(value, light = false) {
 function applyActiveColor(value) {
   const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
   if (!styles.length) return;
-  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft', '--active-tab-muted-bg', '--active-tab-muted-hover-bg', '--active-tab-muted-border'];
+  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft', '--active-tab-muted-bg', '--active-tab-muted-hover-bg', '--active-tab-muted-border', '--share-accent-hue'];
   const preset = ACTIVE_COLOR_PRESETS[value];
   if (!preset) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
@@ -1117,9 +1121,12 @@ function applyActiveColor(value) {
   const light = document.body.classList.contains(themeResolvedBodyClass('light'));
   const p = light ? preset.light : preset.dark;
   const rgb = hexToRgbTriple(p.accent);
+  const [red, green, blue] = rgb.split(' ').map(Number);
+  const hue = Math.atan2(Math.sqrt(3) * (green - blue), 2 * red - green - blue) * 180 / Math.PI;
   for (const style of styles) {
     style.setProperty('--active-accent', p.accent);
     style.setProperty('--active-accent-rgb', rgb);
+    style.setProperty('--share-accent-hue', hue);
     style.setProperty('--active-accent-bright', p.bright);
     style.setProperty('--active-accent-text', p.text);
     style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
@@ -1196,7 +1203,7 @@ function applyCssSettings() {
   // low values appear to save correctly while the visible focused pane still stays prominent.
   const paneRingOpacity = Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)));
   applyPaneRingOpacity(paneRingOpacity);
-  applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60));
+  applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_dim_opacity', 12));
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
@@ -1345,7 +1352,7 @@ const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
   css: [
     'appearance.global_font_size', 'appearance.ui_font_size', 'appearance.sync_font_sizes', 'appearance.terminal_font_size',
     'appearance.editor_font_size', 'appearance.preview_font_size', 'appearance.file_explorer_font_size', 'appearance.tab_width',
-    'appearance.pane_spacing', 'appearance.pane_ring_opacity', 'appearance.inactive_pane_opacity',
+    'appearance.pane_spacing', 'appearance.pane_ring_opacity', 'appearance.inactive_pane_dim_opacity',
     'appearance.active_color', 'appearance.separator_color', 'appearance.editor_cursor_color',
     'performance.agent_status_pulse_period_ms', 'performance.popover_show_delay_ms', 'performance.popover_hide_delay_ms',
     'file_explorer.image_preview_max_px',
@@ -1436,6 +1443,9 @@ function applySettingsPayload(payload, options = {}) {
     if (metadataChanged) renderPreferencesPanels();
     return false;
   }
+  const previousEditorScheme = activeEditorScheme();
+  const followsConfiguredPalette = fileEditorThemeMode !== editorThemeInheritMode
+    && previousEditorScheme.id === configuredEditorSchemeForMode(previousEditorScheme.dark);
   clientSettingsDefaults = nextDefaults;
   clientSettings = nextSettings;
   clientSettingsMtimeNs = nextMtime;
@@ -1477,7 +1487,6 @@ function applySettingsPayload(payload, options = {}) {
   fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
   autoFocusEnabled = boolSetting('general.auto_focus');
   startupHelpersEnabled = boolSetting('general.startup_tips');
-  const previousEditorSchemeId = activeEditorScheme().id;
   const previousCursorColor = fileEditorCursorColor;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
@@ -1485,6 +1494,10 @@ function applySettingsPayload(payload, options = {}) {
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'line'));
   fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR));
   fileEditorThemeMode = readConfiguredEditorScheme();
+  if (followsConfiguredPalette && fileEditorThemeMode === previousEditorScheme.id) {
+    const nextScheme = configuredEditorSchemeForMode(previousEditorScheme.dark);
+    if (nextScheme !== fileEditorThemeMode) setFileEditorThemeMode(nextScheme, {apply: false, resetPreviewDisplay: false});
+  }
   if (options.initial || options.applyEditorDefaults) {
     fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
     fileEditorLineNumbersEnabled = boolSetting('terminal_editor.line_numbers', fileEditorLineNumbersEnabled);
@@ -1515,7 +1528,7 @@ function applySettingsPayload(payload, options = {}) {
   if (previousDateTimeHourCycle !== dateTimeHourCycle) {
     rerenderDateTimeFormatSurfaces();
   }
-  const editorThemeChanged = previousEditorSchemeId !== activeEditorScheme().id;
+  const editorThemeChanged = previousEditorScheme.id !== activeEditorScheme().id;
   const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;
   if (editorThemeChanged || editorCursorColorChanged || (groupChanged.editorTheme && fileEditorCursorColor === 'theme')) {
     // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain

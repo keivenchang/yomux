@@ -29,16 +29,19 @@ type shareOperation struct {
 	ID       string          `json:"id"`
 }
 type sharePresence struct {
-	ClientID  string    `json:"clientID"`
-	Name      string    `json:"name"`
-	Hue       int       `json:"hue"`
-	Anchor    int       `json:"anchor"`
-	Head      int       `json:"head"`
-	Version   int       `json:"version"`
-	At        time.Time `json:"at"`
-	principal string
-	movedAt   time.Time
-	focused   bool
+	ClientID    string    `json:"clientID"`
+	Name        string    `json:"name"`
+	Hue         int       `json:"hue"`
+	Owner       bool      `json:"owner,omitempty"`
+	Surface     string    `json:"surface,omitempty"`
+	Approximate bool      `json:"approximate,omitempty"`
+	Anchor      int       `json:"anchor"`
+	Head        int       `json:"head"`
+	Version     int       `json:"version"`
+	At          time.Time `json:"at"`
+	principal   string
+	movedAt     time.Time
+	focused     bool
 }
 type shareDocument struct {
 	ID           string
@@ -49,21 +52,35 @@ type shareDocument struct {
 	Text         string `json:"text"`
 	Saved        string `json:"saved"`
 	Paused       string `json:"paused"`
-	mtime        int64
 	file         *finder.GrantedFile
 	operations   []shareOperation
 	seen         map[string]shareOperation
 	presence     map[string]sharePresence
+	texCancel    context.CancelFunc
+	// texGeneration identifies the latest scheduled compile, so a finished one clears only its own cancel.
+	texGeneration uint64
+	// diskVersion is the file version Saved was last read from by a poll; nil forces a reread.
+	diskVersion os.FileInfo
+	// diskReads counts the full rereads polls performed.
+	diskReads uint64
 }
 
-func newShareDocument(file *finder.GrantedFile, record shareRecoveryRecord, mtime int64) (*shareDocument, error) {
+// The caller holds doc.mu.
+func (doc *shareDocument) cancelTeX() {
+	if doc.texCancel != nil {
+		doc.texCancel()
+		doc.texCancel = nil
+	}
+}
+
+func newShareDocument(file *finder.GrantedFile, record shareRecoveryRecord) (*shareDocument, error) {
 	id, err := shareRandom()
 	if err != nil {
 		return nil, err
 	}
 	return &shareDocument{
 		ID: id, Path: record.Path, Text: record.Text, Saved: record.Saved, lineEnding: record.LineEnding,
-		mtime: mtime, file: file, operations: []shareOperation{},
+		file: file, operations: []shareOperation{},
 		seen: make(map[string]shareOperation), presence: make(map[string]sharePresence),
 	}, nil
 }
@@ -129,7 +146,7 @@ func applyShareChanges(text string, raw json.RawMessage) (string, []shareChangeP
 			lines := make([]string, 0, len(change)-1)
 			for _, line := range change[1:] {
 				var value string
-				if !shareJSONString(line, &value) || strings.ContainsRune(value, '\n') {
+				if !shareJSONString(line, &value) || strings.ContainsAny(value, "\r\n\x00") {
 					return "", nil, errors.New("invalid_changes")
 				}
 				lines = append(lines, value)
@@ -177,6 +194,92 @@ func mapSharePosition(position int, parts []shareChangePart) int {
 	}
 	return newAt
 }
+
+func (doc *shareDocument) mapPresence(parts []shareChangePart) {
+	for key, cursor := range doc.presence {
+		cursor.Anchor = mapSharePosition(cursor.Anchor, parts)
+		cursor.Head = mapSharePosition(cursor.Head, parts)
+		doc.presence[key] = cursor
+	}
+}
+
+func (s *server) reserveShareHistory(bytes int) bool {
+	if s.shares.historyBytes.Add(int64(bytes)) <= 64<<20 {
+		return true
+	}
+	s.shares.historyBytes.Add(-int64(bytes))
+	return false
+}
+
+// Import a disk edit into the existing revision stream so connected editors
+// retain their session and CodeMirror can map selections across the change.
+// shared reports whether a live share grant includes the document.
+func (s *server) refreshShareDocument(ctx context.Context, doc *shareDocument, shared bool) {
+	// Every poll lands here while holding doc.mu, so skip rereading up to 1 MiB when the file
+	// is still the version Saved came from.
+	if doc.Paused == "" && doc.diskVersion != nil {
+		if current, err := os.Stat(doc.Path); err == nil && sameFileVersion(doc.diskVersion, current) {
+			return
+		}
+	}
+	doc.diskVersion = nil
+	doc.diskReads++
+	data, info, failure := doc.file.ReadCurrent(ctx, shareTextLimit)
+	if failure != nil {
+		doc.Paused = "file_unavailable"
+		return
+	}
+	if !shareTextSupported(data) {
+		doc.Paused = "unsupported_file"
+		return
+	}
+	text := normalizeShareText(string(data))
+	if text != doc.Saved {
+		before, after := []rune(doc.Saved), []rune(text)
+		start := 0
+		for start < len(before) && start < len(after) && before[start] == after[start] {
+			start++
+		}
+		endBefore, endAfter := len(before), len(after)
+		for endBefore > start && endAfter > start && before[endBefore-1] == after[endAfter-1] {
+			endBefore--
+			endAfter--
+		}
+		prefix := len(utf16.Encode(before[:start]))
+		removed := len(utf16.Encode(before[start:endBefore]))
+		inserted := string(after[start:endAfter])
+		suffix := len(utf16.Encode(before[endBefore:]))
+		replacement := []any{removed}
+		for _, line := range strings.Split(inserted, "\n") {
+			replacement = append(replacement, line)
+		}
+		changes, err := json.Marshal([]any{prefix, replacement, suffix})
+		if err != nil {
+			doc.Paused = "external_change"
+			return
+		}
+		operation := shareOperation{ClientID: "external", Changes: changes}
+		addedBytes := len(changes) + len(operation.ClientID)
+		if len(doc.operations) >= 100000 || doc.historyBytes+addedBytes > 16<<20 || !s.reserveShareHistory(addedBytes) {
+			doc.Paused = "document_revision_limit"
+			return
+		}
+		doc.mapPresence([]shareChangePart{{length: prefix}, {length: removed, insert: utf16.Encode([]rune(inserted)), changed: true}, {length: suffix}})
+		doc.operations = append(doc.operations, operation)
+		doc.historyBytes += addedBytes
+		doc.Text, doc.Saved = text, text
+		s.scheduleSharedTeX(doc, shared)
+	}
+	doc.lineEnding = ""
+	if strings.Contains(string(data), "\r\n") {
+		doc.lineEnding = "\r\n"
+	}
+	doc.Paused = ""
+	if fileVersionSettled(info, fileSettleClock()) {
+		doc.diskVersion = info
+	}
+}
+
 func (s *server) shareJournalPath(path string) string {
 	digest := sha256.Sum256([]byte(path))
 	return filepath.Join(s.config, "share-recovery", hex.EncodeToString(digest[:])+".json")
@@ -192,11 +295,11 @@ func (s *server) journalShareDocument(doc *shareDocument, text string) error {
 	}
 	return atomicfile.Write(s.shareJournalPath(doc.Path), data)
 }
-func (s *server) saveShareDocument(ctx context.Context, doc *shareDocument) {
+func (s *server) saveShareDocument(ctx context.Context, doc *shareDocument, shared bool) {
 	if doc.Text == doc.Saved || doc.Paused != "" {
 		return
 	}
-	data, _, failure := doc.file.Read(ctx, shareTextLimit)
+	data, info, failure := doc.file.ReadCurrent(ctx, shareTextLimit)
 	if failure != nil {
 		doc.Paused = "file_unavailable"
 		return
@@ -205,26 +308,36 @@ func (s *server) saveShareDocument(ctx context.Context, doc *shareDocument) {
 		doc.Paused = "external_change"
 		return
 	}
-	result, failure := doc.file.Write(ctx, doc.diskText(doc.Text), doc.mtime)
+	doc.diskVersion = nil
+	_, failure = doc.file.Write(ctx, doc.diskText(doc.Text), info)
 	if failure != nil {
 		doc.Paused = failure.Code
 		return
 	}
 	doc.Saved = doc.Text
-	doc.mtime = result["mtime_ns"].(int64)
 	// Retain the journal even after saving. A later crash may happen between a
 	// successful file publication and its acknowledgment to a reconnecting editor.
 	if err := s.journalShareDocument(doc, doc.Text); err != nil {
 		doc.Paused = "journal_unavailable"
 	}
+	s.scheduleSharedTeX(doc, shared)
 }
 func (s *server) shareDocumentActive(path string) bool {
+	return s.shareGrantDocumentActive(path) || s.shareLocalDocumentActive(path)
+}
+func (s *server) shareGrantDocumentActive(path string) bool {
+	return s.shareGrantIncludes(path, true)
+}
+
+// shareGrantIncludes reports whether a live grant shares path, writable when required.
+// The caller holds the registry lock.
+func (s *server) shareGrantIncludes(path string, writable bool) bool {
 	for _, g := range s.shares.grants {
 		if !shareLive(g) {
 			continue
 		}
 		for _, r := range g.Resources {
-			if r.Path == path && r.Writable {
+			if r.Path == path && (r.Writable || !writable) {
 				return true
 			}
 		}
@@ -256,7 +369,17 @@ func (s *server) shareHostDocument(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, 200, map[string]any{"active": false, "updates": []shareOperation{}, "presence": []sharePresence{}, "saved": false, "paused": "collaboration_ended"})
 		return
 	}
-	s.shareDocumentRequest(w, r, doc, user.username, hue, "host:"+user.username, true)
+	// Like a guest browser, each owner page is its own participant: two panels in one page share
+	// a caret, while the owner's other browsers and tabs show theirs.
+	principal := "host:" + user.username
+	if page := r.URL.Query().Get("page"); page != "" {
+		if !shareClientToken(page) {
+			shareFailure(w, 400, "invalid_page")
+			return
+		}
+		principal += ":" + page
+	}
+	s.shareDocumentRequest(w, r, doc, user.username, hue, principal, true)
 }
 func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, doc *shareDocument, name string, hue int, principal string, host bool, publications ...*shareResource) {
 	reply := newShareHTTPResponse(w, r.Context())
@@ -269,6 +392,7 @@ func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, do
 	}
 	s.shares.mu.Lock()
 	active := s.shareDocumentActive(doc.Path)
+	shared := s.shareGrantIncludes(doc.Path, false)
 	s.shares.mu.Unlock()
 	doc.mu.Lock()
 	defer func() { doc.mu.Unlock(); s.shares.mu.Lock(); s.sharePruneLocked(); s.shares.mu.Unlock() }()
@@ -289,7 +413,7 @@ func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, do
 		return
 	}
 	client := r.URL.Query().Get("client")
-	if len(client) < 16 || len(client) > 100 || strings.ContainsAny(client, "\x00\r\n\t") {
+	if !shareClientToken(client) {
 		shareFailure(w, 400, "invalid_client")
 		return
 	}
@@ -309,12 +433,14 @@ func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, do
 	if r.Method == http.MethodPost {
 
 		var b struct {
-			Version int              `json:"version"`
-			Updates []shareOperation `json:"updates"`
-			Anchor  int              `json:"anchor"`
-			Head    int              `json:"head"`
-			Focused bool             `json:"focused"`
-			Resolve string           `json:"resolve"`
+			Version     int              `json:"version"`
+			Updates     []shareOperation `json:"updates"`
+			Anchor      int              `json:"anchor"`
+			Head        int              `json:"head"`
+			Focused     bool             `json:"focused"`
+			Surface     string           `json:"surface"`
+			Approximate bool             `json:"approximate"`
+			Resolve     string           `json:"resolve"`
 		}
 		if decodeJSONBody(r.Body, 4<<20, &b) != nil || len(b.Updates) > 256 || b.Version < 0 || b.Version > len(doc.operations) {
 			shareFailure(w, 400, "invalid_updates")
@@ -330,14 +456,14 @@ func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, do
 				shareFailure(w, 403, "host_resolution_required")
 				return
 			}
-			data, info, failure := doc.file.Reauthorize(r.Context())
+			data, _, failure := doc.file.Reauthorize(r.Context())
 			if failure != nil {
 				shareFailure(w, 409, "file_unavailable")
 				return
 			}
-			doc.Saved = strings.ReplaceAll(string(data), "\r\n", "\n")
-			doc.mtime = info.ModTime().UnixNano()
+			doc.Saved = normalizeShareText(string(data))
 			doc.Paused = ""
+			doc.diskVersion = nil
 
 		}
 		if version == len(doc.operations) && len(b.Updates) > 0 {
@@ -382,13 +508,23 @@ func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, do
 			}
 
 			if len(newOps) > 0 {
+				diskBytes := len(next)
+				if doc.lineEnding == "\r\n" {
+					diskBytes += strings.Count(next, "\n")
+				}
+				if diskBytes > shareTextLimit {
+					shareFailure(w, 400, "document_too_large")
+					return
+				}
+				if strings.Contains(next, "\r\n") {
+					shareFailure(w, 400, "invalid_changes")
+					return
+				}
 				if r.Context().Err() != nil {
 					shareFailure(w, 410, "collaboration_ended")
 					return
 				}
-				reservedBytes := s.shares.historyBytes.Add(int64(addedBytes))
-				if reservedBytes > 64<<20 {
-					s.shares.historyBytes.Add(-int64(addedBytes))
+				if !s.reserveShareHistory(addedBytes) {
 					shareFailure(w, 429, "collaboration_capacity")
 					return
 				}
@@ -398,11 +534,7 @@ func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, do
 					return
 				}
 				for _, parts := range mapped {
-					for key, p := range doc.presence {
-						p.Anchor = mapSharePosition(p.Anchor, parts)
-						p.Head = mapSharePosition(p.Head, parts)
-						doc.presence[key] = p
-					}
+					doc.mapPresence(parts)
 				}
 				doc.historyBytes += addedBytes
 				doc.Text = next
@@ -415,12 +547,18 @@ func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, do
 		if b.Version == len(doc.operations)-len(b.Updates) || len(b.Updates) == 0 && b.Version == len(doc.operations) {
 			length := len(utf16.Encode([]rune(doc.Text)))
 			if b.Anchor >= 0 && b.Head >= 0 && b.Anchor <= length && b.Head <= length {
+				if b.Surface != "view" {
+					b.Surface = "text"
+				}
 				now := time.Now()
 				cursor := doc.presence[clientID]
-				if cursor.movedAt.IsZero() || cursor.Anchor != b.Anchor || cursor.Head != b.Head || b.Focused && !cursor.focused {
+				if cursor.movedAt.IsZero() || cursor.Anchor != b.Anchor || cursor.Head != b.Head ||
+					cursor.Surface != b.Surface || cursor.Approximate != b.Approximate || b.Focused && !cursor.focused {
 					cursor.movedAt = now
 				}
 				cursor.ClientID, cursor.Name, cursor.Hue = clientID, name, hue
+				cursor.Owner = host
+				cursor.Surface, cursor.Approximate = b.Surface, b.Approximate
 				cursor.Anchor, cursor.Head, cursor.At = b.Anchor, b.Head, now
 				cursor.principal, cursor.focused = principal, b.Focused
 				doc.presence[clientID] = cursor
@@ -431,7 +569,11 @@ func (s *server) shareDocumentRequest(w http.ResponseWriter, r *http.Request, do
 		return
 	}
 	saveContext, cancelSave := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-	s.saveShareDocument(saveContext, doc)
+	if active && doc.Text == doc.Saved && (doc.Paused == "" || doc.Paused == "file_unavailable" || doc.Paused == "document_revision_limit") {
+		s.refreshShareDocument(saveContext, doc, shared)
+	} else {
+		s.saveShareDocument(saveContext, doc, shared)
+	}
 	cancelSave()
 	presence := doc.otherParticipants(principal, time.Now())
 	end := version
@@ -506,7 +648,7 @@ func (s *server) shareRecovery(w http.ResponseWriter, r *http.Request) {
 				shareFailure(w, 409, failure.Code)
 				return
 			}
-			doc, err = newShareDocument(file, record, 0)
+			doc, err = newShareDocument(file, record)
 			if err != nil {
 				shareFailure(w, 503, "random_unavailable")
 				return
@@ -519,21 +661,21 @@ func (s *server) shareRecovery(w http.ResponseWriter, r *http.Request) {
 		}
 		doc.mu.Lock()
 		defer doc.mu.Unlock()
-		current, info, failure := doc.file.Reauthorize(r.Context())
+		current, _, failure := doc.file.Reauthorize(r.Context())
 		if failure != nil {
 			shareFailure(w, 409, failure.Code)
 			return
 		}
-		doc.Saved = strings.ReplaceAll(string(current), "\r\n", "\n")
-		doc.mtime = info.ModTime().UnixNano()
+		doc.Saved = normalizeShareText(string(current))
 		doc.Paused = ""
+		doc.diskVersion = nil
 		if err := s.journalShareDocument(doc, doc.Text); err != nil {
 			shareFailure(w, 503, "journal_unavailable")
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer cancel()
-		s.saveShareDocument(ctx, doc)
+		s.saveShareDocument(ctx, doc, s.shareGrantIncludes(doc.Path, false))
 		if doc.Paused != "" {
 			shareFailure(w, 409, doc.Paused)
 			return
@@ -542,6 +684,9 @@ func (s *server) shareRecovery(w http.ResponseWriter, r *http.Request) {
 			if failure := doc.file.ReleaseWrites(ctx); failure != nil {
 				shareFailure(w, 503, failure.Code)
 				return
+			}
+			if !s.shareGrantIncludes(doc.Path, false) {
+				doc.cancelTeX()
 			}
 			delete(s.shares.documents, doc.Path)
 			s.shares.historyBytes.Add(-int64(doc.historyBytes))

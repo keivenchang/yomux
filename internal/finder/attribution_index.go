@@ -25,6 +25,12 @@ import (
 var attributionFallbackRoot = "/__yomux_attribution_relative__/" + strings.Repeat("cwd/", 64) + "leaf"
 
 const attributionMaxSources = 4096
+
+// attributionParserVersion identifies how stored operations were derived from transcripts. Rows
+// written by another version are discarded at open because index() only reads new bytes, so a
+// parser change would otherwise never reach transcript content that was already indexed.
+// Version 2 reads Codex code-mode exec commands and resolves patches in the command workdir.
+const attributionParserVersion = 2
 const attributionMaxOperations = 250000
 
 // Admission stays at 4 MiB; the final admitted full-frame read can bring a
@@ -104,6 +110,10 @@ func OpenAttributionIndex(directory string, ingestion *tailfile.Ingestion) (*Att
 		db.Close()
 		return nil, err
 	}
+	if err = resetAttributionIndexForParserVersion(context.Background(), db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if ingestion == nil {
 		ingestion = &tailfile.Ingestion{}
 	}
@@ -113,6 +123,35 @@ func OpenAttributionIndex(directory string, ingestion *tailfile.Ingestion) (*Att
 		return nil, err
 	}
 	return &AttributionIndex{db: db, ingestion: ingestion, pending: make(map[string]bool), failures: make(map[string]error), active: make(map[string]time.Time), wake: make(chan struct{}, 1), coverageIncomplete: incomplete > 0, progress: AttributionProgress{State: "indexing", Partial: true, Updated: updated, Gaps: gaps}}, nil
+}
+
+// resetAttributionIndexForParserVersion clears every stored source, operation, and coverage
+// tombstone when the database was written by another parser version, so each transcript is read
+// again from its start. The version is recorded in the same transaction as the reset.
+func resetAttributionIndexForParserVersion(ctx context.Context, db *sql.DB) error {
+	var version int
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version == attributionParserVersion {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		"DELETE FROM attribution_operations",
+		"DELETE FROM attribution_sources",
+		"DELETE FROM attribution_coverage",
+		fmt.Sprintf("PRAGMA user_version=%d", attributionParserVersion),
+	} {
+		if _, err = tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // A fully replayed current generation can be ready while an earlier generation
@@ -445,12 +484,17 @@ func (i *AttributionIndex) index(ctx context.Context, source AttributionSource, 
 	if batch.Reset {
 		cwd = ""
 	}
-	for _, record := range batch.Records {
+	var codexOperations []codexTranscriptOperations
+	if source.Kind == "codex" {
+		codexOperations = make([]codexTranscriptOperations, len(batch.Records))
+	}
+	for index, record := range batch.Records {
 		if len(record.Data) > maxSessionTranscriptLineBytes {
 			return batch.BytesRead, 0, false, fmt.Errorf("attribution record exceeds %d-byte limit", maxSessionTranscriptLineBytes)
 		}
 		if source.Kind == "codex" {
-			if value := parseCodexTranscriptRecordedCWD(record.Data); value != "" {
+			codexOperations[index] = codexFileOperations.Read(i.ingestion, record.Data)
+			if value := codexOperations[index].recordedCWD; value != "" {
 				cwd = value
 			}
 		}
@@ -477,13 +521,13 @@ func (i *AttributionIndex) index(ctx context.Context, source AttributionSource, 
 	if err != nil {
 		return batch.BytesRead, 0, false, err
 	}
-	for _, record := range batch.Records {
+	for index, record := range batch.Records {
 		changes := make(map[string]*sessionFileAttribution)
 		agent := SessionFileAgent{Kind: source.Kind, CWD: attributionFallbackRoot}
 		if source.Kind == "codex" {
-			scanCodexTranscriptLine(record.Data, agent, 0, changes)
+			applyCodexTranscriptOperations(changes, agent, 0, codexOperations[index])
 		} else {
-			scanClaudeTranscriptLine(record.Data, agent, 0, changes)
+			applyClaudeFileOperations(changes, agent, 0, claudeFileOperations.Read(i.ingestion, record.Data))
 		}
 		for path, change := range changes {
 			relative := strings.HasPrefix(path, "/__yomux_attribution_relative__/")
@@ -617,45 +661,63 @@ type indexedAttributionOperation struct {
 	relative     bool
 }
 type indexedAttributionSource struct {
-	historical      bool
-	gap             string
-	path, kind, cwd string
-	mtime           int64
-	complete        bool
-	operations      []indexedAttributionOperation
+	gap        string
+	path       string
+	mtime      int64
+	complete   bool
+	operations []indexedAttributionOperation
 }
 
-func (i *AttributionIndex) query(ctx context.Context, agents []SessionFileAgent, roots []string, hours float64) (map[string]*sessionFileAttribution, error) {
-	eligible := make([]SessionFileAgent, 0, len(agents))
+// sessionFileAttributionWindow reports whether the requested lookback was widened. The
+// per-source time filter uses transcript mtime because operations carry no timestamp.
+// partial records that one of the agents' transcripts was not fully indexed when this result was
+// read; the index may finish before the response is built, and the result must still say partial.
+type sessionFileAttributionWindow struct {
+	stretched    bool
+	lastActivity int64
+	partial      bool
+}
+
+// query projects only the transcripts of the session's live agents. Pane and transcript-header
+// directories never select sources: every session starts in its own YOmux checkout, so matching
+// archived transcripts by directory would pull in unrelated sessions' work.
+func (i *AttributionIndex) query(ctx context.Context, agents []SessionFileAgent, hours float64) (map[string]*sessionFileAttribution, sessionFileAttributionWindow, error) {
+	window := sessionFileAttributionWindow{}
+	live := make(map[string]SessionFileAgent)
+	placeholders := make([]string, 0, len(agents))
+	args := make([]any, 0, len(agents))
 	for _, agent := range agents {
-		if (agent.Kind == "claude" || agent.Kind == "codex") && agent.Transcript != "" {
-			eligible = append(eligible, agent)
-			i.Enqueue(AttributionSource{Path: agent.Transcript, Kind: agent.Kind}, true)
+		if agent.Kind != "claude" && agent.Kind != "codex" {
+			continue
 		}
-	}
-	cutoff := time.Now().Add(-time.Duration(hours * float64(time.Hour))).UnixNano()
-	selection := "s.path IN (SELECT path FROM attribution_sources WHERE mtime>=? AND historical=1 AND kind='codex' ORDER BY mtime DESC,path LIMIT 256)"
-	if len(roots) == 0 {
-		selection = "s.mtime>=? AND 0"
-	}
-	args := []any{cutoff}
-	for _, agent := range eligible {
-		selection += " OR s.path=?"
+		if agent.Transcript == "" {
+			window.partial = true
+			continue
+		}
+		i.Enqueue(AttributionSource{Path: agent.Transcript, Kind: agent.Kind}, true)
+		if _, seen := live[agent.Transcript]; seen {
+			continue
+		}
+		live[agent.Transcript] = agent
+		placeholders = append(placeholders, "?")
 		args = append(args, agent.Transcript)
 	}
-	rows, err := i.db.QueryContext(ctx, `SELECT s.path,s.kind,s.cwd,s.mtime,s.complete,s.historical,s.gap,o.path,o.status,o.relative FROM attribution_sources s LEFT JOIN attribution_operations o ON o.source=s.path WHERE `+selection+` ORDER BY s.mtime DESC,s.path,o.offset`, args...)
-
-	if err != nil {
-		return nil, err
+	if len(live) == 0 {
+		i.setSourceError("query", nil)
+		return map[string]*sessionFileAttribution{}, window, nil
 	}
-	sources := make([]indexedAttributionSource, 0)
+	rows, err := i.db.QueryContext(ctx, `SELECT s.path,s.mtime,s.complete,s.gap,o.path,o.status,o.relative FROM attribution_sources s LEFT JOIN attribution_operations o ON o.source=s.path WHERE s.path IN (`+strings.Join(placeholders, ",")+`) ORDER BY s.mtime DESC,s.path,o.offset`, args...)
+	if err != nil {
+		return nil, window, err
+	}
+	sources := make([]indexedAttributionSource, 0, len(live))
 	for rows.Next() {
 		var source indexedAttributionSource
 		var path, status sql.NullString
 		var relative sql.NullBool
-		if err = rows.Scan(&source.path, &source.kind, &source.cwd, &source.mtime, &source.complete, &source.historical, &source.gap, &path, &status, &relative); err != nil {
+		if err = rows.Scan(&source.path, &source.mtime, &source.complete, &source.gap, &path, &status, &relative); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, window, err
 		}
 		if len(sources) == 0 || sources[len(sources)-1].path != source.path {
 			sources = append(sources, source)
@@ -666,98 +728,72 @@ func (i *AttributionIndex) query(ctx context.Context, agents []SessionFileAgent,
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
-		return nil, err
+		return nil, window, err
 	}
 	if err = rows.Close(); err != nil {
-		return nil, err
+		return nil, window, err
 	}
-	changes := make(map[string]*sessionFileAttribution)
-	live := make(map[string]SessionFileAgent)
-	for _, agent := range eligible {
-		if _, seen := live[agent.Transcript]; !seen {
-			live[agent.Transcript] = agent
-		}
-	}
-	cwds := sessionFileTranscriptCWDs(agents, roots)
-	historicalCount := 0
-	seenLive := make(map[string]bool)
+	cutoff := time.Now().Add(-time.Duration(hours * float64(time.Hour))).UnixNano()
+	recent := make(map[string]*sessionFileAttribution)
+	older := make(map[string]*sessionFileAttribution)
+	olderActivity := int64(0)
+	partial := window.partial || len(sources) < len(live)
 	for _, source := range sources {
-		project := func(agent SessionFileAgent) map[string]*sessionFileAttribution {
-			result := make(map[string]*sessionFileAttribution)
-			for _, op := range source.operations {
-				path := op.path
-				if op.relative {
-					path = resolveSessionTranscriptPath(path, agent.CWD)
-				}
-				recordSessionTranscriptPath(result, path, agent.CWD, agent, op.status, source.mtime/int64(time.Second))
-			}
-			return result
-		}
-		if source.historical && source.mtime >= cutoff {
-			historicalCount++
-		}
 		if source.gap == "source_deleted" || source.gap == "index_evicted" {
+			partial = true
 			continue
 		}
-		if agent, ok := live[source.path]; ok {
-			seenLive[source.path] = true
-			if source.mtime < cutoff {
-				continue
-			}
-			if !source.complete {
-				i.mu.Lock()
-				i.progress.Partial = true
-				i.progress.State = "indexing"
-				i.mu.Unlock()
-			}
-			for path, a := range project(agent) {
-				mergeSessionFileAttribution(changes, path, a)
-			}
-			continue
+		partial = partial || !source.complete
+		agent := live[source.path]
+		target := recent
+		if source.mtime < cutoff {
+			target = older
 		}
-		if !source.historical || source.kind != "codex" || len(roots) == 0 || historicalCount > maxHistoricalCodexFiles {
-			continue
-		}
-		if cwd := resolveSessionTranscriptPath(source.cwd, ""); cwd != "" {
-			for path, a := range historicalCodexChangesForRoots(project(SessionFileAgent{Kind: "codex", CWD: cwd}), cwds) {
-				mergeSessionFileAttribution(changes, path, a)
+		for _, op := range source.operations {
+			path := op.path
+			// The agent directory only resolves this transcript's own relative paths; a recorded
+			// command workdir was already applied when the operation was indexed.
+			if op.relative {
+				path = resolveSessionTranscriptPath(path, agent.CWD)
 			}
-		} else {
-			for _, cwd := range cwds {
-				projected := project(SessionFileAgent{Kind: "codex", CWD: cwd})
-				if historicalCodexChangesTouchRoot(projected, cwd) {
-					for path, a := range projected {
-						mergeSessionFileAttribution(changes, path, a)
-					}
-					break
-				}
+			recordSessionTranscriptPath(target, path, "", agent, op.status, source.mtime/int64(time.Second))
+			if source.mtime < cutoff && source.mtime > olderActivity {
+				olderActivity = source.mtime
 			}
 		}
 	}
-	for path := range live {
-		if !seenLive[path] {
-			i.mu.Lock()
-			i.progress.Partial = true
-			i.progress.State = "indexing"
-			i.mu.Unlock()
-		}
+	window.partial = partial
+	if partial {
+		i.mu.Lock()
+		i.progress.Partial = true
+		i.progress.State = "indexing"
+		i.mu.Unlock()
 	}
 	i.setSourceError("query", nil)
-	return changes, nil
+	changes := make(map[string]*sessionFileAttribution)
+	selected := recent
+	// An idle agent keeps its last work visible instead of an empty Differ. Only the live
+	// agents' own transcripts are widened, so no other session's history is consulted.
+	if len(recent) == 0 && len(older) > 0 {
+		selected = older
+		window.stretched, window.lastActivity = true, olderActivity/int64(time.Second)
+	}
+	for path, attribution := range selected {
+		mergeSessionFileAttribution(changes, path, attribution)
+	}
+	return changes, window, nil
 }
-func (s *Service) sessionFileAttributions(ctx context.Context, agents []SessionFileAgent, roots []string, hours float64) map[string]*sessionFileAttribution {
-	if s.attributionUnavailable != nil {
-		return map[string]*sessionFileAttribution{}
+
+func (s *Service) sessionFileAttributions(ctx context.Context, agents []SessionFileAgent, hours float64) (map[string]*sessionFileAttribution, sessionFileAttributionWindow) {
+	if s.attributionUnavailable != nil || s.attributionIndex == nil {
+		return map[string]*sessionFileAttribution{}, sessionFileAttributionWindow{partial: true}
 	}
-	if s.attributionIndex == nil {
-		return collectSessionFileAttributions(ctx, agents, roots, hours)
-	}
-	changes, err := s.attributionIndex.query(ctx, agents, roots, hours)
+	changes, window, err := s.attributionIndex.query(ctx, agents, hours)
 	if err != nil {
 		s.attributionIndex.setError(err)
-		return map[string]*sessionFileAttribution{}
+		return map[string]*sessionFileAttribution{}, sessionFileAttributionWindow{partial: true}
 	}
-	return changes
+	return changes, window
 }
 
 func (s *Service) AttributionPreparation() AttributionProgress {

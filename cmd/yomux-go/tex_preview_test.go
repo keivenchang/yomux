@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/finder"
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestTeXCompilerArchiveVerification(t *testing.T) {
@@ -237,6 +239,361 @@ waitForEngine:
 	}
 }
 
+func TestInteractiveTeXPreviewPreemptsSharedCompile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux subprocess contract; Darwin uses Seatbelt instead of bubblewrap")
+	}
+	root := t.TempDir()
+	tools := t.TempDir()
+	write := func(name, content string, mode os.FileMode) {
+		t.Helper()
+		if err := os.WriteFile(name, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(tools, "bwrap"), "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n", 0o700)
+	write(filepath.Join(tools, "tectonic"), "#!/bin/sh\nIFS= read -r text || true\nif [ \"$text\" = shared ]; then printf started > \"$3/started\"; /bin/sleep 60; fi\nprintf '%%PDF-1.4\\n%s\\n' \"$text\" > \"$3/texput.pdf\"\n", 0o700)
+	t.Setenv("PATH", tools)
+	path := filepath.Join(root, "document.tex")
+	write(path, "saved source", 0o600)
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{config: t.TempDir(), port: 7111, finder: service}
+	parent, stop := context.WithCancel(context.Background())
+	defer stop()
+	preempted := make(chan bool, 1)
+	go func() { preempted <- s.compileSharedTeX(parent, &shareDocument{Path: path}, "shared") }()
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+waitForSharedCompile:
+	for {
+		started, err := filepath.Glob(filepath.Join(s.texToolsDirectory(), "preview-*", "started"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(started) == 1 {
+			break waitForSharedCompile
+		}
+		select {
+		case <-deadline:
+			t.Fatal("shared compile did not start")
+		case <-ticker.C:
+		}
+	}
+	body, err := json.Marshal(map[string]string{"path": path, "content": "interactive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interactive := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		s.texPreview(response, httptest.NewRequest("POST", "/api/tex/preview", bytes.NewReader(body)))
+		interactive <- response
+	}()
+	select {
+	case response := <-interactive:
+		if !strings.Contains(response.Body.String(), "%PDF-1.4") || !strings.Contains(response.Body.String(), "interactive") {
+			t.Fatal(response.Body.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("interactive preview waited behind the shared compile")
+	}
+	select {
+	case retry := <-preempted:
+		if !retry {
+			t.Fatal("a preempted shared compile did not ask to run again")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shared compile did not yield")
+	}
+}
+
+// A shared compile that registers after an interactive preview started waiting, but before
+// the preview owns the compiler, must yield instead of taking the compiler first.
+func TestSharedTeXYieldsToAWaitingInteractivePreview(t *testing.T) {
+	tools := t.TempDir()
+	if err := testsupport.WriteExecutable(filepath.Join(tools, "pdflatex"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools)
+	s := &server{config: t.TempDir()}
+	s.beginInteractiveTeX()
+	retry := s.compileSharedTeX(context.Background(), &shareDocument{Path: filepath.Join(tools, "document.tex")}, "shared")
+	if !retry {
+		t.Fatal("the shared compile did not yield to the waiting preview")
+	}
+	if !s.texCompileMu.TryLock() {
+		t.Fatal("the yielding shared compile kept the compiler")
+	}
+	s.texCompileMu.Unlock()
+	s.endInteractiveTeX()
+	s.texBackgroundMu.Lock()
+	waiting, registered := s.texInteractive, len(s.texBackground)
+	s.texBackgroundMu.Unlock()
+	if waiting != 0 || registered != 0 {
+		t.Fatalf("interactive waiters=%d registered compiles=%d after both finished", waiting, registered)
+	}
+}
+
+// texCacheFixture is a document directory and a fake Tectonic that records each run, reads the
+// document's files the way \input, \includegraphics, and \bibliography would, and reports them
+// with --makefile-rules. Source "fail" fails, "norules" reports nothing, and "standalone" reports
+// that it read no document files.
+func texCacheFixture(t *testing.T) (*server, string, func() int) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux subprocess contract; Darwin uses Seatbelt instead of bubblewrap")
+	}
+	root, tools := t.TempDir(), t.TempDir()
+	runs := filepath.Join(tools, "runs")
+	files := map[string]string{
+		filepath.Join(tools, "bwrap"): "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+		filepath.Join(tools, "tectonic"): "#!/bin/sh\nprintf x >> " + shellQuote(runs) + "\nIFS= read -r text || true\n[ \"$text\" = fail ] && exit 3\n" +
+			"{ printf '%%PDF-1.4\\n%s\\n' \"$text\"; /bin/cat part.tex sub/chapter.tex refs.bib figure.png 2>/dev/null; } > \"$3/texput.pdf\"\n" +
+			"[ \"$text\" = standalone ] && { printf '%s :\\n' \"$3/texput.pdf\" > \"$7\"; exit 0; }\n" +
+			"[ \"$text\" = norules ] || printf '%s : \\\\\\n  %s \\\\\\n  %s \\\\\\n  %s \\\\\\n  %s\\n' \"$3/texput.pdf\" \"$3/part.tex\" \"$3/sub/chapter.tex\" \"$3/figure.png\" \"$3/refs.bib\" > \"$7\"\n",
+		filepath.Join(root, "part.tex"):           "first part\n",
+		filepath.Join(root, "sub", "chapter.tex"): "chapter\n",
+		filepath.Join(root, "refs.bib"):           "@misc{a, title={A}}\n",
+		filepath.Join(root, "figure.png"):         "PNGA",
+		filepath.Join(root, "document.tex"):       "saved\n",
+	}
+	for path, content := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := testsupport.WriteExecutable(path, []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", tools)
+	// The fixture's files were just written; judge them as long settled.
+	fileSettleClock = func() time.Time { return time.Now().Add(time.Hour) }
+	t.Cleanup(func() { fileSettleClock = time.Now })
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	count := func() int {
+		data, err := os.ReadFile(runs)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(data)
+	}
+	return &server{config: t.TempDir(), port: 7111, finder: service}, root, count
+}
+
+func texPreviewRequest(t *testing.T, s *server, path, content, job string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"path": path, "content": content, "job_id": job})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	s.texPreview(response, httptest.NewRequest("POST", "/api/tex/preview", bytes.NewReader(body)))
+	return response
+}
+
+func TestTeXPreviewCacheReusesOnlyUnchangedCompiles(t *testing.T) {
+	s, root, runs := texCacheFixture(t)
+	document := filepath.Join(root, "document.tex")
+	preview := func(content string, wantRuns int, wantCache string) string {
+		t.Helper()
+		response := texPreviewRequest(t, s, document, content, "job-cache-0000001")
+		if response.Header().Get("Content-Type") != "application/pdf" || response.Header().Get("X-YOmux-Preview-Cache") != wantCache || runs() != wantRuns {
+			t.Fatalf("%q: cache=%q runs=%d (want %s, %d) %s", content, response.Header().Get("X-YOmux-Preview-Cache"), runs(), wantCache, wantRuns, response.Body.String())
+		}
+		if state, ok := s.texProgressSnapshot("job-cache-0000001"); !ok || state.Phase != "complete" {
+			t.Fatalf("%q: progress %+v %v", content, state, ok)
+		}
+		return response.Body.String()
+	}
+	first := preview("main", 1, "miss")
+	if preview("main", 1, "hit") != first {
+		t.Fatal("a cached preview differs from its compile")
+	}
+	preview("edited main", 2, "miss")
+	edit := func(name, content string, restoreTime bool) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		advanceChangeTimeTick(t)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if restoreTime {
+			if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	runsSoFar := 2
+	for _, change := range []struct{ name, content string }{
+		{"part.tex", "second part\n"},
+		{"sub/chapter.tex", "revised chapter\n"},
+		{"refs.bib", "@misc{b, title={B}}\n"},
+	} {
+		edit(change.name, change.content, false)
+		runsSoFar++
+		if body := preview("main", runsSoFar, "miss"); !strings.Contains(body, strings.TrimSpace(change.content)) {
+			t.Fatalf("%s edit compiled stale input: %s", change.name, body)
+		}
+		preview("main", runsSoFar, "hit")
+	}
+	// A same-size image edit that restores the modification time still forces a compile.
+	edit("figure.png", "PNGB", true)
+	runsSoFar++
+	if body := preview("main", runsSoFar, "miss"); !strings.Contains(body, "PNGB") {
+		t.Fatalf("image edit compiled the stale image: %s", body)
+	}
+	// Touching an input without changing its bytes keeps the cached PDF.
+	advanceChangeTimeTick(t)
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(filepath.Join(root, "refs.bib"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	preview("main", runsSoFar, "hit")
+	// A new file in the document directory may be one the document probed for.
+	advanceChangeTimeTick(t)
+	if err := os.WriteFile(filepath.Join(root, "local.cfg"), []byte("cfg\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runsSoFar++
+	preview("main", runsSoFar, "miss")
+	// The same holds for the directory of an input outside the document directory's top level.
+	advanceChangeTimeTick(t)
+	if err := os.WriteFile(filepath.Join(root, "sub", "local.cfg"), []byte("cfg\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runsSoFar++
+	preview("main", runsSoFar, "miss")
+
+	for _, content := range []string{"fail", "norules"} {
+		for range 2 {
+			runsSoFar++
+			response := texPreviewRequest(t, s, document, content, "job-cache-0000002")
+			if runs() != runsSoFar || response.Header().Get("X-YOmux-Preview-Cache") == "hit" {
+				t.Fatalf("%q was served from the cache: runs=%d %v", content, runs(), response.Header())
+			}
+		}
+	}
+	snapshot := s.memoryCache.snapshot()["kinds"].(map[string]memoryCacheStats)[memoryCacheTeX]
+	if snapshot.Hits != 5 || snapshot.Misses != 12 || snapshot.Uncacheable != 2 || snapshot.Entries == 0 || snapshot.Bytes <= 0 {
+		t.Fatalf("TeX counters %+v", snapshot)
+	}
+}
+
+// A shared document's background compile reuses an earlier compile of the same source.
+func TestSharedTeXCompileReusesTheCache(t *testing.T) {
+	s, _, runs := texCacheFixture(t)
+	compiler, kind := s.texCompiler()
+	for range 2 {
+		pdf, err := s.compileBackgroundTeX(context.Background(), compiler, kind, "standalone")
+		if err != nil || !strings.Contains(string(pdf), "standalone") {
+			t.Fatalf("shared compile %q %v", pdf, err)
+		}
+	}
+	if runs() != 1 {
+		t.Fatalf("the same shared source compiled %d times", runs())
+	}
+	// Source that reads document files has no directory to check them against, so it is not cached.
+	for range 2 {
+		if _, err := s.compileBackgroundTeX(context.Background(), compiler, kind, "main"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runs() != 3 {
+		t.Fatalf("shared source with unverifiable inputs ran %d times", runs())
+	}
+}
+
+// Identical requests that wait for the compiler together compile once.
+func TestTeXPreviewCoalescesWaitingIdenticalRequests(t *testing.T) {
+	s, root, runs := texCacheFixture(t)
+	document := filepath.Join(root, "document.tex")
+	s.texCompileMu.Lock()
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	jobs := []string{"job-coalesce-000001", "job-coalesce-000002"}
+	for _, job := range jobs {
+		go func() { responses <- texPreviewRequest(t, s, document, "main", job) }()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		queued := 0
+		for _, job := range jobs {
+			if state, ok := s.texProgressSnapshot(job); ok && state.Phase == "queued" {
+				queued++
+			}
+		}
+		if queued == len(jobs) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("requests did not queue for the compiler")
+		}
+		runtime.Gosched()
+	}
+	s.texCompileMu.Unlock()
+	caches := []string{}
+	for range jobs {
+		select {
+		case response := <-responses:
+			if response.Header().Get("Content-Type") != "application/pdf" {
+				t.Fatal(response.Body.String())
+			}
+			caches = append(caches, response.Header().Get("X-YOmux-Preview-Cache"))
+		case <-time.After(10 * time.Second):
+			t.Fatal("request did not finish")
+		}
+	}
+	slices.Sort(caches)
+	if runs() != 1 || !slices.Equal(caches, []string{"hit", "miss"}) {
+		t.Fatalf("runs=%d caches=%v; want one compile shared by both", runs(), caches)
+	}
+}
+
+func TestTeXInputListsFromCompilers(t *testing.T) {
+	directory := t.TempDir()
+	rules := filepath.Join(directory, "inputs.mk")
+	job, project := "/tex/job", "/home/user/paper"
+	if err := os.WriteFile(rules, []byte("/tex/job/texput.pdf /tex/job/texput.aux :  \\\n  /tex/job/part.tex \\\n  /tex/job/my\\ figure.png \\\n  /tex/job/sub/a$$b.tex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputs, err := texMakefileInputs(rules, job, project)
+	if err != nil || !slices.Equal(inputs, []string{"/home/user/paper/part.tex", "/home/user/paper/my figure.png", "/home/user/paper/sub/a$b.tex"}) {
+		t.Fatalf("makefile inputs %q %v", inputs, err)
+	}
+	if err := os.WriteFile(rules, []byte("/tex/job/texput.pdf : /tex/job/../escape.tex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := texMakefileInputs(rules, job, project); err == nil {
+		t.Fatal("an input outside the document directory was accepted")
+	}
+	if _, err := texMakefileInputs(filepath.Join(directory, "missing.mk"), job, project); err == nil {
+		t.Fatal("a missing dependency report was accepted")
+	}
+	recorder := filepath.Join(directory, "preview.fls")
+	if err := os.WriteFile(recorder, []byte("PWD /tex/job\nINPUT /usr/share/texlive/article.cls\nINPUT preview.tex\nINPUT /home/user/paper/part.tex\nINPUT /home/user/paper/part.tex\nOUTPUT preview.log\nINPUT /home/user/paper/figure.png\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputs, err = texRecorderInputs(recorder, job, project)
+	if err != nil || !slices.Equal(inputs, []string{"/home/user/paper/part.tex", "/home/user/paper/figure.png"}) {
+		t.Fatalf("recorder inputs %q %v", inputs, err)
+	}
+}
+
 func TestTeXCleanupAuthorizationPreservesJob(t *testing.T) {
 	for _, test := range []struct {
 		role, origin string
@@ -297,5 +654,42 @@ func TestTeXSourceMapIgnoresEmptyReferenceBoxes(t *testing.T) {
 	want := []texSyncPage{{Line: 9, Page: 1}, {Line: 33, Page: 2}, {Line: 58, Page: 3}}
 	if response.Code != http.StatusOK || !slices.Equal(status.Pages, want) {
 		t.Fatalf("status=%d source map=%v want=%v", response.Code, status.Pages, want)
+	}
+}
+
+func TestTeXDependencyDigestRefreshesStat(t *testing.T) {
+	s, root, _ := texCacheFixture(t)
+	document := filepath.Join(root, "document.tex")
+	texPreviewRequest(t, s, document, "main", "job-stat-refresh-1")
+	dependency := filepath.Join(root, "refs.bib")
+	advanceChangeTimeTick(t)
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(dependency, later, later); err != nil {
+		t.Fatal(err)
+	}
+	texPreviewRequest(t, s, document, "main", "job-stat-refresh-1")
+	current, err := os.Stat(dependency)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.memoryCache.mu.Lock()
+	defer s.memoryCache.mu.Unlock()
+	found := false
+	for _, entry := range s.memoryCache.entries {
+		meta, ok := entry.meta.(texPreviewEntry)
+		if !ok {
+			continue
+		}
+		for _, input := range meta.inputs {
+			if input.path == dependency {
+				found = true
+				if !sameFileVersion(input.info, current) {
+					t.Fatal("digest matched but dependency metadata stayed stale")
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("fixture did not cache dependency")
 	}
 }

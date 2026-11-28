@@ -184,7 +184,7 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual([api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)?.head], [true, 'a'.repeat(40)], 'URL restoration registers the item and preserves its history state');
     api.minimizePaneFromLayout(item);
     assert.deepStrictEqual([api.itemInLayout(item), api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)?.head], [false, true, 'a'.repeat(40)], 'minimize keeps the open Repo Diff and its history in Tabber');
-    api.closePaneFrameItem(item);
+    api.closeLayoutTabItem(item);
     assert.deepStrictEqual([api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)], [false, null], 'closing the last layout owner disposes the item and retained history state');
     assert.equal(api.resolveLayoutItem(item), item, 'Back or URL restore can recreate a disposed encoded item');
   });
@@ -898,7 +898,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(panelSource.includes("t('terminal.window.title', {name: label})") && panelSource.includes("t('terminal.window.previous')") && panelSource.includes("t('terminal.window.next')"), 'tmux direct and step controls localize from one window-label family');
     assert.ok(panelSource.includes("t('terminal.window.unnamed', {index: pane?.window ?? ''})") && panelSource.includes("t('terminal.window.pid', {pid: Math.floor(value)})"), 'tmux window fallbacks and PID metadata use semantic locale keys');
     assert.ok(panelSource.includes("window.prompt(t('common.renameNamed', {name: currentName}), currentName)"), 'fallback file rename prompt reuses the existing localized rename title');
-    assert.ok(panelSource.includes('paneFrameCloseLabel(item)') && panelSource.includes("t('finder.hideFromLayout', {name: itemLabel(item)})") && panelSource.includes('ariaLabel: label'), 'pane-tab close and hide labels share existing localized templates for title and aria text');
+    assert.ok(panelSource.includes('paneTabCloseLabel(item)') && panelSource.includes("t('finder.hideFromLayout', {name: itemLabel(item)})") && panelSource.includes('ariaLabel: label'), 'pane-tab close and hide labels share existing localized templates for title and aria text');
     assert.equal(/`(?:Close|hide|Hide) \$\{itemLabel\(item\)\}/.test(panelSource), false, 'pane-tab controls retain no raw-English close or hide label');
     assert.ok(fileActionsSource.includes("fileErrorMessageSnapshot(null, 'common.pathNotFound', {path: normalized})"), 'file inspection retains the shared missing-path locale descriptor for relocalization');
     assert.equal(fileActionsSource.includes('`path not found: ${path}`'), false, 'file inspection retains no raw-English missing-path copy');
@@ -918,7 +918,7 @@ async function runLayoutRestoreSuite() {
     const changesEditorSource = fs.readFileSync('static_src/js/yomux/86_changes_editor.js', 'utf8');
     assert.ok(/function preserveFileEditorPanelPassiveViewState[\s\S]*const scrollTop = scrollDOM.scrollTop[\s\S]*scrollDOM.scrollTop = scrollTop[\s\S]*captureFileEditorPanelViewState[\s\S]*function restoreFileEditorPanelViewState\(item, panel, options = \{\}\)[\s\S]*options\.restoreFocused !== true && options\.restoreFresh !== true[\s\S]*preserveFileEditorPanelPassiveViewState\(item, panel\)/.test(changesEditorSource), 'ordinary editor rerenders keep every live selection/scroll authoritative through the shared passive owner');
     assert.equal((fileActionsSource.match(/restoreFileEditorPanelViewState\(item, panel, \{restoreFocused: true\}\)/g) || []).length, 2, 'explicit disk replacement alone opts into restoring the captured focused editor snapshot');
-    assert.ok(fileActionsSource.includes("t('editor.codemirrorBundleLoadFailed', {url: script.src})") && fileActionsSource.includes("t('editor.codemirrorBundleMissingExports')") && fileActionsSource.includes("t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'})"), 'CodeMirror loader errors localize each leaf reason while retaining URL and path parameters');
+    assert.ok(fileActionsSource.includes("t('editor.codemirrorBundleLoadFailed', {url})") && fileActionsSource.includes("t('editor.codemirrorBundleMissingExports')") && fileActionsSource.includes("t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'})"), 'CodeMirror loader errors localize each leaf reason while retaining URL and path parameters');
     assert.equal(/CodeMirror bundle failed to load:|CodeMirror bundle missing critical exports|CodeMirror local bundle is unavailable or incomplete/.test(fileActionsSource), false, 'CodeMirror loader retains no raw-English visible reason');
     assert.ok(agentSource.includes("t('yoagent.details.auxiliaryTruncated')") && agentSource.includes("t('yoagent.intro.now')") && agentSource.includes("key: 'yoagent.details.backend'") && agentSource.includes("t('yoagent.recent.tmuxActivity'"), 'YO!agent intro and recent chrome localize eagerly while detail rows retain locale descriptors');
     assert.ok(agentSource.includes("t('yoagent.tooltip.cwd'") && agentSource.includes("t('yoagent.tooltip.tmuxSilenceAlert')"), 'YO!agent recent-session tooltip fields are localized');
@@ -2108,8 +2108,23 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.codeMirrorLanguageExtension(brokenLanguageApi, '/home/test/README.md')), [], 'broken Markdown language support falls back to editable plain text');
     assert.deepStrictEqual(canonical(api.codeMirrorMarkdownCodeLanguages(brokenLanguageApi)), [], 'broken fenced-code language descriptions are skipped');
     assert.deepStrictEqual(canonical(api.codeMirrorHighlightExtension({})), [], 'missing highlight support falls back without crashing');
-    assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}, contentAttributes: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}, LanguageSupport: class {}}), true, 'CodeMirror API validation accepts critical editor/search/language exports');
-    assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), false, 'CodeMirror API validation rejects bundles without line-wrapping support');
+    const editorApi = {
+      Compartment: class {},
+      EditorState: {create() {}, readOnly: {of() {}}},
+      EditorView: {theme() {}, editable: {of() {}}, contentAttributes: {of() {}}},
+      EditorSelection: {range() {}},
+      RectangleMarker: {forRange() {}},
+      keymap: {of() {}},
+      layer() {},
+      drawSelection() {},
+      highlightActiveLine() {},
+      search() {},
+      openSearchPanel() {},
+      LanguageSupport: class {},
+    };
+    assert.equal(api.codeMirrorApiIsUsable(editorApi), true, 'CodeMirror API validation accepts critical editor exports');
+    assert.equal(api.codeMirrorApiIsUsable({...editorApi, layer: undefined}), false, 'CodeMirror API validation rejects a stale bundle without the caret overlay');
+    assert.equal(api.codeMirrorApiIsUsable({...editorApi, EditorView: {...editorApi.EditorView, contentAttributes: undefined}}), false, 'CodeMirror API validation rejects bundles without line-wrapping support');
     assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}}, EditorView: {theme() {}}}), false, 'CodeMirror API validation rejects partial bundles');
     const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package.json', 'utf8'));
     const codeMirrorBundleLock = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package-lock.json', 'utf8'));
@@ -2231,10 +2246,13 @@ async function runLayoutRestoreSuite() {
     assert.equal(htmlPreview.classList.contains('html-preview-body'), true);
     assert.equal(htmlPreview.classList.contains('code-preview-body'), false);
     assert.equal(htmlPreview.children.length, 2);
-    assert.equal(htmlPreview.children[0].className, 'file-editor-html-js-notice');
-    assert.equal(htmlPreview.children[0].children[1].href, '/api/batch/html-preview?path=%2Fhome%2Ftest%2Findex.html');
-    assert.equal(htmlPreview.children[0].children[1].dataset.htmlPreviewAuth, '1');
-    assert.equal((htmlPreview.children[0].children[1].listeners.get('click') || []).length, 1);
+    const [trigger, popover] = htmlPreview.children[0].children;
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+    assert.equal(popover.hidden, true);
+    const link = popover.children[0].children[1];
+    assert.equal(link.href, '/api/batch/html-preview?path=%2Fhome%2Ftest%2Findex.html');
+    assert.equal(link.dataset.htmlPreviewAuth, '1');
+    assert.equal((link.listeners.get('click') || []).length, 1);
     assert.equal(htmlPreview.children[1].className, 'file-editor-html-preview');
     assert.equal(htmlPreview.children[1].attributes.sandbox, 'allow-same-origin', 'HTML preview iframe keeps scripts disabled while exposing its native scroll owner to the parent');
     assert.equal((htmlPreview.children[1].listeners.get('load') || []).length, 1, 'HTML preview load binds its nested touch and scroll owner');
@@ -2249,11 +2267,20 @@ async function runLayoutRestoreSuite() {
     embeddedScroller.scrollLeft = 4;
     const embeddedListeners = new Map();
     htmlFrame.contentDocument = {
+      URL: 'about:srcdoc',
+      querySelectorAll: () => [],
       scrollingElement: embeddedScroller,
       documentElement: embeddedScroller,
       addEventListener(type, listener) {
         if (!embeddedListeners.has(type)) embeddedListeners.set(type, []);
         embeddedListeners.get(type).push(listener);
+      },
+      removeEventListener(type, listener) {
+        embeddedListeners.set(type, (embeddedListeners.get(type) || []).filter(callback => callback !== listener));
+      },
+      dispatchEvent(event) {
+        for (const listener of embeddedListeners.get(event.type) || []) listener(event);
+        return true;
       },
     };
     htmlFrame.listeners.get('load')[0]();
@@ -2265,15 +2292,30 @@ async function runLayoutRestoreSuite() {
     assert.equal(htmlPreview.children[1], htmlFrame, 'active iframe touch ownership defers changed HTML instead of replacing the document');
     api.expirePreviewScrollOwnershipForTest();
     api.renderEditorPreviewPane(htmlPreview, '/home/test/index.html', '<h1>Changed</h1>');
+    assert.equal(htmlPreview.querySelector('.file-editor-html-preview'), htmlFrame, 'the loaded iframe stays visible');
     assert.notEqual(htmlPreview.children.at(-1), htmlFrame, 'changed HTML still replaces the sandboxed document');
+    const pendingFrame = htmlPreview.children.at(-1);
+    pendingFrame.contentDocument = {URL: 'about:blank', scrollingElement: new TestElement('pending-html-scroller')};
+    pendingFrame.listeners.get('load')[0]();
+    assert.equal(htmlPreview.querySelector('.file-editor-html-preview'), htmlFrame, 'about:blank cannot publish');
+    api.renderEditorPreviewPane(htmlPreview, '/home/test/index.html', '<h1>Changed again</h1>');
     const replacementFrame = htmlPreview.children.at(-1);
+    assert.notEqual(replacementFrame, pendingFrame);
+    pendingFrame.contentDocument.URL = 'about:srcdoc';
+    pendingFrame.listeners.get('load')[0]();
+    assert.equal(htmlPreview.querySelector('.file-editor-html-preview'), htmlFrame, 'an obsolete load cannot publish');
     const replacementScroller = new TestElement('replacement-html-document-scroller');
     replacementFrame.contentDocument = {
+      URL: 'about:srcdoc',
+      querySelectorAll: () => [],
       scrollingElement: replacementScroller,
       documentElement: replacementScroller,
       addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() { return true; },
     };
     replacementFrame.listeners.get('load')[0]();
+    assert.equal(htmlPreview.querySelector('.file-editor-html-preview'), replacementFrame);
     assert.deepStrictEqual(
       {top: replacementScroller.scrollTop, left: replacementScroller.scrollLeft},
       {top: 123, left: 4},
@@ -2783,7 +2825,7 @@ async function runLayoutRestoreSuite() {
     const layoutActionsSource = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
     assert.equal(layoutActionsSource.includes('await ensureSession'), false, 'no pane-tab move/split/drop action waits for tmux readiness before applying its visual layout');
     for (const [name, nextName] of [
-      ['closePaneFrameItem', 'function closePaneFromLayout'],
+      ['closeLayoutTabItem', 'function layoutWithReplacedItem'],
       ['minimizePaneFromLayout', 'function layoutWithExpandedPane'],
       ['expandPaneFromLayout', 'function closePaneFromLayout'],
       ['focusPanel', 'function focusTerminalFromUserAction'],
@@ -4239,10 +4281,17 @@ async function runLayoutRestoreSuite() {
       const frame = preview.querySelector('.file-editor-html-preview');
       const inner = new TestElement('embedded-owner-scroller');
       const listeners = new Map();
-      frame.contentDocument = {scrollingElement: inner, documentElement: inner,
+      frame.contentDocument = {URL: 'about:srcdoc', querySelectorAll: () => [], scrollingElement: inner, documentElement: inner,
+        dispatchEvent(event) {
+          for (const listener of listeners.get(event.type) || []) listener(event);
+          return true;
+        },
         addEventListener(type, listener) {
           if (!listeners.has(type)) listeners.set(type, []);
           listeners.get(type).push(listener);
+        },
+        removeEventListener(type, listener) {
+          listeners.set(type, (listeners.get(type) || []).filter(callback => callback !== listener));
         },
       };
       frame.listeners.get('load')[0]();

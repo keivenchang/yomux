@@ -44,8 +44,6 @@ assert.match(adapter, /api\.history\(\)/);
 assert.match(adapter, /syncProseMirrorPanelSource[\s\S]*clearTimeout\(panel\._pmSerializeTimer\)/);
 assert.match(adapter, /function prosemirrorSelectionForDocument/);
 assert.match(adapter, /return api\.TextSelection\.between\(doc\.resolve\(from\), doc\.resolve\(to\)\)/);
-assert.match(adapter, /normalizeProseMirrorEndBreakSource/);
-assert.match(adapter, /normalizeLegacyBreakMarkup/);
 assert.match(adapter, /_pmSourceDocument\?\.eq\(panel\._pmView\.state\.doc\)/);
 assert.match(adapter, /panel\._pmSourceDocument = doc/);
 assert.match(adapter, /_pmDocumentChanged = true/);
@@ -119,12 +117,10 @@ assert.match(adapter, /'data-source-line': String\(sourceLine\)/);
 assert.match(adapter, /metadata\?\.headings\?\.find[\s\S]*'data-source-line': String\(sourceHeading\.line\)/);
 assert.match(adapter, /taskLine: \{default: 0\}/);
 assert.match(adapter, /taskChecked: \{default: null\}/);
-assert.match(adapter, /trailingEmptyParagraphs = Math\.max\(0, trailingNewlines - 1\)/);
 assert.match(adapter, /\['span', \{'data-markdown-soft-break': 'true'\}, ' '\]/);
-assert.match(adapter, /paragraph\(state, node\)[\s\S]*state\.flushClose\(1\)/);
 assert.match(adapter, /markdownPreviewImageTarget\(original, markdownPath\)/);
 assert.doesNotMatch(adapter, /installRawFileMediaSource\(image, path/);
-assert.match(adapter, /image: node => prosemirrorImageNodeView\(node, panel, path\)/);
+assert.match(adapter, /image: \(node, _view, getPos\) => prosemirrorImageNodeView\(node, panel, path, getPos\)/);
 assert.match(adapter, /table\(state, node\)/);
 assert.match(adapter, /details: prosemirrorDetailsNodeView/);
 assert.match(adapter, /Keep comments in the document as hidden atoms/);
@@ -256,6 +252,356 @@ for (const input of ['a | b\n--|--\nx|y', '| a | b |\n| :--- | ---: |\n| x | y |
 vm.runInContext(`window.formatSerializer = prosemirrorMarkdownSerializer(window.YOmuxProseMirror);`, sourceContext);
 const htmlCodeSerialized = sourceContext.window.formatSerializer.serialize(htmlCode);
 assert.equal(parser.parse(htmlCodeSerialized).eq(htmlCode), true, JSON.stringify({htmlCodeSerialized, htmlCode: htmlCode.toJSON(), reopened: parser.parse(htmlCodeSerialized).toJSON()}));
+const explorerActions = fs.readFileSync(path.join(root, 'static_src/js/yomux/45_file_explorer_actions.js'), 'utf8');
+const mergeStart = explorerActions.indexOf('function diffRowsForLines(');
+const mergeEnd = explorerActions.indexOf('function mergeOpenFileText(');
+vm.runInContext(explorerActions.slice(mergeStart, mergeEnd) + `
+  function auditSharedFixture(source) {
+    const api = window.YOmuxProseMirror;
+    const parser = window.formatParser, environment = {};
+    const doc = parser.parse(source, environment);
+    const cm = window.YOmuxCodeMirror;
+    const textState = cm.EditorState.create({doc: source,
+      extensions: [cm.markdown({extensions: [cm.markdownStrikethrough, cm.markdownTable]})]});
+    const panel = {
+      _pmSource: source, _pmSharedSourceDoc: textState.doc,
+      _cmView: {state: textState}, _pmParser: parser, _pmSerializer: window.formatSerializer,
+      _pmSourceLineMetadata: prosemirrorSourceLineMetadata(source, environment),
+    };
+    return {api, doc, panel};
+  }
+  function splitCaretFixture(source) {
+    const {doc, panel} = auditSharedFixture(source);
+    panel._pmView = {state: {doc}};
+    const coordinates = sharedProseMirrorCoordinates(panel);
+    return {doc, panel, map: (offset, from) => mapSharedProseMirrorPosition(coordinates, offset, from)};
+  }
+  function renderedCaretWord(doc, word) {
+    let start;
+    doc.descendants((node, position) => {
+      if (node.isText && node.text.includes(word)) start = position + node.text.indexOf(word);
+    });
+    return start;
+  }
+  window.auditSplitCaretCRLF = () => {
+    const {panel} = splitCaretFixture('one\\r\\n\\r\\ntwo');
+    panel._pmSharedSourceDoc = null;
+    delete panel._pmShareCoordinates;
+    const coordinates = sharedProseMirrorCoordinates(panel);
+    const rich = mapSharedProseMirrorPosition(coordinates, 6, 'source');
+    const source = mapSharedProseMirrorPosition(coordinates, rich.offset, 'rich');
+    panel._cmView.state = panel._cmView.state.update({changes: {from: 6, insert: 'x'}}).state;
+    return JSON.stringify({rich, source, pending: sharedProseMirrorCoordinates(panel)});
+  };
+  window.auditSplitCaretText = (source, word) => {
+    const {doc, map} = splitCaretFixture(source);
+    const start = renderedCaretWord(doc, word);
+    return JSON.stringify([1, 2].map(offset => map(start + offset, 'rich')));
+  };
+  window.auditSplitCaretHidden = (source, hidden) => {
+    const {map} = splitCaretFixture(source);
+    const start = source.indexOf(hidden);
+    return JSON.stringify([1, 2, 3].map(offset =>
+      map(start + offset, 'source')));
+  };
+  window.auditSplitCaretRoundTrip = (source, word) => {
+    const {doc, map} = splitCaretFixture(source);
+    const start = source.lastIndexOf(word);
+    return JSON.stringify({richStart: renderedCaretWord(doc, word),
+      positions: Array.from({length: word.length}, (_, index) => {
+        const rendered = map(start + index + 1, 'source');
+        return {rendered, back: map(rendered.offset, 'rich')};
+      })});
+  };
+  window.auditFormatCache = () => {
+    const {panel} = auditSharedFixture('before **bold**');
+    const view = panel._cmView;
+    const first = markdownSourceMarkRanges(view);
+    view.state = view.state.update({selection: {anchor: 4}}).state;
+    const moved = markdownSourceMarkRanges(view);
+    view.state = view.state.update({changes: {from: 0, to: 7, insert: 'after '}}).state;
+    const edited = markdownSourceMarkRanges(view);
+    return JSON.stringify({reused: first === moved, invalidated: moved !== edited});
+  };
+  window.auditSharedSequence = (source, head, keys) => {
+    const {api, doc, panel} = auditSharedFixture(source);
+    let state = api.EditorState.create({doc, selection: api.TextSelection.create(doc, head)});
+    const result = [];
+    for (const key of keys) {
+      const dispatch = tr => {
+        normalizeSharedProseMirrorEdit(tr);
+        const edit = sharedProseMirrorEdit(panel, tr);
+        if (!edit || !edit.changes) throw new Error(JSON.stringify({source: panel._pmSource, key, head: state.selection.head}));
+        panel._pmSource = edit.source;
+        panel._cmView.state = panel._cmView.state.update({changes: edit.changes}).state;
+        panel._pmSharedSourceDoc = panel._cmView.state.doc;
+        panel._pmSourceLineMetadata = edit.metadata;
+        state = state.apply(tr);
+      };
+      if (key === 'Enter') insertProseMirrorEnter(api, doc.type.schema)(state, dispatch);
+      else dispatch(state.tr.insertText(key));
+      result.push([panel._pmSource, state.selection.$head.parent.textContent, state.selection.$head.parentOffset]);
+    }
+    return JSON.stringify(result);
+  };
+  window.auditRemoteHistory = () => {
+    const api = window.YOmuxProseMirror, parser = window.formatParser;
+    const source = '- hello\\n- \\n- next';
+    const doc = parser.parse(source);
+    let state = api.EditorState.create({doc, selection: api.TextSelection.create(doc, 12), plugins: [api.history()]});
+    const dispatch = tr => { state = state.apply(tr); };
+    const serialize = () => window.formatSerializer.serialize(state.doc);
+    insertProseMirrorEnter(api, doc.type.schema)(state, dispatch);
+    const local = serialize();
+    const remote = '- peer hello\\n- \\n- \\n- [x] next';
+    dispatch(prosemirrorIncomingTransaction(state, parser.parse(remote)).setMeta('addToHistory', false));
+    const undone = api.undo(state, dispatch), afterUndo = serialize();
+    const redone = api.redo(state, dispatch);
+    return JSON.stringify({local, undone, afterUndo, redone, afterRedo: serialize()});
+  };
+  window.auditSharedEdit = (source, visit) => {
+    const {api, doc, panel} = auditSharedFixture(source);
+    const parser = panel._pmParser;
+    const positions = [];
+    doc.descendants((node, start) => {
+      if (!node.isTextblock) return;
+      for (let offset = 0; offset <= node.content.size; offset++) {
+        const pos = doc.resolve(start + 1 + offset);
+        if (!/[\\uD800-\\uDBFF]$/.test(pos.nodeBefore?.text || '')) positions.push(pos.pos);
+      }
+    });
+    const sourceState = api.EditorState.create({doc});
+    for (const anchor of positions) for (const head of positions) {
+      const state = api.EditorState.create({doc, selection: api.TextSelection.create(doc, anchor, head)});
+      const blankListItem = anchor === head && markdownListItemDepth(state.selection.$head) &&
+        prosemirrorEmptyListItem(state.selection.$head.node(-1));
+      const check = (action, tr = state.tr) => {
+        if (!tr.docChanged) {
+          visit({source, anchor, head, action, saved: source, caret: tr.selection.head,
+            blankListItem, changed: false, converged: true});
+          return;
+        }
+        normalizeSharedProseMirrorEdit(tr);
+        const edit = sharedProseMirrorEdit(panel, tr);
+        const saved = edit?.source;
+        const reopened = saved === undefined ? null : parser.parse(saved);
+        const converged = reopened && prosemirrorIncomingTransaction(sourceState, reopened).doc.eq(reopened);
+        visit({source, anchor, head, action, saved, blankListItem, caret: tr.selection.head, changed: true,
+          converged: Boolean(converged)});
+      };
+      const checkKey = (action, execute) => {
+        let applied = false;
+        execute(tr => {
+          applied = true;
+          check(action, tr);
+        });
+        if (!applied) check(action);
+      };
+      for (const key of ['Backspace', 'Delete']) {
+        const direction = key === 'Backspace' ? -1 : 1;
+        checkKey(key, dispatch => {
+          if (deleteProseMirrorBoundary(api, direction)(state, dispatch) || api.baseKeymap[key](state, dispatch)) return;
+          const pos = state.selection.$head;
+          const neighbor = direction < 0 ? pos.nodeBefore : pos.nodeAfter;
+          const size = neighbor?.isText ? Array.from(neighbor.text).at(direction < 0 ? -1 : 0).length : neighbor?.nodeSize || 0;
+          if (size) dispatch(state.tr.delete(direction < 0 ? head - size : head, direction < 0 ? head : head + size));
+        });
+      }
+      checkKey('Enter', dispatch => insertProseMirrorEnter(api, doc.type.schema)(state, dispatch));
+      checkKey('Shift-Enter', dispatch => insertProseMirrorHardBreak(api, doc.type.schema)(state, dispatch));
+      for (const letter of ['z', ' ', '-']) {
+        const range = replaceProseMirrorProtectedSelection(api, state, state.selection.from, state.selection.to);
+        check('insert ' + letter, (range || state.tr).insertText(letter));
+      }
+    }
+  };
+`, sourceContext);
+assert.deepEqual(JSON.parse(sourceContext.window.auditSplitCaretCRLF()), {
+  rich: {offset: 7, exact: true}, source: {offset: 6, exact: true}, pending: null,
+});
+assert.deepEqual(JSON.parse(sourceContext.window.auditFormatCache()), {reused: true, invalidated: true});
+for (const [source, hidden] of [
+  ['before <!-- hidden --> after', 'hidden'],
+  ['before\n\n<!-- hidden\nmore -->\n\nafter', 'hidden'],
+  ['before ![image](asset.png) after', 'asset.png'],
+  ['| first | second |\n| --- | --- |\n| before <!-- hidden --> after | other |', 'hidden'],
+]) {
+  const positions = JSON.parse(sourceContext.window.auditSplitCaretHidden(source, hidden));
+  assert.ok(positions[0].offset >= 0, source);
+  for (const result of positions) assert.deepEqual(result, {offset: positions[0].offset, exact: false}, source);
+}
+for (const source of [
+  '- [a](https://example.com) XXX',
+  '- &amp; one\n- XXX',
+  '- ![image](asset.png)\n- XXX',
+  'before <!-- hidden --> XXX',
+  'before ![image](asset.png) XXX',
+  '| first | second | third |\n| --- | --- | --- |\n| [a](https://example.com) | XXX | after |',
+  '- Second itemXXX has an entity &amp; and an inline comment <!-- hidden text for cursor testing -->.',
+  '- A &#x1f600; and &NotEqualTilde; before XXX after',
+  '> alpha &amp;\n> next XXX line',
+  '<strong>alpha</strong> before <u title="XXX">XXX</u>',
+  'before ![alt](repeated) XXX ![alt](encoded) after',
+  '[word](word) then XXX [next](next)',
+  '- Plain [XYZ-5394] and [unresolved][missing] before XXX',
+  'before [fake\\*] &amp; XXX',
+  'before ![nope] &amp; XXX and after',
+  '11. 11',
+  '- [x] checked task XXX',
+  'before <custom-tag> XXX </custom-tag> after',
+  '[first][Ref] before XXX\n\n[Ref]: https://example.com',
+  '| aa | bb |\n|---|---|\n| foo \\| XXX | end |',
+  '| aa | bb |\n|---|---|\n| <u>XXX</u> &amp; | ![a](test.png) |',
+  '- one\n\n  | H | J |\n  | --- | --- |\n  | [ref](target) | XXX |',
+  '> | H | J |\n> | --- | --- |\n> | [ref](target) | XXX |',
+]) {
+  const word = source === '11. 11' ? '11' : 'XXX';
+  const start = source.lastIndexOf(word);
+  const {richStart, positions} = JSON.parse(sourceContext.window.auditSplitCaretRoundTrip(source, word));
+  for (const [index, result] of positions.entries()) {
+    assert.deepEqual(result.rendered, {offset: richStart + index + 1, exact: true}, JSON.stringify({source, result}));
+    assert.deepEqual(result.back, {offset: start + index + 1, exact: true}, JSON.stringify({source, result}));
+  }
+}
+for (const [source, entity] of [['**&ast;**', '&ast;'], ['> &gt;', '&gt;']]) {
+  const start = source.indexOf(entity);
+  const {positions} = JSON.parse(sourceContext.window.auditSplitCaretRoundTrip(source, entity));
+  assert.deepEqual(positions.at(-1).back, {offset: start + entity.length, exact: true}, source);
+  assert.deepEqual(positions[0].back, {offset: start, exact: true}, source);
+  assert.equal(positions[0].rendered.exact, false, source);
+}
+for (const source of ['![](x)**word**![](word)', '[a](x)[word](word)']) {
+  const start = source.indexOf('word');
+  for (const [index, result] of JSON.parse(sourceContext.window.auditSplitCaretText(source, 'word')).entries()) {
+    if (result.exact) assert.equal(result.offset, start + index + 1, source);
+  }
+}
+const editingSources = [
+  'first second', '### first second', '### Wed\n- h\n- \n- \n- \n- next item\n\n### Tue',
+  '- h\n', '- h\n\nNext paragraph', '- next\n- h\n', '+ h\n+ next', '- h\n\n- next',
+  '3) h\n4) next', '- [ ] h\n- [x] next', '- h\n  - next\n- final', '- h\n\n  paragraph\n- next',
+  '> h', '__h__ and _there_', '_h_', '[h](url)', '`h`', '| H |\n| --- |\n| h |',
+  '<!-- hidden -->\n\nh', 'A &amp; h', 'soft\nh', '**around** h', 'plain 😀h',
+  'h\n\nnext', '~~~\nh\n~~~', 'words\n- h\n- next',
+  '', '\n\n', '\n\na', '- \n', '- h\n- \n\ntext', '* hello\n\n* \n- next',
+  '1. h\n2. \n3. next', '- parent\n\n  - \n  - next', '- [ ] h\n- [x] \n- [ ] next',
+  '# a\n\n---', '---\n\n# a', '- \n\n\n- ', '\n\n\n## h', '- a\n  1. \n  2. b\n- c',
+  'a<!-- keep --><!-- keep -->b', 'a\n\n<!-- keep -->\n\nb', 'a\n\n---\n\nb',
+  '`<!-- keep -->`', '~~~\n<!-- keep -->\n~~~', 'p\n\n~~~\na\nb\n~~~\n\nq',
+  't\n\n| A | B |\n| --- | --- |\n| x | y |\n\nu',
+  '| A | B |\n| --- | --- |\n| x | y |\n| z | |',
+  '> > a\n> >\n> > b', '**a** *b* `c` [d](https://e)', 'a é 👩‍👩‍👧‍👦 b',
+];
+const sharedEdits = {};
+for (const source of editingSources) {
+  sourceContext.window.auditSharedEdit(source, result => {
+    assert.ok(result.converged, JSON.stringify(result));
+    if (source.includes('<!-- hidden -->')) assert.ok(result.saved.includes('<!-- hidden -->'), JSON.stringify(result));
+    if (source === 'a<!-- keep --><!-- keep -->b') {
+      assert.equal([...result.saved.matchAll(/<!-- keep -->/g)].length, 2, JSON.stringify(result));
+    }
+    sharedEdits[result.action] = (sharedEdits[result.action] || 0) + 1;
+  });
+}
+console.log(`Shared ViewEdit position matrix across ${editingSources.length} Markdown fixtures: ${JSON.stringify(sharedEdits)}`);
+assert.deepEqual(JSON.parse(sourceContext.window.auditRemoteHistory()), {
+  local: '- hello\n- \n- \n- next',
+  undone: true, afterUndo: '- peer hello\n- \n- [x] next',
+  redone: true, afterRedo: '- peer hello\n- \n- \n- [x] next',
+});
+for (const [source, head, keys, finalSource, text, offset] of [
+  ['- a\n- \n- b', 8, ['Enter', 'Enter', 'Enter', 'z'], '- a\n- \n- \n- \n- z\n- b', 'z', 1],
+  ['', 1, ['1', '.'], '1\\.', '1.', 2],
+  ['- ', 3, ['[', 'x', ']'], '- &#91;x\\]', '[x]', 3],
+  ['# a', 2, [' ', '#'], '# a \\#', 'a #', 3],
+  ['## h ##', 2, ['z'], '## hz ##', 'hz', 2],
+  ['a\n===', 2, ['z'], 'az\n===', 'az', 2],
+]) {
+  const result = JSON.parse(sourceContext.window.auditSharedSequence(source, head, keys));
+  assert.deepEqual(result.at(-1), [finalSource, text, offset], JSON.stringify({source, head, keys}));
+}
+for (const [source, anchor, head, key, saved, caret] of [
+  ['abc', 1, 1, 'Backspace', 'abc', 1],
+  ['abc', 4, 4, 'Delete', 'abc', 4],
+  ['abc', 2, 2, 'Backspace', 'bc', 1],
+  ['abc', 2, 2, 'Delete', 'ac', 2],
+  ['abc', 2, 2, 'Enter', 'a\n\nbc', 4],
+  ['abc', 2, 2, 'Shift-Enter', 'a\\\nbc', 3],
+  ['abc', 4, 1, 'Enter', '\n\n', 3],
+  ['a\n\nb', 4, 4, 'Backspace', 'ab', 2],
+  ['a\n\nb', 2, 2, 'Delete', 'ab', 2],
+  ['- h\n- \n- next', 8, 8, 'Backspace', '- h\n- next', 4],
+  ['- h\n- \n- next', 8, 8, 'Delete', '- h\n- next', 8],
+  ['- h\n- \n- next', 8, 8, 'Enter', '- h\n- \n- \n- next', 12],
+]) {
+  const outcomes = [];
+  sourceContext.window.auditSharedEdit(source, result => {
+    if (result.action === key && result.anchor === anchor && result.head === head) {
+      outcomes.push([result.saved, result.caret]);
+    }
+  });
+  assert.deepEqual(outcomes, [[saved, caret]], JSON.stringify({source, anchor, head, key}));
+}
+
+const cm = sourceContext.window.YOmuxCodeMirror;
+for (const [source, anchor, head, key, saved, caret] of [
+  ['abc', 0, 0, 'Backspace', 'abc', 0], ['abc', 3, 3, 'Delete', 'abc', 3],
+  ['abc', 2, 0, 'Backspace', 'c', 0], ['abc', 0, 2, 'Delete', 'c', 0],
+  ['abc', 2, 0, 'Enter', '\nc', 1], ['abc', 1, 1, 'Enter', 'a\nbc', 2],
+  ['a\nb', 2, 2, 'Backspace', 'ab', 1], ['a\nb', 1, 1, 'Delete', 'ab', 1],
+  ['a😀b', 3, 3, 'Backspace', 'ab', 1], ['a😀b', 1, 1, 'Delete', 'ab', 1],
+  ['- h\n- \n- next', 6, 6, 'Enter', '- h\n- \n\n- next', 7],
+]) {
+  const view = {
+    state: cm.EditorState.create({doc: source, selection: {anchor, head}}),
+    dispatch(transaction) { view.state = transaction.state; },
+  };
+  cm.defaultKeymap.find(binding => binding.key === key).run(view);
+  assert.deepEqual([view.state.doc.toString(), view.state.selection.main.head], [saved, caret],
+    JSON.stringify({source, anchor, head, key}));
+}
+const referenceSource = 'before [label][ref] after\n\n[ref]: /target';
+let checkedReference = false;
+sourceContext.window.auditSharedEdit(referenceSource, result => {
+  if (result.anchor === 1 && result.head === 1 && result.action === 'insert z') {
+    assert.equal(result.saved, 'z' + referenceSource);
+    checkedReference = true;
+  }
+});
+assert.ok(checkedReference);
+for (const [source, saved] of [
+  ['- hello\n- \n- next', '- hello\n- \n- \n- next'],
+  ['* hello\n\n* \n- next', '* hello\n\n* \n\n* \n- next'],
+  ['* hello\n\n* \n\n- next', '* hello\n\n* \n\n* \n\n- next'],
+  ['- hello\n- \n', '- hello\n\n'],
+  ['- \n', '\n'],
+  ['- hello\n- \n\ntext', '- hello\n\n&#32;\n\ntext'],
+  ['1. hello\n2. \n3. next', '1. hello\n2. \n3. \n4. next'],
+  ['1) hello\n2) \n3) next', '1) hello\n2) \n3) \n4) next'],
+  ['1) hello\n2) \n\n- next', '1) hello\n2) \n3) \n\n- next'],
+  ['- parent\n\n  - \n  - next', '- parent\n\n  - \n  - \n  - next'],
+  ['- [ ] hello\n- [x] \n- [ ] next', '- [ ] hello\n- [x] \n- [ ] \n- [ ] next'],
+]) {
+  const results = [];
+  sourceContext.window.auditSharedEdit(source, edit => {
+    if (edit.action === 'Enter' && edit.blankListItem) results.push(edit.saved);
+  });
+  assert.deepEqual(results, [saved], source);
+}
+for (const [input, tight] of [
+  ['- h\n- next item', true],
+  ['+ h\n+ \n+ next item', true],
+  ['* h\n\n* next item', false],
+  ['- h\n\n- ', false],
+  ['- h', true],
+]) {
+  const api = sourceContext.window.YOmuxProseMirror;
+  const doc = parser.parse(input);
+  const edited = api.EditorState.create({doc}).tr.delete(3, 4).doc;
+  assert.equal(edited.firstChild.attrs.tight, tight, input);
+  const saved = sourceContext.window.formatSerializer.serialize(edited);
+  assert.ok(parser.parse(saved).eq(edited), JSON.stringify({input, saved}));
+}
 for (const source of [
   '> $$\n> x\n> $$',
   '- $$\n  x\n  $$',
@@ -338,7 +684,7 @@ vm.runInContext(`window.normalCode = (text, offset, heading) => {
   const doc = schema.topNodeType.create(null, schema.nodes.code_block.create(null, schema.text(text)));
   const state = api.EditorState.create({doc, selection:api.TextSelection.create(doc,offset+1)}), transaction = state.tr;
   setProseMirrorTextBlock(api, transaction, schema, heading ? schema.nodes.heading : schema.nodes.paragraph, heading ? {level:2} : null);
-  const output = normalizeProseMirrorEndBreakSource(serializer.serialize(transaction.doc));
+  const output = serializer.serialize(transaction.doc);
   return {output, reopened:parser.parse(output).toJSON(), expected:transaction.doc.toJSON(), parentOffset:transaction.selection.$from.parentOffset};
 };`, sourceContext);
 for (const text of ['a\nb', '**bold**\n# literal', 'a\n', 'a\n\n']) {

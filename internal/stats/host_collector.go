@@ -66,7 +66,9 @@ func waitCollectorCadence(ctx context.Context, clock HostCollectorClock, active,
 	if idle <= 0 {
 		idle = active
 	}
-	if activeFunc == nil || activeFunc() {
+	// Fixed-cadence families publish full cadence intervals. Demand must not
+	// wake them early and overlap already recorded unavailable intervals.
+	if active == idle || activeFunc == nil || activeFunc() {
 		timer := clock.NewTimer(active)
 		defer timer.Stop()
 		select {
@@ -268,6 +270,9 @@ type hostEpochState struct {
 	cadence    float64
 	rotate     bool
 	hadSuccess bool
+	// lastSample is the latest sample time in this epoch. A later sample at an
+	// earlier wall time means the clock moved backward.
+	lastSample float64
 }
 
 func NewHostCollector(sources HostSources, writer BatchWriter, clock HostCollectorClock, config HostCollectorConfig) *HostCollector {
@@ -409,6 +414,11 @@ func (c *HostCollector) familyLoop(ctx context.Context, family string, active, i
 		if ctx.Err() != nil {
 			return
 		}
+		// A restart or wall clock adjustment can put this sample before the
+		// end of the previous disk interval, even after the cadence timer fires.
+		if family == "system_disk" && !c.waitForDiskHistory(ctx) {
+			return
+		}
 		// GPU remains demand-driven. CPU keeps a low-rate background history so
 		// long-range charts do not depend on someone leaving YO!stats open.
 		if family == "gpu" && c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
@@ -416,6 +426,55 @@ func (c *HostCollector) familyLoop(ctx context.Context, family string, active, i
 		}
 		c.runFamily(ctx, family)
 	}
+}
+
+func (c *HostCollector) waitForDiskHistory(ctx context.Context) bool {
+	history, ok := c.writer.(interface {
+		diskHistoryEnd(context.Context, float64) (float64, error)
+	})
+	if !ok {
+		return ctx.Err() == nil
+	}
+	for ctx.Err() == nil {
+		at := float64(c.clock.Now().UnixNano()) / 1e9
+		// Once this collector has sampled, only its own epoch can overlap the
+		// next sample. History from before a backward wall clock jump must not
+		// hold sampling back; familyFactContext gives the post-jump samples a
+		// new epoch.
+		if end, sampled := c.familyEpochEnd("system_disk", at, c.config.DiskCadence); sampled {
+			if end <= at {
+				return true
+			}
+			delay := max(time.Nanosecond, time.Duration((end-at)*float64(time.Second)))
+			if !waitCollectorCadence(ctx, c.clock, delay, delay, nil) {
+				return false
+			}
+			continue
+		}
+		end, err := history.diskHistoryEnd(ctx, at)
+		if ctx.Err() != nil {
+			return false
+		}
+		// A sample interval ends one cadence after it starts, so history ending
+		// further ahead was recorded before a backward wall clock jump. Waiting
+		// for it would stall disk sampling for the size of the jump.
+		if err == nil && (end <= at || end-at > c.config.DiskCadence.Seconds()) {
+			return true
+		}
+		delay := max(time.Nanosecond, time.Duration((end-at)*float64(time.Second)))
+		if err != nil {
+			c.health.Attempt("system_disk", c.clock.Now())
+			c.health.Record("system_disk", c.clock.Now(), err, 0, 0)
+			c.counters.errors.Add(1)
+			// Historical overlap is unknown. Let this cycle sample current disk
+			// usage; the writer still validates interval admission independently.
+			return true
+		}
+		if !waitCollectorCadence(ctx, c.clock, delay, delay, nil) {
+			return false
+		}
+	}
+	return false
 }
 
 func (c *HostCollector) runFamily(parent context.Context, family string) {
@@ -540,8 +599,20 @@ func (c *HostCollector) familyFactContext(family string, at time.Time, cadence t
 	state, ok := c.familyEpochs[family]
 	if !ok {
 		state = hostEpochState{epochID: c.config.EpochID, started: c.config.EpochStartedAt}
+		if family == "system_disk" {
+			// The first disk sample can start later than this process's epoch.
+			state.started = float64(at.UnixNano()) / 1e9
+		}
 	}
+	observed := float64(at.UnixNano()) / 1e9
 	if state.cadence != 0 && state.cadence != cadence.Seconds() {
+		state.rotate = true
+	}
+	// The writer rejects samples earlier than the epoch's recorded history.
+	// After a backward wall clock jump, start one new epoch at the current time;
+	// readers merge overlapping epochs' coverage, and every chart series in
+	// these families is a gauge or average, so overlap is not double counted.
+	if observed < state.lastSample || observed < state.started {
 		state.rotate = true
 	}
 	if state.rotate {
@@ -550,8 +621,26 @@ func (c *HostCollector) familyFactContext(family string, at time.Time, cadence t
 		state.rotate = false
 	}
 	state.cadence = cadence.Seconds()
+	state.lastSample = observed
 	c.familyEpochs[family] = state
 	return HostFactContext{EpochID: state.epochID, EpochStartedAt: state.started, ObservedAt: float64(at.UnixNano()) / 1e9, CadenceSeconds: cadence.Seconds(), OwnerGeneration: c.config.OwnerGeneration, SourceID: c.config.SourceID}
+}
+
+// familyEpochEnd is the end of the current epoch's latest sample interval and
+// whether the collector has sampled the family. A sample at an earlier time
+// than that latest sample rotates the epoch (familyFactContext), so it gets an
+// end of zero and never waits.
+func (c *HostCollector) familyEpochEnd(family string, at float64, cadence time.Duration) (float64, bool) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	state, ok := c.familyEpochs[family]
+	if !ok || state.lastSample == 0 {
+		return 0, false
+	}
+	if at < state.lastSample {
+		return 0, true
+	}
+	return state.lastSample + cadence.Seconds(), true
 }
 
 func (c *HostCollector) finishFamilyBatch(family string, fact HostFactContext, batch AppendBatch) AppendBatch {

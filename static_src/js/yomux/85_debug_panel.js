@@ -4068,7 +4068,7 @@ function debugGraphCostComponentDimension(row) {
 function debugGraphCostModelEvidenceLinksHtml(evidence, model) {
   const links = evidence.filter(row => row.provider === model.provider && row.model === model.model && row.source_url)
     .map(row => normalizedExternalHttpUrl(row.source_url, {maxLength: 2048})).filter(Boolean);
-  return links.map(url => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" aria-label="${esc(`${model.model} pricing`)}" title="${esc(`${model.model} pricing`)}">$</a>`).join(' · ');
+  return [...new Set(links)].map(url => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" aria-label="${esc(`${model.model} pricing`)}" title="${esc(`${model.model} pricing`)}">$</a>`).join(' · ');
 }
 
 function debugGraphCostModelFormulaCellHtml(evidence, model, item) {
@@ -7235,6 +7235,7 @@ function debugSystemInnerHtml() {
 // touched at all, which is what lets an expanded row keep its DOM -- and its focus -- while the
 // summary strip's "Updated 2s ago" repaints every five seconds.
 const debugSystemRenderedRegions = new WeakMap();
+const jsDebugGraphPendingScrollRestore = new WeakMap();
 
 // The ONE seeder for that cache, called by every site that builds the six regions from
 // `debugSystemInnerHtml`. A site that writes the regions and does not record what it wrote leaves
@@ -7979,8 +7980,10 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
   if (!force && Number.isFinite(lastRenderedAt) && nowMs - lastRenderedAt < jsDebugGraphRefreshMs) return false;
   const perf = clientPerfStart('statsHistoryRender');
   const scrollOwner = graph.closest('.js-debug-graph-view');
-  const scrollTop = scrollOwner?.scrollTop || 0;
-  const scrollLeft = scrollOwner?.scrollLeft || 0;
+  const panel = graph.closest('.js-debug-panel');
+  const pendingScroll = panel ? jsDebugGraphPendingScrollRestore.get(panel) : null;
+  const scrollTop = pendingScroll?.top ?? scrollOwner?.scrollTop ?? 0;
+  const scrollLeft = pendingScroll?.left ?? scrollOwner?.scrollLeft ?? 0;
   try {
     graph.className = debugGraphClassName(nowMs);
     let body = graph.querySelector('[data-js-debug-graph-body]');
@@ -8007,6 +8010,17 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
     // The graph replacement is synchronous. A deferred replay would read layout
     // again on the next frame and can compete with newer native scrolling.
     writeOwnedElementScroll(scrollOwner, {top: scrollTop, left: scrollLeft}, 'debug-graph-render-restore');
+    if (panel && scrollOwner) {
+      const maxTop = Math.max(0, scrollOwner.scrollHeight - scrollOwner.clientHeight);
+      const maxLeft = Math.max(0, scrollOwner.scrollWidth - scrollOwner.clientWidth);
+      if (scrollTop > maxTop + 1 || scrollLeft > maxLeft + 1) {
+        // A server-owner refresh can temporarily remove the chart body. Keep the reader's
+        // position until the replacement history makes that position reachable again.
+        jsDebugGraphPendingScrollRestore.set(panel, {top: scrollTop, left: scrollLeft});
+      } else {
+        jsDebugGraphPendingScrollRestore.delete(panel);
+      }
+    }
   } finally {
     clientPerfEnd(perf);
   }
@@ -8907,6 +8921,17 @@ function bindDebugPanel(panel) {
     if (!event.target?.matches?.('.js-debug-cost-table-wrap')) return;
     panel.dataset.jsDebugCostLastScrollMs = String(Date.now());
   }, {capture: true, passive: true});
+  const clearPendingGraphScroll = event => {
+    if (!event.target?.closest?.('.js-debug-graph-view')) return;
+    jsDebugGraphPendingScrollRestore.delete(panel);
+  };
+  scope.ownEvent('graph-wheel-scroll', panel, 'wheel', clearPendingGraphScroll, {capture: true, passive: true});
+  scope.ownEvent('graph-pointer-scroll', panel, 'pointerdown', clearPendingGraphScroll, {capture: true});
+  scope.ownEvent('graph-touch-scroll', panel, 'touchstart', clearPendingGraphScroll, {capture: true, passive: true});
+  scope.ownEvent('graph-key-scroll', panel, 'keydown', event => {
+    if (!['ArrowDown', 'ArrowUp', 'End', 'Home', 'PageDown', 'PageUp', ' '].includes(event.key)) return;
+    clearPendingGraphScroll(event);
+  }, {capture: true});
     scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);

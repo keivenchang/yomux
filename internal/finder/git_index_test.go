@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestGitRenameOwnsIndexAcrossPreparationAndPublication(t *testing.T) {
@@ -46,7 +48,7 @@ func TestGitRenameOwnsIndexAcrossPreparationAndPublication(t *testing.T) {
 				indexPath := filepath.Join(root, ".git", "index")
 				program := fmt.Sprintf("#!/bin/sh\n%q \"$@\"\nresult=$?\nif [ \"$result\" -ne 0 ]; then exit \"$result\"; fi\ncase \"$*\" in *%q*%q)\n printf 'new unique unstaged bytes\\n' > %q\n if GIT_INDEX_FILE=%q %q -C %q update-index --no-assume-unchanged %q 2>/dev/null && GIT_INDEX_FILE=%q %q -C %q add %q 2>/dev/null; then printf admitted > %q; else printf blocked > %q; fi\n ;;\nesac\n", realGit, phase, suffix, filepath.Join(root, injectionRelative), indexPath, realGit, root, injectionRelative, indexPath, realGit, root, injectionRelative, marker, marker)
 
-				if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(program), 0700); err != nil {
+				if err := testsupport.WriteExecutable(filepath.Join(wrapperDir, "git"), []byte(program), 0700); err != nil {
 					t.Fatal(err)
 				}
 				t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -174,7 +176,7 @@ func TestGitRenamePrivateCandidatePreservesSplitIndexAndFailedFlags(t *testing.T
 			if failFlags {
 				wrapperDir := t.TempDir()
 				program := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in *'update-index --assume-unchanged'*) exit 1;; esac\nexec %q \"$@\"\n", realGit)
-				if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(program), 0700); err != nil {
+				if err := testsupport.WriteExecutable(filepath.Join(wrapperDir, "git"), []byte(program), 0700); err != nil {
 					t.Fatal(err)
 				}
 				t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))

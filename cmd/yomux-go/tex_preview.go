@@ -616,32 +616,69 @@ func (s *server) texPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
 	defer cancel()
-	// Replaced browser requests cancel while queued too; their successor must not lose
-	// its turn merely because the retiring engine has not released the shared cache yet.
-	s.setTexProgress(body.JobID, "queued", "Waiting for the TeX compiler", 0, 0, "")
-	if err := s.texCompileMu.LockContext(ctx, nil); err != nil {
-		s.setTexProgress(body.JobID, "failed", err.Error(), 0, 0, "")
-		jsonResponse(w, http.StatusOK, map[string]any{"code": "compile_cancelled", "error": err.Error()})
-		return
-	}
-	defer s.texCompileMu.Unlock()
 	message := "Compiling TeX document"
 	if kind == "tectonic" {
 		message += " (the first compile may download TeX packages)"
 	}
-	s.setTexProgress(body.JobID, "compiling", message, 0, 0, "")
-	pdf, syncPages, err := s.compileTexWithProgress(ctx, compiler, kind, body.Path, body.Content, func(output string) {
+	output, cached, err := s.cachedTeXCompile(ctx, compiler, kind, body.Path, body.Content, func(ctx context.Context) error {
+		s.setTexProgress(body.JobID, "queued", "Waiting for the TeX compiler", 0, 0, "")
+		s.beginInteractiveTeX()
+		defer s.endInteractiveTeX()
+		return s.texCompileMu.LockContext(ctx, nil)
+	}, func(output string) {
 		s.setTexProgress(body.JobID, "compiling", message, 0, 0, output)
 	})
 	if err != nil {
 		s.setTexProgress(body.JobID, "failed", err.Error(), 0, 0, "")
-		jsonResponse(w, http.StatusOK, map[string]any{"code": "compile_failed", "error": err.Error(), "instructions": texInstallInstructions()})
+		code := "compile_failed"
+		if ctx.Err() != nil {
+			code = "compile_cancelled"
+		}
+		jsonResponse(w, http.StatusOK, map[string]any{"code": code, "error": err.Error(), "instructions": texInstallInstructions()})
 		return
 	}
-	s.setTexProgress(body.JobID, "complete", "TeX preview ready", 0, 0, "")
-	s.setTexSyncPages(body.JobID, syncPages)
-	if body.Publish {
-		if err := s.sharePublishPDF(body.Path, body.Content, pdf); err != nil {
+	s.writeTexPreview(w, body.JobID, body.Path, body.Content, body.Publish, output, cached)
+}
+
+// cachedTeXCompile shares the cache and compiler transaction across foreground and background
+// requests. acquire retains each caller's admission policy; progress belongs to the foreground.
+func (s *server) cachedTeXCompile(ctx context.Context, compiler, kind, path, content string, acquire func(context.Context) error, progress func(string)) (texCompileOutput, bool, error) {
+	key, keyErr := texPreviewCacheKey(compiler, kind, path, content)
+	if keyErr != nil {
+		slog.Debug("TeX preview is not cacheable", "error", keyErr)
+	} else if output, ok := s.lookupTexPreview(key, true); ok {
+		return output, true, nil
+	}
+	if err := acquire(ctx); err != nil {
+		return texCompileOutput{}, false, err
+	}
+	defer s.texCompileMu.Unlock()
+	if keyErr == nil {
+		if output, ok := s.lookupTexPreview(key, false); ok {
+			return output, true, nil
+		}
+	}
+	if progress != nil {
+		progress("")
+	}
+	started := fileSettleClock()
+	output, err := s.compileTexWithProgress(ctx, compiler, kind, path, content, progress)
+	if err != nil {
+		return output, false, err
+	}
+	if keyErr == nil {
+		s.storeTexPreview(key, output, started)
+	}
+	return output, false, nil
+}
+
+// writeTexPreview answers a preview request with its PDF; X-YOmux-Preview-Cache says whether
+// the PDF came from the preview cache.
+func (s *server) writeTexPreview(w http.ResponseWriter, jobID, path, content string, publish bool, output texCompileOutput, cached bool) {
+	s.setTexProgress(jobID, "complete", "TeX preview ready", 0, 0, "")
+	s.setTexSyncPages(jobID, output.syncPages)
+	if publish {
+		if err := s.sharePublishPDF(path, content, output.pdf); err != nil {
 			shareFailure(w, 409, err.Error())
 			return
 		}
@@ -649,24 +686,41 @@ func (s *server) texPreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition", `inline; filename="preview.pdf"`)
-	w.Header().Set("Content-Length", strconv.Itoa(len(pdf)))
-	_, _ = w.Write(pdf)
+	w.Header().Set("Content-Length", strconv.Itoa(len(output.pdf)))
+	cache := "miss"
+	if cached {
+		cache = "hit"
+	}
+	w.Header().Set("X-YOmux-Preview-Cache", cache)
+	if _, err := w.Write(output.pdf); err != nil {
+		slog.Debug("TeX preview response failed", "error", err)
+	}
 }
 
 func (s *server) compileTex(ctx context.Context, compiler, kind, path, content string) ([]byte, error) {
-	pdf, _, err := s.compileTexWithProgress(ctx, compiler, kind, path, content, nil)
-	return pdf, err
+	output, err := s.compileTexWithProgress(ctx, compiler, kind, path, content, nil)
+	return output.pdf, err
 }
 
-func (s *server) compileTexWithProgress(ctx context.Context, compiler, kind, path, content string, onOutput func(string)) ([]byte, []texSyncPage, error) {
+// texCompileOutput is one successful compile.
+type texCompileOutput struct {
+	pdf       []byte
+	syncPages []texSyncPage
+	// inputs are the document's own files the compiler read, by absolute path. inputsKnown is
+	// false when the compiler could not report them, which makes the PDF uncacheable.
+	inputs      []string
+	inputsKnown bool
+}
+
+func (s *server) compileTexWithProgress(ctx context.Context, compiler, kind, path, content string, onOutput func(string)) (texCompileOutput, error) {
 	tools := s.texToolsDirectory()
 	if err := os.MkdirAll(tools, 0o700); err != nil {
-		return nil, nil, err
+		return texCompileOutput{}, err
 	}
 	if kind == "tectonic" {
 		sharedLock, err := s.acquireTexToolsLock(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("wait for shared TeX tools: %w", err)
+			return texCompileOutput{}, fmt.Errorf("wait for shared TeX tools: %w", err)
 		}
 		defer func() {
 			if err := sharedLock.Close(); err != nil {
@@ -674,44 +728,50 @@ func (s *server) compileTexWithProgress(ctx context.Context, compiler, kind, pat
 			}
 		}()
 		if err := s.migrateLegacyTexCompiler(ctx); err != nil {
-			return nil, nil, err
+			return texCompileOutput{}, err
 		}
 		if sharedCompiler, sharedKind := s.texCompiler(); sharedKind == "tectonic" && filepath.Clean(sharedCompiler) == filepath.Clean(s.texCompilerInstallPath()) {
 			compiler = sharedCompiler
 		}
 		if err := s.migrateLegacyTexCache(ctx); err != nil {
-			return nil, nil, err
+			return texCompileOutput{}, err
 		}
 	}
 	cache := filepath.Join(tools, "cache")
 	if err := os.MkdirAll(cache, 0o700); err != nil {
-		return nil, nil, err
+		return texCompileOutput{}, err
 	}
 	cache, err := filepath.EvalSymlinks(cache)
 	if err != nil {
-		return nil, nil, err
+		return texCompileOutput{}, err
 	}
 	job, err := os.MkdirTemp(tools, "preview-*")
 	if err != nil {
-		return nil, nil, err
+		return texCompileOutput{}, err
 	}
 	defer os.RemoveAll(job)
 	job, err = filepath.EvalSymlinks(job)
 	if err != nil {
-		return nil, nil, err
+		return texCompileOutput{}, err
 	}
-	args := []string{"--untrusted", "--outdir", job, "--synctex", "--keep-intermediates", "-"}
+	// The compiler reports which document files it read, so a cached PDF can be checked
+	// against them; files from the shared TeX package cache are not reported.
+	rules := filepath.Join(job, "inputs.mk")
+	args := []string{"--untrusted", "--outdir", job, "--synctex", "--keep-intermediates", "--makefile-rules", rules, "-"}
 	name := "texput.pdf"
-	project, err := filepath.EvalSymlinks(filepath.Dir(path))
-	if err != nil {
-		return nil, nil, err
+	project := job
+	if path != "" {
+		project, err = filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil {
+			return texCompileOutput{}, err
+		}
 	}
 	workingDirectory := project
 	if kind == "pdflatex" {
 		if err := os.WriteFile(filepath.Join(job, "preview.tex"), []byte(content), 0o600); err != nil {
-			return nil, nil, err
+			return texCompileOutput{}, err
 		}
-		args = []string{"-fmt=pdflatex", "-no-shell-escape", "-interaction=nonstopmode", "-halt-on-error", "-synctex=1", "-output-directory=" + job, "preview.tex"}
+		args = []string{"-fmt=pdflatex", "-no-shell-escape", "-interaction=nonstopmode", "-halt-on-error", "-synctex=1", "-recorder", "-output-directory=" + job, "preview.tex"}
 		name = "preview.pdf"
 		workingDirectory = job
 	}
@@ -724,7 +784,7 @@ func (s *server) compileTexWithProgress(ctx context.Context, compiler, kind, pat
 	for pass := 0; pass < passes; pass++ {
 		command, err := texSandboxCommand(ctx, compiler, args, job, cache, project)
 		if err != nil {
-			return nil, nil, err
+			return texCompileOutput{}, err
 		}
 		command.Dir = workingDirectory
 		command.Env = []string{"PATH=" + filepath.Dir(compiler) + ":/usr/bin:/bin", "HOME=" + job, "TMPDIR=" + job, "XDG_CACHE_HOME=" + cache, "TECTONIC_UNTRUSTED_MODE=1", "openout_any=p", "openin_any=p", "LANG=C.UTF-8"}
@@ -737,27 +797,38 @@ func (s *server) compileTexWithProgress(ctx context.Context, compiler, kind, pat
 		command.WaitDelay = 2 * time.Second
 		command.Stdout, command.Stderr = &log, &log
 		if err := command.Run(); err != nil {
-			return nil, nil, fmt.Errorf("TeX compilation failed: %w\n%s", errors.Join(ctx.Err(), err), log.String())
+			return texCompileOutput{}, fmt.Errorf("TeX compilation failed: %w\n%s", errors.Join(ctx.Err(), err), log.String())
 		}
 	}
 	file, err := os.Open(filepath.Join(job, name))
 	if err != nil {
-		return nil, nil, fmt.Errorf("compiler produced no PDF: %w\n%s", err, log.String())
+		return texCompileOutput{}, fmt.Errorf("compiler produced no PDF: %w\n%s", err, log.String())
 	}
 	defer file.Close()
 	pdf, err := io.ReadAll(io.LimitReader(file, texPDFLimit+1))
 	if err != nil {
-		return nil, nil, err
+		return texCompileOutput{}, err
 	}
 	if len(pdf) > texPDFLimit || !bytes.HasPrefix(pdf, []byte("%PDF-")) {
-		return nil, nil, errors.New("compiler output is not a PDF up to 32 MiB")
+		return texCompileOutput{}, errors.New("compiler output is not a PDF up to 32 MiB")
 	}
 	synctexPath := filepath.Join(job, strings.TrimSuffix(name, ".pdf")+".synctex.gz")
 	syncPages, syncErr := readTexSyncPages(synctexPath)
 	if syncErr != nil {
 		slog.Debug("TeX preview has no usable SyncTeX data", "error", syncErr)
 	}
-	return pdf, syncPages, nil
+	output := texCompileOutput{pdf: pdf, syncPages: syncPages}
+	var inputsErr error
+	if kind == "pdflatex" {
+		output.inputs, inputsErr = texRecorderInputs(filepath.Join(job, "preview.fls"), job, project)
+	} else {
+		output.inputs, inputsErr = texMakefileInputs(rules, job, project)
+	}
+	if inputsErr != nil {
+		slog.Debug("TeX preview inputs unknown; the PDF is not cached", "error", inputsErr)
+	}
+	output.inputsKnown = inputsErr == nil
+	return output, nil
 }
 
 func readTexSyncPages(path string) ([]texSyncPage, error) {
@@ -896,6 +967,11 @@ func texSandboxCommand(ctx context.Context, compiler string, args []string, job,
 			return nil, errors.New("TeX preview requires bubblewrap: sudo apt install bubblewrap")
 		}
 		wrapped := []string{"--die-with-parent", "--unshare-pid", "--unshare-ipc", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"}
+		if project == job {
+			wrapped = append(wrapped, "--unshare-net")
+		} else {
+			wrapped = append(wrapped, "--ro-bind", project, project)
+		}
 		// TeX documents can perform file reads even with shell escape disabled. Expose only
 		// the selected project plus the engine, public runtime assets and bundle TLS/DNS files.
 		for _, path := range []string{"/usr", "/bin", "/lib", "/lib64", "/etc/texmf", "/var/lib/texmf", "/etc/fonts", "/etc/ssl", "/etc/pki", "/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/var/cache/fontconfig"} {
@@ -903,7 +979,7 @@ func texSandboxCommand(ctx context.Context, compiler string, args []string, job,
 				wrapped = append(wrapped, "--ro-bind", path, path)
 			}
 		}
-		wrapped = append(wrapped, "--ro-bind", project, project, "--ro-bind", compiler, compiler, "--bind", job, job, "--bind", cache, cache, "--", compiler)
+		wrapped = append(wrapped, "--ro-bind", compiler, compiler, "--bind", job, job, "--bind", cache, cache, "--", compiler)
 		return exec.CommandContext(ctx, wrapper, append(wrapped, args...)...), nil
 	case "darwin":
 		profile := "(version 1)(allow default)(deny file-read* file-write*)(allow file-read-metadata)(allow file-read-data"
@@ -914,6 +990,9 @@ func texSandboxCommand(ctx context.Context, compiler string, args []string, job,
 			profile += " (literal " + strconv.Quote(path) + ")"
 		}
 		profile += fmt.Sprintf(")(allow file-write* (subpath %s) (subpath %s))(deny process-exec)(allow process-exec (literal %s))", strconv.Quote(job), strconv.Quote(cache), strconv.Quote(compiler))
+		if project == job {
+			profile += "(deny network*)"
+		}
 		return exec.CommandContext(ctx, "/usr/bin/sandbox-exec", append([]string{"-p", profile, compiler}, args...)...), nil
 	default:
 		return nil, fmt.Errorf("TeX preview is not supported on %s", runtime.GOOS)

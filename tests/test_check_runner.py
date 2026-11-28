@@ -90,7 +90,7 @@ def test_whitespace_lane_rejects_pending_and_committed_release_whitespace(tmp_pa
     if state != "unstaged":
         git(tmp_path, "add", "candidate.js")
     if state == "release":
-        git(tmp_path, "commit", "-qm", "Release YOmux 1.2.3")
+        git(tmp_path, "commit", "-qm", "YOmux 1.2.3 Faster startup and Finder fixes")
 
     legacy = subprocess.run(["git", "diff", "--check"], cwd=tmp_path, capture_output=True, text=True)
     assert (legacy.returncode == 0) == (state != "unstaged")
@@ -108,7 +108,7 @@ def test_canonical_command_pins_the_release_whitespace_baseline(monkeypatch, cap
     monkeypatch.setattr(check, "YOMUX_VERSION", "1.2.3")
     revision = "a" * 40
     monkeypatch.setattr(check.bazel_execution_contract, "repository_release_context", lambda _root: {
-        "revision": revision, "commit_subject": f"Release YOmux {subject_version}",
+        "revision": revision, "commit_subject": f"YOmux {subject_version} Faster startup and Finder fixes",
     })
     assert check.main(["--lane", "whitespace", "--list-lanes"]) == 0
     whitespace = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("whitespace\t"))
@@ -699,6 +699,28 @@ def test_catalog_and_collection_share_filename_marker_owner():
     assert test_catalog.PHASE_MARKER_PRECEDENCE is test_plan.PHASE_MARKER_PRECEDENCE
     assert test_plan.automatic_test_markers("test_browser_new.py") == ("browser", "socket")
     assert test_plan.automatic_test_markers("test_new.py") == ()
+
+
+def test_html_viewedit_regressions_are_mandatory_in_default_browser_phase():
+    path = "tests/test_browser_html_viewedit.py"
+    assert path in test_catalog.pytest_files("browser")
+    markers = dict(test_catalog.test_metadata(REPO_ROOT / path))
+    phases = dict(test_catalog.test_definitions(REPO_ROOT / path))
+    for name in (
+        "test_html_example_can_be_edited_in_viewedit",
+        "test_touch_html_example_places_caret_in_rendered_text_without_the_keyboard_popup",
+        "test_html_viewedit_shows_the_page_while_editing_loads",
+        "test_html_viewedit_caret_does_not_reflow_textedit_wrap",
+        "test_html_viewedit_and_textedit_mirror_selections",
+        "test_html_viewedit_and_textedit_mirror_across_inline_markup",
+    ):
+        node_id = f"{path}::{name}"
+        assert phases[node_id] == "browser"
+        assert "required_browser" in markers[node_id]
+    markdown_path = "tests/test_browser_editor.py"
+    markdown_node = f"{markdown_path}::test_markdown_viewedit_and_textedit_mirror_selections"
+    assert dict(test_catalog.test_definitions(REPO_ROOT / markdown_path))[markdown_node] == "browser"
+    assert "required_browser" in dict(test_catalog.test_metadata(REPO_ROOT / markdown_path))[markdown_node]
 
 
 def test_check_runner_shares_one_concurrent_cpu_budget_between_pytest_and_bazel(monkeypatch):
@@ -4157,6 +4179,44 @@ def test_bazel_runtime_trees_are_consumer_scoped_and_frontend_is_generated():
     assert '":browser_runtime"' not in agent_status_target
     for relative in ("cmd/yomux-go/BUILD.bazel", "internal/stats/BUILD.bazel"):
         assert '"//:go_cmd_test_support"' in (REPO_ROOT / relative).read_text() or '"//:go_stats_test_support"' in (REPO_ROOT / relative).read_text()
+
+
+def test_go_module_closure_declares_go_sources_and_tool_imports_separately():
+    text = (REPO_ROOT / "BUILD.bazel").read_text(encoding="utf-8")
+    inputs = text.split('name = "go_module_closure_inputs"', 1)[1].split("\n)\n\n", 1)[0]
+    runtime = text.split('name = "go_module_closure_runtime"', 1)[1].split("\n)\n\n", 1)[0]
+    tool_support = text.split('name = "go_module_closure_tool_support"', 1)[1].split("\n)\n\n", 1)[0]
+    target = text.split('name = "go_module_closure_test"', 1)[1].split("\n)\n\n", 1)[0]
+    assert '"go.mod"' in inputs and '"go.sum"' in inputs
+    declared_go_directories = set(re.findall(r'"//([^:\"]+):qualified_sources"', inputs))
+    actual_go_directories = {
+        path.parent.relative_to(REPO_ROOT).as_posix()
+        for parent in ("cmd", "internal", "tools")
+        for path in (REPO_ROOT / parent).rglob("*.go")
+        if path.name != "product_version_generated.go"
+    }
+    assert declared_go_directories == actual_go_directories
+    assert "static_src" not in inputs and "qualified_gate_sources" not in inputs
+    assert 'srcs = [":go_module_closure_inputs"]' in runtime
+    for source in (
+        '"tools/bazel_generate.py"',
+        '"tools/bazel_native.py"',
+        '"tools/docker_image.py"',
+        '"tools/native_darwin_launcher.py"',
+        '"tools/product_environment.py"',
+        '"tools/product_namespace.json"',
+        '"tests/browser_helpers/webdriver_lease.py"',
+        '"yomux_lib/__init__.py"',
+        '"yomux_lib/infra/worktree_writer.py"',
+        '"yomux_lib/local_services/runtime.py"',
+    ):
+        assert source in tool_support, source
+    assert 'data = [":go_module_closure_tool_support"]' in target
+    assert 'tree = ":go_module_closure_runtime"' in target
+    assert 'runtime_groups = ["go"]' in target
+    assert 'qualified_gate_runtime' not in target
+    script = (REPO_ROOT / "tools/bazel_go_module_closure.py").read_text(encoding="utf-8")
+    assert "candidate = Path(os.environ[\"TEST_SRCDIR\"])" not in script
 
 
 def test_go_gate_excludes_deprecated_backend_comparison():

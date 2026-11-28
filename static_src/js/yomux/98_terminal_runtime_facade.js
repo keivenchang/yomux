@@ -36,7 +36,7 @@ function paneItemCloseDisabled(item) {
   return isTmuxSession(item) && readOnlyMode;
 }
 
-function paneFrameCloseLabel(item) {
+function paneTabCloseLabel(item) {
   if (isTmuxSession(item)) return t('menu.tmux.kill');
   if (isFileEditorItem(item) || gitDiffItemPath(item)) return t('finder.close', {name: itemLabel(item)});
   return t('pane.closeTab');
@@ -45,7 +45,7 @@ function paneFrameCloseLabel(item) {
 function paneFrameControlsHtml(session, options = {}) {
   const role = paneRoleForSlot(options.slot || slotForItem(session));
   const controlOptions = role.controls === 'minimize-only'
-    ? {...options, actions: false, details: false, popout: false, expand: false, close: false, minimize: true}
+    ? {...options, actions: false, details: false, popout: false, expand: false, minimize: true}
     : options;
   const disabled = controlOptions.disabled === true;
   const unavailableLabel = controlOptions.unavailableLabel || itemLabel(session);
@@ -82,12 +82,6 @@ function paneFrameControlsHtml(session, options = {}) {
   if (includeMinimize) {
     add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize')});
   }
-  if (controlOptions.close ?? paneItemHasCloseAction(session)) {
-    const closeLabel = controlOptions.closeLabel || paneFrameCloseLabel(session);
-    const closeTitle = controlOptions.closeTitle || closeLabel;
-    const killDisabled = paneItemCloseDisabled(session);
-    add({className: ['pane-close', controlOptions.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: killDisabled ? t('menu.common.adminOnly') : closeTitle, label: closeLabel, disabled: killDisabled});
-  }
   return controls.join('');
 }
 
@@ -123,9 +117,6 @@ function panelControlsHtml(session, options = {}) {
       actions: false,
       minimize: false,
       expand: false,
-      close: true,
-      closeTitle: t('finder.close', {name: fileExplorerLabel()}),
-      closeLabel: t('finder.close', {name: fileExplorerLabel()}),
     })
     : paneFrameControlsHtml(session, {
       disabled,

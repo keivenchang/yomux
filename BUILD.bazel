@@ -386,6 +386,82 @@ runtime_tree(
 )
 
 filegroup(
+    name = "go_module_closure_inputs",
+    testonly = True,
+    srcs = [
+        "go.mod",
+        "go.sum",
+        "//cmd/fake-llm:qualified_sources",
+        "//cmd/yomux-go:qualified_sources",
+        "//internal/atomicfile:qualified_sources",
+        "//internal/cache:qualified_sources",
+        "//internal/capabilities:qualified_sources",
+        "//internal/chat:qualified_sources",
+        "//internal/decimal:qualified_sources",
+        "//internal/fakellm:qualified_sources",
+        "//internal/finder:qualified_sources",
+        "//internal/locales:qualified_sources",
+        "//internal/mutablefs:qualified_sources",
+        "//internal/productenv:qualified_sources",
+        "//internal/productversion:qualified_sources",
+        "//internal/staticassets:qualified_sources",
+        "//internal/stats:qualified_sources",
+        "//internal/tailfile:qualified_sources",
+        "//internal/testsupport:qualified_sources",
+        "//internal/tmuxcmd:qualified_sources",
+        "//internal/work:qualified_sources",
+        "//internal/yoagent:qualified_sources",
+        "//internal/yolo:qualified_sources",
+        "//tools/staticgen:qualified_sources",
+        "//tools/versiongen:qualified_sources",
+    ],
+)
+
+runtime_tree(
+    name = "go_module_closure_runtime",
+    testonly = True,
+    srcs = [":go_module_closure_inputs"],
+)
+
+filegroup(
+    name = "go_module_closure_tool_support",
+    testonly = True,
+    srcs = [
+        "tests/browser_helpers/__init__.py",
+        "tests/browser_helpers/webdriver_lease.py",
+        "tools/bazel_execution_contract.py",
+        "tools/bazel_generate.py",
+        "tools/bazel_native.py",
+        "tools/docker_image.py",
+        "tools/fixture_storage.py",
+        "tools/instance_isolation.py",
+        "tools/native_darwin_launcher.py",
+        "tools/native_process_scope.py",
+        "tools/product_environment.py",
+        "tools/product_namespace.json",
+        "tools/tmux_paths.py",
+        "yomux_lib/__init__.py",
+        "yomux_lib/atomic_file.py",
+        "yomux_lib/background_scheduler.py",
+        "yomux_lib/host_identity.py",
+        "yomux_lib/infra/__init__.py",
+        "yomux_lib/infra/atomic_file.py",
+        "yomux_lib/infra/background_scheduler.py",
+        "yomux_lib/infra/filesystem_preflight.py",
+        "yomux_lib/infra/host_identity.py",
+        "yomux_lib/infra/numeric.py",
+        "yomux_lib/infra/process_claims.py",
+        "yomux_lib/infra/root_paths.py",
+        "yomux_lib/infra/transient_paths.py",
+        "yomux_lib/infra/worktree_writer.py",
+        "yomux_lib/local_services/__init__.py",
+        "yomux_lib/local_services/lifetime.py",
+        "yomux_lib/local_services/rpc.py",
+        "yomux_lib/local_services/runtime.py",
+    ],
+)
+
+filegroup(
     name = "bazel_build_sources",
     srcs = [
         "BUILD.bazel",
@@ -819,8 +895,10 @@ native_python_test(
     name = "go_module_closure_test",
     size = "small",
     timeout = "moderate",
+    data = [":go_module_closure_tool_support"],
+    runtime_groups = ["go"],
     script = "tools/bazel_go_module_closure.py",
-    tree = ":qualified_gate_runtime",
+    tree = ":go_module_closure_runtime",
 )
 
 # This inventory covers every executable step in test_plan.StepId. Whitespace

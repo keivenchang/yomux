@@ -12,7 +12,7 @@
       "editor_light_color_scheme": "yomux-light",
       "file_explorer_font_size": 12,
       "global_font_size": 14,
-      "inactive_pane_opacity": 60,
+      "inactive_pane_dim_opacity": 12,
       "max_tabs_per_pane": 12,
       "pane_ring_opacity": 75,
       "pane_spacing": 3,
@@ -138,6 +138,7 @@
       "server_directory_event_poll_ms": 3000,
       "server_event_poll_ms": 850,
       "session_files_max_workers": 2,
+      "static_cache_mb": 64,
       "tabber_activity_refresh_ms": 15000,
       "workflow_transition_glow_seconds": 60
     },
@@ -292,6 +293,7 @@
         "dark",
         "dracula",
         "github-light",
+        "github-light-cream",
         "monokai",
         "nord",
         "one-dark",
@@ -299,6 +301,7 @@
         "popular-ide-dark-plus",
         "popular-ide-light-plus",
         "solarized-light",
+        "solarized-light-paper",
         "yomux-light"
       ],
       "aliases": {
@@ -312,6 +315,7 @@
         "dark",
         "dracula",
         "github-light",
+        "github-light-cream",
         "monokai",
         "nord",
         "one-dark",
@@ -319,6 +323,7 @@
         "popular-ide-dark-plus",
         "popular-ide-light-plus",
         "solarized-light",
+        "solarized-light-paper",
         "yomux-light"
       ],
       "current": "dark",
@@ -539,9 +544,11 @@
     "appearance.editor_light_color_scheme": {
       "accepted_choices": [
         "github-light",
+        "github-light-cream",
         "one-light",
         "popular-ide-light-plus",
         "solarized-light",
+        "solarized-light-paper",
         "yomux-light"
       ],
       "aliases": {
@@ -552,9 +559,11 @@
       "choice_metadata": {},
       "choices": [
         "github-light",
+        "github-light-cream",
         "one-light",
         "popular-ide-light-plus",
         "solarized-light",
+        "solarized-light-paper",
         "yomux-light"
       ],
       "current": "yomux-light",
@@ -659,15 +668,15 @@
       "units": "pixels",
       "write_role": "admin"
     },
-    "appearance.inactive_pane_opacity": {
+    "appearance.inactive_pane_dim_opacity": {
       "accepted_choices": [],
       "aliases": {},
       "choice_labels": {},
       "choice_metadata": {},
       "choices": [],
-      "current": 60,
-      "default": 60,
-      "description": "Percent, 0-100. Strength of inactive pane gray-out.",
+      "current": 12,
+      "default": 12,
+      "description": "Percent, 0-100. Strength of inactive pane dimming.",
       "empty_allowed": false,
       "gui": {
         "section": "Colors",
@@ -675,8 +684,8 @@
         "visible": true
       },
       "hidden_choices": [],
-      "key": "inactive_pane_opacity",
-      "label": "Inactive pane opacity",
+      "key": "inactive_pane_dim_opacity",
+      "label": "Inactive pane dim opacity",
       "limits": {
         "max": 100,
         "min": 0
@@ -687,7 +696,7 @@
         "description": "pref.appearance.inactive_pane_opacity.help",
         "label": "pref.appearance.inactive_pane_opacity.label"
       },
-      "path": "appearance.inactive_pane_opacity",
+      "path": "appearance.inactive_pane_dim_opacity",
       "read_role": "readonly",
       "requires_confirmation": false,
       "section": "appearance",
@@ -4708,29 +4717,25 @@
         "gpt-6-astra",
         "gpt-6-sol",
         "gpt-6-luna",
-        "gpt-5.6-sol"
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5"
       ],
-      "aliases": {},
+      "aliases": {
+        "gpt-5.6-sol": "gpt-6-luna"
+      },
       "choice_labels": {
-        "gpt-5.6-sol": "GPT-5.6-Sol",
+        "claude-fable-5-1": "Claude Fable 5.1",
+        "claude-haiku-5-5": "Claude Haiku 5.5",
+        "claude-opus-5-5": "Claude Opus 5.5",
+        "claude-sonnet-5-5": "Claude Sonnet 5.5",
         "gpt-6-astra": "GPT-6-Astra",
         "gpt-6-luna": "GPT-6-Luna",
         "gpt-6-sol": "GPT-6-Sol",
         "gpt-6.1-sol": "GPT-6.1-Sol"
       },
       "choice_metadata": {
-        "gpt-5.6-sol": {
-          "default_effort": "medium",
-          "display_name": "GPT-5.6-Sol",
-          "effort_options": [
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "ultra"
-          ]
-        },
         "gpt-6-astra": {
           "default_effort": "low",
           "display_name": "GPT-6-Astra",
@@ -4784,11 +4789,14 @@
         "gpt-6-astra",
         "gpt-6-sol",
         "gpt-6-luna",
-        "gpt-5.6-sol"
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5"
       ],
       "current": "gpt-6-luna",
       "default": "gpt-6-luna",
-      "description": "Codex model for automatic Tabber descriptions.",
+      "description": "Codex or Claude model for automatic Tabber descriptions.",
       "empty_allowed": false,
       "gui": {
         "section": "General",
@@ -4797,7 +4805,7 @@
       },
       "hidden_choices": [],
       "key": "codex_model",
-      "label": "Codex model",
+      "label": "Description model",
       "limits": null,
       "list_limit": null,
       "live_apply": "live",
@@ -4850,6 +4858,43 @@
       "type": "integer",
       "units": "",
       "write_role": "admin"
+    },
+    "performance.static_cache_mb": {
+      "accepted_choices": [],
+      "aliases": {},
+      "choice_labels": {},
+      "choice_metadata": {},
+      "choices": [],
+      "current": 64,
+      "default": 64,
+      "description": "Megabytes, 0-1024. Memory shared by gzip-compressed app files and compiled TeX and Office previews, least recently used first out. App files fill it at startup so the first page load is already fast; a reload of an unchanged preview reuses its PDF. 0 compresses every request and recompiles every preview.",
+      "empty_allowed": false,
+      "gui": {
+        "section": "Performance",
+        "section_locale_key": "pref.section.performance",
+        "visible": true
+      },
+      "hidden_choices": [],
+      "key": "static_cache_mb",
+      "label": "Static cache mb",
+      "limits": {
+        "max": 1024,
+        "min": 0
+      },
+      "list_limit": null,
+      "live_apply": "live",
+      "locale_keys": {
+        "description": "pref.performance.static_cache_mb.help",
+        "label": "pref.performance.static_cache_mb.label"
+      },
+      "path": "performance.static_cache_mb",
+      "read_role": "readonly",
+      "requires_confirmation": false,
+      "section": "performance",
+      "sensitivity": "normal",
+      "type": "integer",
+      "units": "",
+      "write_role": "admin"
     }
   },
   "cases": [
@@ -4867,7 +4912,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -4993,6 +5038,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -5059,7 +5105,12 @@
       "input": {
         "appearance": {
           "active_color": "bad",
+          "inactive_pane_opacity": 83,
           "ui_font_size": 999
+        },
+        "tabber": {
+          "codex_effort": "ultra",
+          "codex_model": "gpt-5.6-sol"
         }
       },
       "sanitized": {
@@ -5074,7 +5125,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -5200,6 +5251,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -5255,14 +5307,15 @@
         },
         "tabber": {
           "automatic_descriptions": true,
-          "codex_effort": "low",
+          "codex_effort": "medium",
           "codex_model": "gpt-6-luna",
           "description_interval_minutes": 10
         }
       },
       "coerced": [
         "appearance.active_color",
-        "appearance.ui_font_size"
+        "appearance.ui_font_size",
+        "tabber.codex_effort"
       ]
     },
     {
@@ -5284,7 +5337,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 20,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -5410,6 +5463,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -5492,7 +5546,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -5618,6 +5672,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -5700,7 +5755,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -5826,6 +5881,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 0
         },
@@ -5906,7 +5962,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -6032,6 +6088,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -6112,7 +6169,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -6238,6 +6295,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -6319,7 +6377,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -6445,6 +6503,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -6531,7 +6590,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -6657,6 +6716,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -6742,7 +6802,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -6867,6 +6927,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -6952,7 +7013,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -7078,6 +7139,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -7166,7 +7228,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -7293,6 +7355,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -7376,7 +7439,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -7502,6 +7565,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -7591,7 +7655,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -7720,6 +7784,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -7804,7 +7869,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 4,
@@ -7930,6 +7995,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -8016,7 +8082,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -8142,6 +8208,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -8226,7 +8293,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -8352,6 +8419,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -8432,7 +8500,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -8558,6 +8626,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -8640,7 +8709,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 0,
@@ -8766,6 +8835,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -8846,7 +8916,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -8972,6 +9042,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },
@@ -9054,7 +9125,7 @@
           "editor_light_color_scheme": "yomux-light",
           "file_explorer_font_size": 12,
           "global_font_size": 14,
-          "inactive_pane_opacity": 60,
+          "inactive_pane_dim_opacity": 12,
           "max_tabs_per_pane": 12,
           "pane_ring_opacity": 75,
           "pane_spacing": 3,
@@ -9180,6 +9251,7 @@
           "server_directory_event_poll_ms": 3000,
           "server_event_poll_ms": 850,
           "session_files_max_workers": 2,
+          "static_cache_mb": 64,
           "tabber_activity_refresh_ms": 15000,
           "workflow_transition_glow_seconds": 60
         },

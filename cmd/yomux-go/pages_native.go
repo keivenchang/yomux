@@ -216,7 +216,10 @@ func (s *server) renderPreauthPage(r *http.Request, setup bool, next, message st
 			return nil, fmt.Errorf("cannot resolve login username")
 		}
 		view.Login = login
-		view.SetupStrings = map[string]string{"waiting": t("setup.waiting"), "waitingServer": t("setup.waitingServer"), "authUpdated": t("setup.authUpdated")}
+		view.SetupStrings = map[string]string{
+			"waiting": t("setup.waiting"), "waitingServer": t("setup.waitingServer"), "authUpdated": t("setup.authUpdated"),
+			"copiedPath": t("status.copiedPath"), "clipboardUnavailable": t("common.clipboardUnavailable"),
+		}
 		view.AgentNoticeHTML = view.agentNotice(status, "setup-login-notice")
 		if !s.secureCookies() {
 			view.SecurityHTML = template.HTML(`<p id="setupSecurity" class="setup-security">` + string(view.richText("setup.httpsRecommended", map[string]template.HTML{"command": "<code>./boot.sh --force 9998</code>"})) + `</p>`)

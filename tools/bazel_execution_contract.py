@@ -140,6 +140,12 @@ def repository_head_sha(root=ROOT, *, declared=False):
     return revision if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", revision) else None
 
 
+def is_release_subject(subject: str, version: str) -> bool:
+    """A release commit subject is `YOmux <version>`, optionally followed by its highlights."""
+    prefix = f"YOmux {version}"
+    return subject == prefix or subject.startswith(prefix + " ")
+
+
 def repository_release_context(root=ROOT, *, declared=False):
     if (declared and Path(root).resolve() == ROOT and product_env("BAZEL_CONTRACT")
             and product_env("BAZEL_EXECUTION") == "qualified-native"):

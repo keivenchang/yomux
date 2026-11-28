@@ -5,9 +5,12 @@ package tailfile
 
 import (
 	"bufio"
+	"bytes"
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +25,20 @@ const ingestionPageBytes = 64 << 10
 const ingestionCachePages = 256
 const ingestionValidationReserveBytes = 256 << 10
 
+// Record caches (decoded objects, complete frames, unfinished frames) share
+// these bounds. Decoded objects are charged by approximate heap size.
+const maxCachedTranscriptBytes = 16 << 20
+const maxCachedTranscriptRecords = 4096
+const maxCachedPartialFrames = 256
+
+// File generations are tiny; the bound only stops unbounded growth when many
+// archived transcripts pass through one long-lived server.
+const maxTrackedFileGenerations = 4096
+
+// generationSampleBytes matches the Position prefix/tail samples consumers
+// already trust to resume an appended transcript.
+const generationSampleBytes = 4096
+
 // MaxRecordBytes bounds a complete frame, including its line terminator.
 const MaxRecordBytes = 8 << 20
 
@@ -34,25 +51,245 @@ const CompleteRecordBatchBytes = MaxRecordBytes + ingestionValidationReserveByte
 // overlapping consumers, even if their durable transactions complete separately.
 // Bounded eviction permits measured recovery rereads rather than retaining logs.
 type Ingestion struct {
-	tickOnce     sync.Once
-	subscribers  map[chan time.Time]bool
-	frameMu      sync.Mutex
-	partial      map[string]partialFrame
-	partialBytes int64
-	mu           sync.Mutex
-	pages        map[pageKey][]byte
-	order        []pageKey
-	BytesRead    int64
-	CacheHits    int64
-	frames       map[frameKey][]byte
-	frameOrder   []frameKey
-	frameBytes   int64
+	projectionMu   sync.Mutex
+	decoded        boundedCache[[sha256.Size]byte, *decodedRecord]
+	tickOnce       sync.Once
+	subscribers    map[chan time.Time]bool
+	frameMu        sync.Mutex
+	mu             sync.Mutex
+	partial        boundedCache[string, partialFrame]
+	pages          boundedCache[pageKey, []byte]
+	frames         boundedCache[frameKey, []byte]
+	files          boundedCache[string, *fileGeneration]
+	nextGeneration uint64
+	BytesRead      int64
+	CacheHits      int64
 }
+
+// Projection is a stateless consumer of a decoded transcript record. The JSON
+// object and projected values are shared. Treat both as read-only and keep
+// source-specific state in the consumer checkpoint. RegisterProjection only
+// allocates the handle; the handle's identity keys its memoized value on each
+// cached record, so create one at package scope for each record product.
+type Projection[T any] struct {
+	project func([]byte, map[string]any) T
+}
+
+func RegisterProjection[T any](project func([]byte, map[string]any) T) *Projection[T] {
+	return &Projection[T]{project: project}
+}
+
+type decodedRecord struct {
+	once        sync.Once
+	object      map[string]any
+	mu          sync.Mutex
+	projections map[any]any
+	size        int64
+}
+
+// Decode returns the shared decoded JSON object for one record, or nil when the
+// record is not a JSON object. The object is read-only. A nil Ingestion and
+// records above MaxRecordBytes decode without caching.
+func (o *Ingestion) Decode(line []byte) map[string]any {
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	if o == nil || len(line) > MaxRecordBytes {
+		return decodeTranscriptObject(line)
+	}
+	return o.decodedRecord(line).object
+}
+
+// Read projects a record without decoding its JSON again for each consumer.
+// The content key allows append-only snapshots and tail readers to share the
+// same record. The cache is volatile and bounded; retries after eviction or
+// restart can decode a record again without coupling consumer checkpoints.
+func (p *Projection[T]) Read(ingestion *Ingestion, line []byte) T {
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	if ingestion == nil || len(line) > MaxRecordBytes {
+		return p.project(line, decodeTranscriptObject(line))
+	}
+	record := ingestion.decodedRecord(line)
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	if value, ok := record.projections[p]; ok {
+		return value.(projectionValue[T]).value
+	}
+	value := p.project(line, record.object)
+	// Unknown retained costs (for example a closure's captures) are never memoized.
+	// An evicted record remains usable by its reader but must not be resurrected.
+	size, known := retainedProjectionBytes(reflect.ValueOf(value), 0)
+	if !known || size > maxCachedTranscriptBytes-record.size-64 {
+		return value
+	}
+	ingestion.projectionMu.Lock()
+	defer ingestion.projectionMu.Unlock()
+	key := sha256.Sum256(line)
+	if current, ok := ingestion.decoded.get(key); !ok || current != record {
+		return value
+	}
+	if record.projections == nil {
+		record.projections = make(map[any]any)
+	}
+	record.projections[p] = projectionValue[T]{value}
+	record.size += size + 64
+	ingestion.decoded.put(key, record, record.size, maxCachedTranscriptRecords, maxCachedTranscriptBytes)
+	return value
+}
+
+type projectionValue[T any] struct{ value T }
+
+// decodedRecord returns the decoded cache entry for line. The entry is
+// published before decoding so concurrent consumers wait on one decode; it is
+// charged by line length until the decoded size is known.
+func (o *Ingestion) decodedRecord(line []byte) *decodedRecord {
+	key := sha256.Sum256(line)
+	o.projectionMu.Lock()
+	record, ok := o.decoded.get(key)
+	if !ok {
+		record = &decodedRecord{}
+		o.decoded.put(key, record, int64(len(line)), maxCachedTranscriptRecords, maxCachedTranscriptBytes)
+	}
+	o.projectionMu.Unlock()
+	record.once.Do(func() {
+		record.object = decodeTranscriptObject(line)
+		size := decodedRecordOverheadBytes + decodedBytes(record.object)
+		record.size = size
+		o.projectionMu.Lock()
+		if current, ok := o.decoded.get(key); ok && current == record {
+			o.decoded.put(key, record, size, maxCachedTranscriptRecords, maxCachedTranscriptBytes)
+		}
+		o.projectionMu.Unlock()
+	})
+	return record
+}
+
+// decodedRecordOverheadBytes covers one cache entry, its record, and its key.
+const decodedRecordOverheadBytes = 256
+
+// decodedBytes approximates the heap retained by a decoded JSON value, so the
+// decoded-record bound measures objects rather than their source lines. The
+// per-node constants (map slots, string headers, allocation size classes)
+// were calibrated against runtime heap growth on a 60 MB Codex rollout, where
+// the estimate is within 5% of the measured heap.
+func decodedBytes(value any) int64 {
+	switch value := value.(type) {
+	case map[string]any:
+		size := int64(64)
+		for key, item := range value {
+			size += 32 + decodedStringBytes(key) + decodedBytes(item)
+		}
+		return size
+	case []any:
+		size := int64(24 + 16*len(value))
+		for _, item := range value {
+			size += decodedBytes(item)
+		}
+		return size
+	case string:
+		return decodedStringBytes(value)
+	default:
+		return 8
+	}
+}
+
+func decodedStringBytes(value string) int64 {
+	return 24 + int64(len(value)+len(value)/16)
+}
+
+// retainedProjectionBytes conservatively counts container storage and reachable
+// values. Aliases may be counted twice; unknown kinds and cyclic/deep values
+// skip memoization rather than admitting an uncharged allocation.
+func retainedProjectionBytes(value reflect.Value, depth int) (int64, bool) {
+	if !value.IsValid() {
+		return 0, true
+	}
+	if depth > 64 {
+		return 0, false
+	}
+	size := int64(value.Type().Size())
+	add := func(child reflect.Value) bool {
+		amount, known := retainedProjectionBytes(child, depth+1)
+		size += amount
+		return known
+	}
+	switch value.Kind() {
+	case reflect.String:
+		size += int64(value.Len())
+	case reflect.Interface, reflect.Pointer:
+		if !value.IsNil() && !add(value.Elem()) {
+			return 0, false
+		}
+	case reflect.Slice, reflect.Array:
+		if value.Kind() == reflect.Slice {
+			size += int64(value.Cap()) * int64(value.Type().Elem().Size())
+		}
+		for index := 0; index < value.Len(); index++ {
+			child := value.Index(index)
+			if !add(child) {
+				return 0, false
+			}
+			size -= int64(child.Type().Size())
+			if size > maxCachedTranscriptBytes {
+				return size, true
+			}
+		}
+	case reflect.Map:
+		size += 64
+		entries := value.MapRange()
+		for entries.Next() {
+			size += 32
+			if !add(entries.Key()) || !add(entries.Value()) {
+				return 0, false
+			}
+			if size > maxCachedTranscriptBytes {
+				return size, true
+			}
+		}
+	case reflect.Struct:
+		for index := 0; index < value.NumField(); index++ {
+			child := value.Field(index)
+			if !add(child) {
+				return 0, false
+			}
+			size -= int64(child.Type().Size())
+		}
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+	default:
+		return 0, false
+	}
+	return size, true
+}
+
+func decodeTranscriptObject(line []byte) map[string]any {
+	var record map[string]any
+	if json.Unmarshal(line, &record) != nil {
+		return nil
+	}
+	return record
+}
+
+// Cached pages and complete frames are keyed by stable file identity and
+// generation rather than by snapshot, so appends do not invalidate complete
+// records that were already read. Unfinished frames stay keyed by snapshot.
 type pageKey struct {
-	path                 string
-	size, modified, page int64
-	identity             string
+	file       string
+	generation uint64
+	page       int64
 }
+
+// fileGeneration describes the latest snapshot of one file generation.
+// Cached pages and frames of a generation hold that snapshot's bytes. boundary
+// is the end of the last complete (LF-terminated) record seen in those bytes;
+// bytes after it may belong to an unfinished record that the writer can still
+// rewrite, so they are never carried into the next snapshot.
+type fileGeneration struct {
+	id       uint64
+	snapshot string
+	size     int64
+	boundary int64
+}
+
 type Snapshot struct {
 	batchPages     map[int64][]byte
 	physicalBytes  atomic.Int64
@@ -60,6 +297,8 @@ type Snapshot struct {
 	file           *os.File
 	info           os.FileInfo
 	path, identity string
+	fileID         string
+	generation     uint64
 }
 
 func (o *Ingestion) Snapshot(file *os.File) (*Snapshot, error) {
@@ -72,13 +311,120 @@ func (o *Ingestion) Snapshot(file *os.File) (*Snapshot, error) {
 	}
 	// Sys includes ctime on supported platforms; size/mtime alone do not detect
 	// same-size rewrites whose mtime was restored by the writer.
-	return &Snapshot{owner: o, file: file, info: info, path: file.Name(), identity: snapshotIdentity(info)}, nil
+	snapshot := &Snapshot{owner: o, file: file, info: info, path: file.Name(), identity: snapshotIdentity(info), fileID: stableFileIdentity(info)}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if snapshot.generation, err = snapshot.validateGeneration(); err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+// validateGeneration lets a changed snapshot keep its generation's cached
+// complete records when the file grew and the first and last sampled bytes
+// before the previous complete-record boundary still equal the cached bytes.
+// That is the same evidence consumer positions use to resume after an append;
+// a rewrite confined to the middle of earlier complete records is detected by
+// neither. Unfinished bytes after the boundary are dropped, so a rewritten
+// partial record is reread. Same-size changes, truncation, replacement, and
+// sample mismatches start a new generation. Caller holds owner.mu.
+func (s *Snapshot) validateGeneration() (uint64, error) {
+	o := s.owner
+	known, ok := o.files.get(s.fileID)
+	if ok && known.snapshot == s.identity {
+		return known.id, nil
+	}
+	next := &fileGeneration{snapshot: s.identity, size: s.info.Size()}
+	if ok && next.size > known.size && known.boundary > 0 {
+		head, err := s.matchesCachedPages(known.id, 0, min(known.boundary, generationSampleBytes))
+		if err != nil {
+			return 0, err
+		}
+		tail := false
+		if head {
+			tail, err = s.matchesCachedPages(known.id, max(0, known.boundary-generationSampleBytes), known.boundary)
+			if err != nil {
+				return 0, err
+			}
+		}
+		if tail {
+			next.id, next.boundary = known.id, known.boundary
+			for page := known.boundary / ingestionPageBytes; page*ingestionPageBytes < known.size; page++ {
+				key := pageKey{s.fileID, known.id, page}
+				keep := known.boundary - page*ingestionPageBytes
+				if data, cached := o.pages.get(key); cached && int64(len(data)) > keep {
+					if keep > 0 {
+						o.pages.put(key, data[:keep], keep, ingestionCachePages, ingestionCachePages*ingestionPageBytes)
+					} else {
+						o.pages.remove(key)
+					}
+				}
+			}
+		}
+	}
+	if next.id == 0 {
+		o.nextGeneration++
+		next.id = o.nextGeneration
+	}
+	o.files.put(s.fileID, next, 1, maxTrackedFileGenerations, maxTrackedFileGenerations)
+	return next.id, nil
+}
+
+// matchesCachedPages compares the file's current bytes in [start, end) with
+// the generation's cached pages, reading the file directly and charging that
+// read. A page that is no longer cached counts as a mismatch. Caller holds
+// owner.mu.
+func (s *Snapshot) matchesCachedPages(generation uint64, start, end int64) (bool, error) {
+	current := make([]byte, end-start)
+	n, err := s.file.ReadAt(current, start)
+	s.owner.BytesRead += int64(n)
+	s.physicalBytes.Add(int64(n))
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+	if n < len(current) {
+		return false, nil
+	}
+	for offset := start; offset < end; {
+		page := offset / ingestionPageBytes
+		within := offset - page*ingestionPageBytes
+		data, ok := s.owner.pages.get(pageKey{s.fileID, generation, page})
+		if !ok || int64(len(data)) <= within {
+			return false, nil
+		}
+		length := min(int64(len(data))-within, end-offset)
+		if !bytes.Equal(data[within:within+length], current[offset-start:offset-start+length]) {
+			return false, nil
+		}
+		offset += length
+	}
+	return true, nil
 }
 
 // ReadTail and Checkpoint consume one pinned snapshot so a caller cannot
 // display one generation and begin following a later generation's EOF.
 func (s *Snapshot) ReadTail(lines int, byteLimit int64) (string, error) {
 	return readTail(s, s.info.Size(), lines, byteLimit)
+}
+
+func (o *Ingestion) ReadTail(path string, lines int, byteLimit int64) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	return o.ReadFileTail(file, lines, byteLimit)
+}
+
+func (o *Ingestion) ReadFileTail(file *os.File, lines int, byteLimit int64) (string, error) {
+	if o == nil {
+		return ReadFile(file, lines, byteLimit)
+	}
+	snapshot, err := o.Snapshot(file)
+	if err != nil {
+		return "", err
+	}
+	return snapshot.ReadTail(lines, byteLimit)
 }
 
 func (s *Snapshot) Size() int64 { return s.info.Size() }
@@ -117,41 +463,11 @@ func (s *Snapshot) ReadAt(p []byte, offset int64) (int, error) {
 			return total, io.EOF
 		}
 		page := offset / ingestionPageBytes
-		key := pageKey{s.path, s.info.Size(), s.info.ModTime().UnixNano(), page, s.identity}
 		s.owner.mu.Lock()
-		if s.owner.pages == nil {
-			s.owner.pages = make(map[pageKey][]byte)
-		}
-		data, ok := s.batchPages[page]
-		if !ok {
-			data, ok = s.owner.pages[key]
-		}
-		if !ok {
-			current, err := s.file.Stat()
-			if err != nil || !os.SameFile(current, s.info) || current.Size() != s.info.Size() || current.ModTime() != s.info.ModTime() || snapshotIdentity(current) != s.identity {
-				s.owner.mu.Unlock()
-				return total, fmt.Errorf("transcript snapshot changed during read")
-			}
-			data = make([]byte, min(int64(ingestionPageBytes), s.info.Size()-page*ingestionPageBytes))
-			n, err := s.file.ReadAt(data, page*ingestionPageBytes)
-			s.owner.BytesRead += int64(n)
-			s.physicalBytes.Add(int64(n))
-			if err != nil && err != io.EOF {
-				s.owner.mu.Unlock()
-				return total, err
-			}
-			data = data[:n]
-			if len(s.owner.order) >= ingestionCachePages {
-				delete(s.owner.pages, s.owner.order[0])
-				s.owner.order = s.owner.order[1:]
-			}
-			s.owner.pages[key] = data
-			s.owner.order = append(s.owner.order, key)
-		} else {
-			s.owner.CacheHits++
-		}
-		if s.batchPages != nil {
-			s.batchPages[page] = data
+		data, err := s.page(page)
+		if err != nil {
+			s.owner.mu.Unlock()
+			return total, err
 		}
 		within := offset % ingestionPageBytes
 		if within >= int64(len(data)) {
@@ -165,6 +481,117 @@ func (s *Snapshot) ReadAt(p []byte, offset int64) (int, error) {
 		p = p[n:]
 	}
 	return total, nil
+}
+
+// page returns this snapshot's bytes of one page. Cached pages of a generation
+// hold its latest snapshot's bytes, and validateGeneration drops unfinished
+// bytes before a grown snapshot continues the generation. A cached page cut
+// short by an earlier, smaller snapshot is therefore extended by reading only
+// its missing suffix, and a longer page cached by a later snapshot is
+// truncated to this snapshot. Caller holds owner.mu.
+func (s *Snapshot) page(page int64) ([]byte, error) {
+	if data, ok := s.batchPages[page]; ok {
+		return data, nil
+	}
+	start := page * ingestionPageBytes
+	need := min(int64(ingestionPageBytes), s.info.Size()-start)
+	key := pageKey{s.fileID, s.generation, page}
+	data, _ := s.owner.pages.get(key)
+	if int64(len(data)) >= need {
+		s.owner.CacheHits++
+		data = data[:need]
+	} else {
+		if err := s.unchanged(); err != nil {
+			return nil, err
+		}
+		grown := make([]byte, need)
+		cached := copy(grown, data)
+		n, err := s.file.ReadAt(grown[cached:], start+int64(cached))
+		s.owner.BytesRead += int64(n)
+		s.physicalBytes.Add(int64(n))
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		// A change during the read could tear the page; never cache it.
+		if err := s.unchanged(); err != nil {
+			return nil, err
+		}
+		data = grown[:cached+n]
+		s.owner.pages.put(key, data, int64(len(data)), ingestionCachePages, ingestionCachePages*ingestionPageBytes)
+		// Track the latest snapshot's complete-record boundary. Each byte is
+		// scanned once, when it is read; a missed boundary only means a later
+		// append rereads more.
+		if known, ok := s.owner.files.get(s.fileID); ok && known.id == s.generation && known.snapshot == s.identity {
+			if newline := bytes.LastIndexByte(data[cached:], '\n'); newline >= 0 {
+				known.boundary = max(known.boundary, start+int64(cached+newline)+1)
+			}
+		}
+	}
+	if s.batchPages != nil {
+		s.batchPages[page] = data
+	}
+	return data, nil
+}
+
+func (s *Snapshot) unchanged() error {
+	current, err := s.file.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(current, s.info) || snapshotIdentity(current) != s.identity {
+		return fmt.Errorf("transcript snapshot changed during read")
+	}
+	return nil
+}
+
+// boundedCache is the one volatile LRU policy for pages, frames, unfinished
+// frames, decoded records, and file generations. Callers hold the owning lock
+// and pass the bounds with each insert.
+type boundedCache[K comparable, V any] struct {
+	entries map[K]*list.Element
+	recency list.List
+	bytes   int64
+}
+
+type boundedCacheEntry[K comparable, V any] struct {
+	key   K
+	value V
+	size  int64
+}
+
+func (c *boundedCache[K, V]) get(key K) (V, bool) {
+	element, ok := c.entries[key]
+	if !ok {
+		var zero V
+		return zero, false
+	}
+	c.recency.MoveToFront(element)
+	return element.Value.(*boundedCacheEntry[K, V]).value, true
+}
+
+// put replaces any entry for key, then evicts least recently used entries until
+// both bounds hold. A value larger than maxBytes is not retained.
+func (c *boundedCache[K, V]) put(key K, value V, size int64, maxEntries int, maxBytes int64) {
+	c.remove(key)
+	if size > maxBytes {
+		return
+	}
+	for c.recency.Len() > 0 && (c.recency.Len() >= maxEntries || c.bytes+size > maxBytes) {
+		c.remove(c.recency.Back().Value.(*boundedCacheEntry[K, V]).key)
+	}
+	if c.entries == nil {
+		c.entries = make(map[K]*list.Element)
+	}
+	c.entries[key] = c.recency.PushFront(&boundedCacheEntry[K, V]{key, value, size})
+	c.bytes += size
+}
+
+func (c *boundedCache[K, V]) remove(key K) {
+	if element, ok := c.entries[key]; ok {
+		c.bytes -= element.Value.(*boundedCacheEntry[K, V]).size
+		c.recency.Remove(element)
+		delete(c.entries, key)
+	}
 }
 
 // ReadRecord preserves the existing stats framing contract: only LF (or the
@@ -344,8 +771,9 @@ func snapshotIdentity(info os.FileInfo) string {
 // their contents. Consumer positions and commit admission remain independent.
 // Incomplete fragments are never advertised as complete records.
 type frameKey struct {
-	path, snapshot string
-	offset         int64
+	file       string
+	generation uint64
+	offset     int64
 }
 
 func (o *Ingestion) ReadFrame(ctx context.Context, snapshot *Snapshot, offset, limit int64) ([]byte, int64, bool, bool, error) {
@@ -360,11 +788,13 @@ func (o *Ingestion) ReadFrame(ctx context.Context, snapshot *Snapshot, offset, l
 	if err := ctx.Err(); err != nil {
 		return nil, 0, false, false, err
 	}
-	key := frameKey{snapshot.path, snapshot.identity, offset}
+	key := frameKey{snapshot.fileID, snapshot.generation, offset}
 	o.mu.Lock()
-	cached := o.frames[key]
+	cached, _ := o.frames.get(key)
 	o.mu.Unlock()
-	if cached != nil {
+	// A frame cached by a later snapshot of this generation may extend past
+	// this snapshot's end; such a frame does not exist in this snapshot.
+	if cached != nil && offset+int64(len(cached)) <= snapshot.info.Size() {
 		if int64(len(cached)) > limit {
 			return append([]byte(nil), cached[:limit]...), limit, false, true, nil
 		}
@@ -378,24 +808,12 @@ func (o *Ingestion) ReadFrame(ctx context.Context, snapshot *Snapshot, offset, l
 	if !complete && !cut && offset+n == snapshot.info.Size() && len(line) > 0 && line[len(line)-1] == '\r' {
 		complete = true
 	}
-	if complete {
+	// A CR-terminated frame is complete only at this snapshot's EOF; an
+	// appended LF would extend it, so only LF-terminated frames are shared
+	// across the snapshots of a generation.
+	if complete && line[len(line)-1] == '\n' && len(line) <= MaxRecordBytes {
 		o.mu.Lock()
-		if o.frames == nil {
-			o.frames = make(map[frameKey][]byte)
-		}
-		if o.frames[key] == nil {
-			for len(o.frameOrder) > 0 && (o.frameBytes+int64(len(line)) > 16<<20 || len(o.frameOrder) >= 4096) {
-				old := o.frameOrder[0]
-				o.frameOrder = o.frameOrder[1:]
-				o.frameBytes -= int64(len(o.frames[old]))
-				delete(o.frames, old)
-			}
-			if len(line) <= MaxRecordBytes {
-				o.frames[key] = append([]byte(nil), line...)
-				o.frameOrder = append(o.frameOrder, key)
-				o.frameBytes += int64(len(line))
-			}
-		}
+		o.frames.put(key, append([]byte(nil), line...), int64(len(line)), maxCachedTranscriptRecords, maxCachedTranscriptBytes)
 		o.mu.Unlock()
 	}
 	return line, n, complete, cut, nil
@@ -411,7 +829,7 @@ type partialFrame struct {
 
 func (o *Ingestion) resumeFrame(ctx context.Context, snapshot *Snapshot, offset, limit int64) ([]byte, int64, bool, bool, error) {
 	o.mu.Lock()
-	pending := o.partial[snapshot.path]
+	pending, _ := o.partial.get(snapshot.path)
 	o.mu.Unlock()
 	var prefix []byte
 	// Size and ctime change on both append and in-place rewrite. Boundary
@@ -431,23 +849,9 @@ func (o *Ingestion) resumeFrame(ctx context.Context, snapshot *Snapshot, offset,
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.partial == nil {
-		o.partial = make(map[string]partialFrame)
-	}
-	o.partialBytes -= int64(len(o.partial[snapshot.path].data))
-	delete(o.partial, snapshot.path)
+	o.partial.remove(snapshot.path)
 	if !complete && len(combined) > 0 {
-		if o.partialBytes+int64(len(combined)) > 16<<20 || len(o.partial) >= 256 {
-			for key, entry := range o.partial {
-				o.partialBytes -= int64(len(entry.data))
-				delete(o.partial, key)
-				if o.partialBytes+int64(len(combined)) <= 16<<20 && len(o.partial) < 256 {
-					break
-				}
-			}
-		}
-		o.partial[snapshot.path] = partialFrame{snapshot.identity, offset, combined}
-		o.partialBytes += int64(len(combined))
+		o.partial.put(snapshot.path, partialFrame{snapshot.identity, offset, combined}, int64(len(combined)), maxCachedPartialFrames, maxCachedTranscriptBytes)
 	}
 	return combined, n, complete, cut, nil
 }

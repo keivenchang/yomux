@@ -359,6 +359,18 @@ class TestElement {
     const tmuxWindowBar = testElementFromTmuxWindowBarHtml(this._innerHTML);
     if (tmuxWindowBar) this.appendChild(tmuxWindowBar);
     for (const node of testElementsFromFileEditorDialogHtml(this._innerHTML)) this.appendChild(node);
+    const diffViewport = this._innerHTML.match(/<div\b([^>]*\bgit-diff-viewport[^>]*)>([\s\S]*?)<\/div>\s*$/);
+    if (diffViewport) {
+      const viewport = new TestElement();
+      viewport.className = testHtmlAttributeValue(diffViewport[1], 'class');
+      populateTestDatasetFromHtmlAttrs(viewport, diffViewport[1]);
+      this.appendChild(viewport);
+      for (const [, tag, attrs] of diffViewport[2].matchAll(/<(header|div)\b([^>]*)>/g)) {
+        const child = new TestElement('', tag);
+        child.className = testHtmlAttributeValue(attrs, 'class');
+        viewport.appendChild(child);
+      }
+    }
     if (this._innerHTML.includes('class="toast-header"')) {
       for (const match of this._innerHTML.matchAll(/<(div|button)\b([^>]*)>/g)) {
         const node = new TestElement('', match[1]);
@@ -920,6 +932,7 @@ function loadYomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], proto
   };
   const context = {
     console: vmConsole,
+    Event,
     EventSource: TestEventSource,
     WheelEvent: TestWheelEvent,
     File: TestFile,
@@ -972,6 +985,7 @@ function loadYomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], proto
         documentListeners.set(type, listeners.filter(item => item !== listener));
       },
       activeElement: null,
+      hasFocus: () => true,
     },
     fetch() { return Promise.reject(new Error('fetch disabled in layout URL tests')); },
     getComputedStyle: () => ({direction: 'ltr'}),
@@ -1995,6 +2009,7 @@ globalThis.__layoutTestApi = {
   selfUpdateReloadStateForTest() {
     return {
       pending: selfUpdateReloadState.pending,
+      jobId: selfUpdateReloadState.jobId,
       target: selfUpdateReloadState.target,
       oldInstanceId: selfUpdateReloadState.oldInstanceId,
       attempts: selfUpdateReloadState.attempts,
@@ -2858,7 +2873,7 @@ globalThis.__layoutTestApi = {
   canCloseEmptyPane,
   closeEmptyPaneFromLayout,
   removeSessionFromLayout,
-  closePaneFrameItem,
+  closeLayoutTabItem,
   runtimeIntervalDelay,
   runtimeIntervalCatalogForTest: runtimeIntervalCatalogEntry,
   runtimeTimerClassCatalogForTest: () => runtimeTimerClassCatalog,

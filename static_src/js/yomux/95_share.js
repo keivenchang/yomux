@@ -3,8 +3,12 @@
 
 const shareHostConnections = new Map();
 let shareHostPollTimer = null;
+// Identifies this browser tab to the server when reporting the files it has open.
+let shareLocalEditorClient = '';
 let shareManagerRequest = 0;
 let shareManagerRendered = 0;
+const sharedEditorPresentationDelayMs = 250;
+const shareOwnerDigests = new WeakMap();
 
 const legacyShareGuestHues = new Map();
 const legacyShareGuestPalette = [35, 155, 275, 95, 335];
@@ -21,19 +25,73 @@ function shareParticipantHue(name, hue) {
   return Number.isInteger(hue) ? hue : legacyShareGuestHues.get(name) ?? 215;
 }
 
+const shareParticipantOffsets = {35: 180, 155: 60, 275: 240, 95: 120, 335: 300, 215: 30};
+
+function shareParticipantOffset({name, hue}) {
+  return shareParticipantOffsets[shareParticipantHue(name, hue)] ?? 180;
+}
+
+function shareParticipantStyle(peer) {
+  return peer.owner ? '--share-participant-color: var(--active-accent)' :
+    `--share-participant-offset: ${shareParticipantOffset(peer)}`;
+}
+
 function paintShareCaretLabel(label, caret, scroller) {
   const participantColor = getComputedStyle(caret).color;
   const preview = caret.closest('.file-editor-panel')?.querySelector('.file-editor-preview-pane-panel');
   const backgrounds = [scroller, caret.closest('.cm-editor'), preview].filter(Boolean)
     .map(surface => getComputedStyle(surface).backgroundColor);
-  const black = 'rgb(0, 0, 0)';
-  const white = 'rgb(255, 255, 255)';
-  const inkFor = fill => svgColorContrastRatio(black, fill) >= svgColorContrastRatio(white, fill) ? black : white;
-  const fill = backgrounds.includes(participantColor)
-    ? [inkFor(participantColor), black, white, 'rgb(118, 118, 118)'].find(color => !backgrounds.includes(color))
-    : participantColor;
+  for (let element = caret._htmlCaretElement; element; element = element.parentElement) {
+    const background = element.ownerDocument.defaultView.getComputedStyle(element).backgroundColor;
+    if (background !== 'rgba(0, 0, 0, 0)') {
+      backgrounds.push(background);
+      break;
+    }
+  }
+  let fill = participantColor;
+  if (backgrounds.includes(fill)) {
+    const opposite = getComputedStyle(label).color === 'rgb(0, 0, 0)' ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)';
+    fill = [opposite, 'rgb(118, 118, 118)'].find(color => !backgrounds.includes(color)) || opposite;
+  }
   label.style.backgroundColor = fill;
-  label.style.color = inkFor(fill);
+}
+
+function shareCaretOnLastVisualLine(caret, halfLine) {
+  if (caret._htmlCaretElement) {
+    const doc = caret._htmlCaretElement.ownerDocument;
+    const frame = doc.defaultView.frameElement;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, node =>
+      node.data.trim() && previewSourceAnchorIsRendered(node.parentElement) &&
+        doc.defaultView.getComputedStyle(node.parentElement).visibility === 'visible'
+        ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP);
+    const first = walker.nextNode();
+    walker.currentNode = doc.body;
+    const last = walker.lastChild();
+    const start = first && htmlSplitTextNodeCaretRect(first, 0);
+    const end = last && htmlSplitTextNodeCaretRect(last, last.length);
+    if (start && end && frame && Math.abs(start.top - end.top) >= halfLine) {
+      return Math.abs(caret.getBoundingClientRect().top - frame.getBoundingClientRect().top - end.top) < halfLine;
+    }
+    return false;
+  }
+  if (caret.classList.contains('share-rich-caret')) {
+    const view = caret.closest('.file-editor-panel')?._pmView;
+    if (!view) return false;
+    try {
+      const end = view.coordsAtPos(view.state.doc.content.size - 1);
+      const first = view.coordsAtPos(1);
+      return Math.abs(first.top - end.top) >= halfLine &&
+        Math.abs(view.coordsAtPos(view.posAtDOM(caret, 0)).top - end.top) < halfLine;
+    } catch (_) {
+      return false;
+    }
+  }
+  const view = window.YOmuxCodeMirror?.EditorView.findFromDOM(caret.closest('.cm-editor'));
+  const doc = view?.state.doc;
+  if (!doc || doc.lines < 2) return false;
+  const offset = view.posAtDOM(caret);
+  return doc.lineAt(offset).number === doc.lines &&
+    Math.abs(view.coordsAtPos(offset).top - view.coordsAtPos(doc.length).top) < halfLine;
 }
 
 function installShareCaretLabels() {
@@ -42,9 +100,11 @@ function installShareCaretLabels() {
   const labels = new Map();
   let scrollers = new Set();
   let frame = 0;
+  const markerSelector = '.share-remote-caret, .share-rich-caret';
+  const scrollerSelector = '.cm-scroller, .file-editor-preview-pane-panel';
   function render() {
     frame = 0;
-    const carets = new Set(editorGrid.querySelectorAll('.share-remote-caret'));
+    const carets = new Set(editorGrid.querySelectorAll(markerSelector));
     for (const [caret, label] of labels) {
       if (carets.has(caret)) continue;
       label.remove();
@@ -57,7 +117,7 @@ function installShareCaretLabels() {
     const occupied = [];
     for (const caret of carets) {
       const name = caret.dataset.shareCaretName || caret.title;
-      const scroller = caret.closest('.cm-scroller');
+      const scroller = caret.closest(scrollerSelector);
       if (!name || !scroller) continue;
       currentScrollers.add(scroller);
       const anchor = caret.getBoundingClientRect();
@@ -86,7 +146,7 @@ function installShareCaretLabels() {
       }
       label.hidden = false;
       if (caret.hasAttribute('data-share-legacy-color')) {
-        caret.style.setProperty('--share-participant-hue', shareParticipantHue(name));
+        caret.style.setProperty('--share-participant-offset', shareParticipantOffset({name}));
       }
       paintShareCaretLabel(label, caret, scroller);
       const rightRoom = bounds.right - anchor.left - gap;
@@ -95,14 +155,8 @@ function installShareCaretLabels() {
       const {width, height} = label.getBoundingClientRect();
       const left = width <= rightRoom ? anchor.left + gap : anchor.left - gap - width;
       const halfLine = (parseFloat(caretStyle.lineHeight) || fontSize) / 2;
-      const caretCenter = anchor.top - .4 * fontSize;
-      const view = window.YOmuxCodeMirror?.EditorView.findFromDOM(caret.closest('.cm-editor'));
-      const doc = view?.state.doc;
-      const offset = doc?.lines > 1 ? view.posAtDOM(caret) : null;
-      const end = offset !== null && doc.lineAt(offset).number === doc.lines
-        ? view.coordsAtPos(doc.length) : null;
-      const row = end && view.coordsAtPos(offset);
-      const lastVisualLine = row && Math.abs(row.top - end.top) < halfLine;
+      const caretCenter = anchor.height ? anchor.top + anchor.height / 2 : anchor.top - .4 * fontSize;
+      const lastVisualLine = shareCaretOnLastVisualLine(caret, halfLine);
       const roomBelow = caretCenter + halfLine + height / 2 <= Math.min(viewport.bottom, bounds.bottom);
       const top = caretCenter + (lastVisualLine || !roomBelow ? -halfLine : halfLine) - height / 2;
       const position = clampToViewport(left, top, width, height, {edgeGap});
@@ -124,9 +178,10 @@ function installShareCaretLabels() {
   refreshLegacyShareCaretColors = schedule;
   const resize = new ResizeObserver(schedule);
   const containsCaret = node => node.nodeType === Node.ELEMENT_NODE
-    && (node.matches('.share-remote-caret') || node.querySelector('.share-remote-caret'));
+    && (node.matches(markerSelector) || node.querySelector(markerSelector));
   const mutations = new MutationObserver(records => {
-    if (scrollers.size || records.some(record => Array.from(record.addedNodes).some(containsCaret))) schedule();
+    if (records.some(record => scrollers.has(record.target.closest?.(scrollerSelector)) ||
+      Array.from(record.addedNodes).some(containsCaret) || Array.from(record.removedNodes).some(containsCaret))) schedule();
   });
   mutations.observe(editorGrid, {childList: true, subtree: true});
   mutations.observe(document.body, {attributes: true, attributeFilter: ['class', 'style']});
@@ -136,34 +191,132 @@ function installShareCaretLabels() {
   schedule();
 }
 
-function shareHostFileState(path) {
+function shareHostFileState(path, synchronizedPanel = null) {
   const state = fileState.get(path);
   if (!state) return;
   const pending = fileEditorPanelsForPath(path).filter(panel => panel._shareConnection?.pending() > 0);
   const owner = pending.includes(state.contentOwnerPanel) ? state.contentOwnerPanel : pending[0];
-  if (owner) state.content = owner._cmView.state.doc.toString();
+  if (owner && owner !== synchronizedPanel) state.content = owner._cmView.state.doc.toString();
   state.dirty = pending.length > 0 || state.content !== state.original;
 }
 
 function shareHostRenderPreview(panel, path) {
   const text = fileEditorPanelState(panel).content;
-  renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, text);
+  const pane = fileEditorPanelPreviewPane(panel);
+  if (panel._pmView) {
+    syncProseMirrorPanelSource(panel, path, fileEditorPanelState(panel));
+  } else if (pane && !scheduleCodeMirrorSplitPreview(panel, path)) {
+    const draft = panel._shareConnection?.pending() ? panel._cmView.state.doc.toString() : text;
+    renderFileEditorPreviewSurface(panel, pane, path, draft, {context: fileEditorPanelMode(panel)});
+  }
   renderLinkedFilePreviewPanels(panel, path, text);
+}
+
+function applyShareEditorSaveState(state, body, text) {
+  state.content = text;
+  state._shareDocumentSession = body.session;
+  state._shareDocumentVersion = body.version;
+  state._sharePaused = body.paused;
+  if (body.saved && state.original !== text) {
+    state.original = text;
+    state.lastSaveStatus = {content: text, key: 'editor.saved', params: {size: formatFileSize(new Blob([text]).size)}};
+  }
 }
 
 function shareHostLocalChanged(panel, path) {
   const state = fileEditorPanelState(panel);
   if (!state || !panel._cmView) return;
+  const previous = state.content;
   state.content = panel._cmView.state.doc.toString();
   state.contentOwnerPanel = panel;
-  shareHostFileState(path);
+  shareHostFileState(path, panel);
+  scheduleSharedEditorPresentation(panel, path, state, previous !== state.content, false);
+}
+
+function markSharedEditorPending(panel, state) {
+  if (!panel._shareConnection?.pending()) return;
+  state.contentOwnerPanel = panel;
+  if (state.dirty) return;
+  state.dirty = true;
+  const save = panel.querySelector('.file-editor-save-panel');
+  if (save) save.disabled = false;
+}
+
+function scheduleSharedEditorPresentation(panel, path, state, preview = false, restart = true) {
+  const previewQueued = panel._sharePreviewPending;
+  if (preview) panel._sharePreviewPending = true;
+  if (panel._sharePresentationTimer != null && (!restart || (previewQueued && fileEditorPanelPreviewPane(panel)))) return;
+  clearTimeout(panel._sharePresentationTimer);
+  const view = panel._cmView;
+  const cooldown = panel._sharePreviewFinishedAt + sharedEditorPresentationDelayMs - performance.now();
+  const delay = panel._sharePreviewPending && cooldown > 0 ? cooldown : sharedEditorPresentationDelayMs;
+  panel._sharePresentationTimer = setTimeout(() => {
+    panel._sharePresentationTimer = null;
+    const renderPreview = panel._sharePreviewPending;
+    if (panel._cmView !== view || panel.isConnected === false || !state._shareActive ||
+        fileEditorPanelState(panel) !== state) {
+      panel._sharePreviewPending = false;
+      return;
+    }
+    if (view?.composing) {
+      scheduleSharedEditorPresentation(panel, path, state);
+      return;
+    }
+    panel._sharePreviewPending = false;
+    if (renderPreview) {
+      panel._cmSyncing = true;
+      try {
+        shareHostRenderPreview(panel, path);
+      } finally {
+        panel._sharePreviewFinishedAt = performance.now();
+        panel._cmSyncing = false;
+      }
+    }
+    updateSharedEditorStatus(panel, path, state);
+    captureCodeMirrorPanelViewState(panel, path);
+  }, delay);
+}
+
+function updateSharedEditorStatus(panel, path, state) {
   updateFileEditorPanelChrome(panel, path);
-  shareHostRenderPreview(panel, path);
+  const status = openFileStatus(state);
+  setFileEditorPanelStatus(panel, status.message, status.level);
+}
+
+function reflectSharedEditorState(panel, path, state, body, text) {
+  const previous = state.content;
+  const wasDirty = state.dirty;
+  const paused = state._sharePaused;
+  const pdfChanged = body.pdf_revision !== undefined &&
+    (state._sharePDFRevision !== body.pdf_revision || state._sharePDFStale !== body.pdf_stale);
+  if (body.pdf_revision !== undefined) {
+    state._sharePDFRevision = body.pdf_revision;
+    state._sharePDFStale = body.pdf_stale;
+  }
+  applyShareEditorSaveState(state, body, text);
+  shareHostFileState(path, panel);
+  const preview = previous !== state.content || pdfChanged || wasDirty !== state.dirty;
+  if (preview || wasDirty !== state.dirty || paused !== state._sharePaused) {
+    scheduleSharedEditorPresentation(panel, path, state, preview, false);
+  }
 }
 
 function disconnectShareEditor(panel) {
+  if (panel._shareConnection) traceHtmlViewEdit(panel, 'live sync left', {pending: panel._shareConnection.pending()});
+  if (panel._shareConnection?.pending()) shareHostLocalChanged(panel, panel._cmPath);
+  clearTimeout(panel._sharePresentationTimer);
+  panel._sharePresentationTimer = null;
+  panel._sharePreviewPending = false;
+  delete panel._sharePreviewFinishedAt;
   panel._shareConnection?.stop();
   panel._shareConnection = null;
+  delete panel._htmlSharePeers;
+  delete panel._htmlShareSelection;
+  scheduleSplitEditorCaret(panel);
+  if (panel._pmView) {
+    paintSharedProseMirrorPresence(panel, []);
+    refreshSharedProseMirrorAccess(panel);
+  }
   shareHostConnections.delete(panel);
 }
 
@@ -174,11 +327,94 @@ function disconnectShareEditorsForPath(path) {
 }
 
 function shareHostEndpoint(path) {
-  return `/api/share/document?path=${encodeURIComponent(path)}`;
+  // The page identity makes this browser tab its own participant, so other tabs see its caret.
+  shareLocalEditorClient ||= window.YOmuxShare.randomID();
+  return `/api/share/document?path=${encodeURIComponent(path)}&page=${encodeURIComponent(shareLocalEditorClient)}`;
+}
+
+function registerShareEditorConnection(panel, path, connection) {
+  traceHtmlViewEdit(panel, 'live sync joined', {path});
+  panel._shareConnection = connection;
+  shareHostConnections.set(panel, {path, connection});
+  if (panel._pmView) refreshSharedProseMirrorAccess(panel);
+  if (previewKindForPath(path) === 'html') syncHtmlViewEditStatus(fileEditorPanelPreviewPane(panel));
+}
+
+function rememberSharedHtmlSelection(panel, frame) {
+  const guide = frame._htmlSplitViewGuide?.();
+  if (guide) {
+    panel._shareCaretSurface = 'view';
+    panel._htmlShareSelection = {doc: panel._cmView.state.doc, anchor: guide.head === guide.from ? guide.to : guide.from, head: guide.head};
+  }
+  return guide;
+}
+
+function sharedHtmlSelection(panel) {
+  const view = panel._cmView;
+  if (!view || view.hasFocus) return null;
+  const frame = htmlEditorPreviewFrame(panel);
+  const guide = frame && rememberSharedHtmlSelection(panel, frame);
+  if (panel._shareCaretSurface !== 'view' || !['split', 'preview'].includes(fileEditorPanelMode(panel))) return null;
+  const saved = panel._htmlShareSelection;
+  const {anchor, head} = saved?.doc === view.state.doc ? saved : view.state.selection.main;
+  return {anchor, head, surface: 'view', focused: Boolean(guide)};
+}
+
+function sharedHtmlSourcePresence(peer) {
+  return {...peer, follower: peer.surface === 'view', showSelection: true};
+}
+
+function updateSharedHtmlPresence(panel, peers) {
+  panel._htmlSharePeers = {doc: panel._cmView?.state.doc, peers: peers.map(peer => ({
+    ...peer, follower: peer.surface !== 'view',
+  }))};
+  scheduleSplitEditorCaret(panel);
+}
+
+function mapSharedHtmlPresence(panel, transaction) {
+  const cached = panel._htmlSharePeers;
+  if (!panel._shareConnection || !cached || cached.doc !== transaction.startState.doc) return;
+  cached.doc = transaction.newDoc;
+  cached.peers = cached.peers.map(peer => ({
+    ...peer, anchor: transaction.changes.mapPos(peer.anchor), head: transaction.changes.mapPos(peer.head),
+  }));
+}
+
+function shareCollaborationPresence(panel) {
+  const richVisible = () => panel._pmView?.dom?.isConnected && !panel._pmError;
+  const html = previewKindForPath(panel._cmPath) === 'html';
+  const projectCaret = (peer, surface) => ({
+    ...peer, follower: (peer.surface || 'text') !== surface,
+  });
+  return {
+    replacement: codeMirrorTextReplacement,
+    inputSurface: panel,
+    previewInputSurface: html ? () => htmlEditorPreviewFrame(panel)?._htmlViewEditInputDocument : null,
+    selection() {
+      if (html) return sharedHtmlSelection(panel);
+      const rich = panel._pmView;
+      if (richVisible() && (rich.hasFocus() || fileEditorPanelMode(panel) === 'preview' ||
+        (!panel._cmView?.hasFocus && panel._shareCaretSurface === 'view'))) {
+        return sharedProseMirrorSelection(panel);
+      }
+      return null;
+    },
+    sourcePresence(peer) {
+      if (html) return sharedHtmlSourcePresence(peer);
+      return prosemirrorSupportedSource(fileEditorPanelPath(panel), fileEditorPanelState(panel))
+        ? projectCaret(peer, 'text') : peer;
+    },
+    onPresence(peers) {
+      if (html) updateSharedHtmlPresence(panel, peers);
+      if (panel._pmView) paintSharedProseMirrorPresence(panel, richVisible() ? peers.map(peer => projectCaret(peer, 'view')) : []);
+    },
+  };
 }
 
 async function shareAttachHostPanel(panel, path) {
-  if (typeof bootstrap !== 'undefined' && bootstrap.guestWorkspace) return shareAttachGuestPanel(panel, path);
+  if (typeof bootstrap !== 'undefined' && bootstrap.guestWorkspace) {
+    return shareAttachGuestPanel(panel, path);
+  }
   if (!window.YOmuxShare || !panel?._cmView || panel._shareConnection || panel._shareConnecting) return;
   const state = fileEditorPanelState(panel);
   if (state?.historical || !state?._shareActive) return;
@@ -187,38 +423,92 @@ async function shareAttachHostPanel(panel, path) {
     const view = panel._cmView, generation = state._shareGeneration;
     const alive = () => panel._cmView === view;
     const current = () => alive() && state._shareActive && state._shareGeneration === generation;
-    const connection = await window.YOmuxShare.connect(view, shareHostEndpoint(path), {
-      alive, current,
-      onState(body, text) {
-        if (!current()) return;
-        state.content = text;
-        if (body.saved) { state.original = text; state.dirty = false; }
-        shareHostFileState(path);
-        state._sharePaused = body.paused;
-        panel._cmSyncing = true;
-        try { shareHostRenderPreview(panel,path); } finally { panel._cmSyncing = false; }
-        updateFileEditorPanelChrome(panel, path);
-        setFileEditorPanelStatus(panel, body.paused ? `Sharing: saving paused (${body.paused}). Resolve in YO!share.` : 'Shared editing', body.paused ? 'error' : 'ok');
-      },
-      onError(error) { if (current()) setFileEditorPanelStatus(panel, error.message, 'error'); },
-      onEnd() { if (current()) setFileEditorPanelStatus(panel, 'Sharing ended. Pending local edits remain in this editor.', 'warn'); },
-    });
+    // A draft based on the saved text joins and replays its edits instead of waiting for a save.
+    const draftBase = state.dirty ? state.original.replace(/\r\n?/g, '\n') : undefined;
+    // A refused join, such as a draft that no longer matches the saved text, leaves this editor
+    // working and unshared. Callers open editors and poll other files, so it must not throw to them.
+    let connection;
+    try {
+      connection = await window.YOmuxShare.connect(view, shareHostEndpoint(path), {
+        alive, current, draftBase, ...shareCollaborationPresence(panel),
+        onState(body, text) {
+          if (current()) reflectSharedEditorState(panel, path, state, body, text);
+        },
+        onError(error) { if (current()) setFileEditorPanelStatus(panel, error.message, 'error'); },
+        onEnd() {
+          if (!current()) return;
+          disconnectShareEditor(panel);
+          // Live sync between this owner's own tabs ends quietly when the other tab closes.
+          if (!state._shareLocalOnly) setFileEditorPanelStatus(panel, 'Sharing ended. Pending local edits remain in this editor.', 'warn');
+        },
+      });
+    } catch (error) {
+      if (current()) setFileEditorPanelStatus(panel, error.message, 'warn');
+      return;
+    }
     if (!current()) connection?.stop();
-    else { panel._shareConnection = connection; shareHostConnections.set(panel, {path, connection}); }
+    else if (connection) registerShareEditorConnection(panel, path, connection);
   } finally { panel._shareConnecting = false; }
+}
+
+async function publishShareOwnerCarets(body) {
+  if (!crypto.subtle) return;
+  const updates = [];
+  const views = new Map();
+  for (const grant of body.shares) for (const resource of grant.resources) {
+    if (resource.kind !== 'file' || resource.writable || !resource.can_write) continue;
+    const path = body.resource_paths[resource.id];
+    if (!path || fileState.get(path)?.dirty) continue;
+    if (!views.has(path)) {
+      const visible = fileEditorPanelsForPath(path).filter(panel => panel._cmView &&
+        (panel._cmView.dom.getClientRects().length || htmlEditorPreviewFrame(panel)?.getClientRects().length))
+        .map(panel => {
+          const rich = sharedHtmlSelection(panel);
+          const view = panel._cmView;
+          return {doc: view.state.doc, selection: rich || view.state.selection.main, focused: rich?.focused || view.hasFocus};
+        });
+      views.set(path, visible.find(view => view.focused) || visible[0]);
+    }
+    const view = views.get(path);
+    if (!view) continue;
+    const {doc, selection} = view;
+    let digest = shareOwnerDigests.get(doc);
+    if (!digest) {
+      digest = crypto.subtle.digest('SHA-256', new TextEncoder().encode(doc.toString())).then(
+        hash => Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join(''),
+      );
+      shareOwnerDigests.set(doc, digest);
+    }
+    updates.push({grant: grant.id, resource: resource.id, digest, anchor: selection.anchor, head: selection.head, surface: selection.surface});
+  }
+  if (updates.length) {
+    await window.YOmuxShare.post('/api/share/presence', await Promise.all(updates.slice(0, 64).map(async update => ({
+      ...update, digest: await update.digest,
+    }))));
+  }
 }
 
 async function shareRefreshHostEditors() {
   if (typeof bootstrap !== 'undefined' && bootstrap.guestWorkspace) return;
   if (readOnlyMode || !window.YOmuxShare) return;
   try {
+    // A failed open-file report only delays live sync. Share state below must still refresh.
+    await reportShareLocalEditing().catch(error => recordJsDebugEvent('editor', {
+      category: 'editor', ok: false, message: `Live sync report failed: ${error.message}`,
+    }));
     const version = ++shareManagerRequest;
     const body = await window.YOmuxShare.request('/api/share');
     if (version < shareManagerRendered) return;
     updateShareManager(body, version);
-    const paths = new Set(body.documents);
+    const paths = new Set(body.documents), localPaths = new Set(body.local_documents);
     for (const [path, state] of fileState) {
       const active = paths.has(path);
+      state._shareLocalOnly = localPaths.has(path);
+      const pdf = body.tex_pdfs?.[path];
+      if (pdf?.revision !== state._shareTeX?.revision || pdf?.stale !== state._shareTeX?.stale) {
+        state._shareTeX = pdf;
+        renderOpenFilePath(path);
+      }
       const generation = body.document_generations[path];
       if (active && state._shareGeneration && state._shareGeneration !== generation) {
         shareHostFileState(path);
@@ -228,18 +518,9 @@ async function shareRefreshHostEditors() {
       state._shareGeneration=generation;
       if (active && !state._shareActive) {
         syncOpenFileContentFromPanels(path, state.contentOwnerPanel);
-        if (state.dirty) {
-          setFileEditorPanelStatus(state.contentOwnerPanel, 'Save the host draft before joining shared editing.', 'error');
-          continue;
-        }
         state._shareActive = true;
         clearFileAutosaveTimer(path);
-        for (const panel of fileEditorPanelsForPath(path)) {
-          destroyProseMirrorPanel(panel);
-          delete panel._pmRequired;
-          const item = fileEditorPanelItem(panel);
-          setFileEditorViewMode(path, 'edit', item);
-        }
+        renderOpenFilePath(path);
       } else if (!active && state._shareActive) {
         state._shareActive = false;
         disconnectShareEditorsForPath(path);
@@ -248,8 +529,27 @@ async function shareRefreshHostEditors() {
       }
       if (active) for (const panel of fileEditorPanelsForPath(path)) await shareAttachHostPanel(panel, path);
     }
+    await publishShareOwnerCarets(body);
   } catch(error) { console.error('YO!share host synchronization failed', error); }
   finally { shareHostPollTimer = setTimeout(shareRefreshHostEditors, 1501); }
+}
+
+// Tell the server which writable files this tab has open. Two tabs with the same file
+// collaborate through one server document, so edits appear in both without a disk reload.
+async function reportShareLocalEditing() {
+  shareLocalEditorClient ||= window.YOmuxShare.randomID();
+  const files = [];
+  for (const [path, state] of fileState) {
+    if (files.length >= 64) break;
+    if (state.kind !== 'text' || state.historical || state._shareUnavailable || !fileEditorStateWritable(state)) continue;
+    // Diff mode has no live editor to collaborate through.
+    if (!fileEditorPanelsForPath(path).some(panel => panel._cmView && fileEditorPanelMode(panel) !== 'diff')) continue;
+    files.push({path, clean: !state.dirty});
+  }
+  const result = await window.YOmuxShare.post('/api/share/editing', {client: shareLocalEditorClient, files});
+  for (const [path, code] of Object.entries(result.failures || {})) {
+    recordJsDebugEvent('editor', {category: 'editor', ok: false, message: `Live sync unavailable for ${path}: ${code}`});
+  }
 }
 
 function shareHostSavedContent(path) {
@@ -264,11 +564,19 @@ function shareManagerButton(label, onClick) {
   return makeButton({label, ariaLabel: label, onClick, className: 'file-editor-dialog-action'});
 }
 
+async function copyShareInvitation(link, status, pendingCopy) {
+  try {
+    if (pendingCopy && await pendingCopy) showCopyFeedback();
+    else await copyTextWithFeedback(link, {rethrow: true});
+  } catch (error) {
+    status.textContent = t('common.copyFailed', {error: error.message});
+  }
+}
+
 function shareInviteCopyButton(link, guest, status) {
-  const copy = shareManagerButton(`Copy URL to share w/ ${guest}`, async () => {
-    try { await navigator.clipboard.writeText(link); } catch (error) { status.textContent = error.message; }
-  });
-  copy.classList.add('file-editor-primary-action');
+  const copy = shareManagerButton(`Copy URL to share w/ ${guest}`, () => copyShareInvitation(link, status));
+  copy.classList.add('share-invite-copy');
+  copy.insertAdjacentHTML('afterbegin', fileContextMenuIcon('copy'));
   return copy;
 }
 
@@ -346,14 +654,15 @@ function sharePickerCandidates(grant = null, paths = {}) {
     if (!candidates.has(key)) candidates.set(key, {key, resource, label, canWrite, selected});
   }
   for (const resource of grant?.resources || []) {
-    add({id: resource.id, kind: resource.kind, path: paths[resource.id], pane: resource.pane,
-      writable: resource.writable}, resource.label, resource.can_write, true);
+    const path = paths[resource.id];
+    add({id: resource.id, kind: resource.kind, path, pane: resource.pane,
+      writable: resource.writable}, path || resource.label, resource.can_write, true);
   }
   for (const item of layoutItems) {
     const path = fileItemPath(item);
     if (path) {
       const state = fileEditorStateForItem(path, item);
-      if (state?.historical || !['text', 'image', 'pdf', 'audio', 'video'].includes(state?.kind)) continue;
+      if (state?.externalMissing || state?.loading || state?.historical || !['text', 'image', 'pdf', 'audio', 'video'].includes(state?.kind)) continue;
       add({kind: 'file', path, writable: false}, path, state.kind === 'text' && fileEditorStateWritable(state), !grant);
     } else if (isTmuxSession(item)) {
       const target = transcriptMetadataState.payload?.sessions?.[item]?.selected_pane;
@@ -366,25 +675,92 @@ function sharePickerCandidates(grant = null, paths = {}) {
   return [...candidates.values()].sort((a, b) => group(a) - group(b) || a.label.localeCompare(b.label));
 }
 
-function shareTabPicker(grant = null, paths = {}) {
+async function shareMarkdownImagePaths(path) {
+  const {content} = await fetchFileReadPayload(path);
+  const fragment = sanitizeMarkdownPreviewHtml(markdownPreviewHtml(content));
+  const prefix = dirnameOf(path).replace(/\/$/, '') + '/';
+  const paths = new Set();
+  for (const image of fragment.querySelectorAll('img[src]')) {
+    const source = image.getAttribute('src');
+    if (safeDecodeURIComponent(splitMarkdownResourceUrl(source).path).startsWith('/')) continue;
+    const target = markdownPreviewImageTarget(source, path);
+    if (target?.path.startsWith(prefix) && previewKindForPath(target.path) === 'image') {
+      paths.add(target.path.slice(prefix.length));
+    }
+  }
+  return [...paths].slice(0, 64);
+}
+
+let shareReadControlId = 0;
+
+function shareTabPicker({grant = null, paths = {}, onChange = null, guestField = null} = {}) {
   const root = document.createElement('div'); root.className = 'share-admin-picker';
-  const {table, rows} = shareTable([t('common.tabsLabel'), 'W']);
+  const {table, rows} = shareTable(['R', 'W', '']);
+  table.tHead.rows[0].cells[0].setAttribute('aria-label', t('sharing.readable'));
+  table.tHead.rows[0].cells[1].setAttribute('aria-label', t('sharing.writable'));
   table.classList.add('share-permission-table'); root.appendChild(table);
   let choices = [];
+  let confirmingTerminal = false;
+  let terminalWriteConfirmed = grant?.terminal_write_confirmed === true;
+  function updateDescription({resource, write, access}) {
+    const guest = guestField?.value.trim() || grant?.guest;
+    access.textContent = write.checked && guest
+      ? ' ' + t(resource.kind === 'terminal' ? 'sharing.executableBy' : 'sharing.writableTo', {guest})
+      : '';
+  }
   function addChoice(choice, previous) {
     const selection = document.createElement('label');
+    selection.className = 'share-permission-description';
     const selected = document.createElement('input'); selected.type = 'checkbox';
+    selected.id = 'share-read-' + ++shareReadControlId;
+    selection.htmlFor = selected.id;
     selected.checked = previous?.selected.checked ?? choice.selected;
     selected.setAttribute('aria-label', t('sharing.resource', {label: choice.label}));
-    const name = document.createElement('span'); name.textContent = choice.label; selection.append(selected, name);
+    const name = document.createElement('span'); name.textContent = choice.label;
+    const access = document.createElement('span');
+    selection.append(name, access);
     const write = document.createElement('input'); write.type = 'checkbox';
-    write.checked = choice.canWrite && (previous?.write.checked ?? choice.resource.writable);
-    write.setAttribute('aria-label', t('sharing.permission', {label: 'W: ' + choice.label}));
+    write.checked = selected.checked && choice.canWrite && (previous?.write.checked ?? choice.resource.writable);
+    write.disabled = !choice.canWrite;
+    write.setAttribute('aria-label', t('sharing.permission', {label: `${t('sharing.writable')}: ${choice.label}`}));
     write.dataset.shareResource = choice.label;
-    const row = shareTableRow(rows, [selection, write]);
-    write.disabled = !choice.canWrite || !selected.checked;
-    selected.addEventListener('change', () => { write.disabled = !choice.canWrite || !selected.checked; });
-    return {...choice, selected, write, row};
+    const row = shareTableRow(rows, [selected, write, selection]);
+    const entry = {...choice, selected, write, row, access};
+    updateDescription(entry);
+    selected.addEventListener('change', () => {
+      if (!selected.checked) write.checked = false;
+      updateDescription(entry);
+      onChange?.();
+    });
+    write.addEventListener('change', async () => {
+      if (choice.resource.kind === 'terminal' && write.checked && !terminalWriteConfirmed) {
+        write.checked = false;
+        if (confirmingTerminal) return;
+        confirmingTerminal = true;
+        try {
+          const action = await showFileEditorDecisionDialog({
+            className: 'share-terminal-write-confirmation',
+            title: t('sharing.confirmTerminalTitle'),
+            message: t('sharing.confirmTerminalMessage'),
+            messageVariant: 'danger',
+            actions: [
+              {id: 'cancel', label: t('common.cancel')},
+              {id: 'allow', label: t('sharing.confirmTerminalAllow'), variant: 'danger'},
+            ],
+          });
+          if (action !== 'allow' || !write.isConnected || write.disabled ||
+              !choices.some(entry => entry.write === write)) return;
+          terminalWriteConfirmed = true;
+          write.checked = true;
+        } finally {
+          confirmingTerminal = false;
+        }
+      }
+      if (write.checked) selected.checked = true;
+      updateDescription(entry);
+      onChange?.();
+    });
+    return entry;
   }
   function refresh() {
     const previous = new Map(choices.map(choice => [choice.key, choice]));
@@ -401,14 +777,18 @@ function shareTabPicker(grant = null, paths = {}) {
     });
   }
   refresh();
-  return {root, refresh, get choices() { return choices; }, resources() {
-    return choices.filter(choice => choice.selected.checked).map(choice => {
+  guestField?.addEventListener('input', () => choices.forEach(updateDescription));
+  return {root, refresh, get choices() { return choices; }, get terminalWriteConfirmed() { return terminalWriteConfirmed; }, async resources() {
+    return Promise.all(choices.filter(choice => choice.selected.checked).map(async choice => {
       const resource = {...choice.resource, writable: choice.canWrite && choice.write.checked};
       if (resource.kind === 'file' && resource.writable && (!resource.id || !choice.resource.writable)) {
         resource.saved_content = shareHostSavedContent(resource.path);
       }
+      if (!resource.id && resource.kind === 'file' && previewKindForPath(resource.path) === 'markdown') {
+        resource.image_paths = await shareMarkdownImagePaths(resource.path);
+      }
       return resource;
-    });
+    }));
   }};
 }
 
@@ -437,6 +817,13 @@ function publishShareManagerGrant(state, grant) {
 }
 
 function renderShareManager(state) {
+  const visible = itemIsActivePaneTab(shareItemId);
+  if (visible && !state.wasVisible) {
+    const paths = visibleFileEditorWatchFiles();
+    if (paths.length) void refreshOpenFilesIfChanged({paths, fresh: true})
+      .catch(error => console.warn('YO!share file check failed', error));
+  }
+  state.wasVisible = visible;
   if (state.create.open) state.createPicker?.refresh();
   const active = new Set(state.grants.map(grant => grant.id));
   state.root.querySelector('.share-manager-active').hidden = active.size === 0;
@@ -451,11 +838,15 @@ function renderShareManager(state) {
       const indicator = document.createElement('span');
       indicator.className = 'share-connected-indicator';
       indicator.innerHTML = agentWindowStatusDotHtmlForTone(STATE_KEY.working, {surface: 'subwindow', pulse: true});
+      const connected = document.createElement('span'); connected.dataset.shareConnectedLabel = '';
+      indicator.appendChild(connected);
       const countdown = document.createElement('span'); countdown.dataset.expiry = '';
       const stop = shareStopButton(state, grant.id); stop.classList.add('share-summary-stop');
       summary.append(name, count, indicator, countdown, stop); row.appendChild(summary);
       row.addEventListener('toggle', () => {
-        if (row.open && !state.links.has(grant.id)) void refreshShareManager();
+        if (!row.open) return;
+        row.querySelector('.share-manager-detail')._refreshSharePicker();
+        if (!state.links.has(grant.id)) void refreshShareManager();
       });
       const detail = document.createElement('section'); detail.className = 'share-manager-detail'; row.appendChild(detail);
       state.rows.set(grant.id, row); state.list.appendChild(row);
@@ -465,6 +856,7 @@ function renderShareManager(state) {
     const connectedPeers = new Set(peers.filter(peer => Date.now() - Date.parse(peer.last_seen) <= 5000));
     row.querySelector('[data-share-count]').textContent = t('sharing.guestCount', {claimed: connectedPeers.size, limit: grant.limit});
     row.querySelector('.share-connected-indicator').hidden = connectedPeers.size === 0;
+    row.querySelector('[data-share-connected-label]').textContent = t('sharing.connected');
     row.querySelector('[data-expiry]').textContent = shareTimeLeft(grant.expires);
     const summary = row.querySelector('summary'), link = state.links.get(grant.id);
     const previousInvite = summary.querySelector('.share-invite');
@@ -475,7 +867,7 @@ function renderShareManager(state) {
         invite.dataset.url = link;
         const input = document.createElement('input'); input.type = 'url'; input.readOnly = true; input.value = link;
         input.setAttribute('aria-label', t('sharing.url'));
-        invite.append(shareInviteCopyButton(link, grant.guest, state.status), input);
+        invite.append(input, shareInviteCopyButton(link, grant.guest, state.status));
         summary.appendChild(invite);
       }
     }
@@ -485,6 +877,8 @@ function renderShareManager(state) {
       const focused = detail.contains(document.activeElement) ? document.activeElement.getAttribute('aria-label') : null;
       detail.dataset.key = detailKey; detail.replaceChildren(); buildShareManagerDetails(state, grant, detail);
       if (focused) [...detail.querySelectorAll('[aria-label]')].find(node => node.getAttribute('aria-label') === focused)?.focus();
+    } else if (row.open) {
+      detail._refreshSharePicker();
     }
     detail.querySelector('input[name=limit]').min = String(Math.max(1, grant.claimed));
     const guests = detail.querySelector('[data-share-peers]');
@@ -519,32 +913,32 @@ function buildShareManagerDetails(state, grant, detail) {
   const api = window.YOmuxShare, actions = document.createElement('div'); actions.className = 'share-manager-actions';
   const stop = shareStopButton(state, grant.id);
   const guests = document.createElement('div'); guests.dataset.sharePeers = '';
-  const picker = shareTabPicker(grant, state.paths);
-  const applyPicker = async () => {
+  const picker = shareTabPicker({grant, paths: state.paths, onChange: applyPicker});
+  let applying = false;
+  detail._refreshSharePicker = () => { if (!applying) picker.refresh(); };
+  async function applyPicker() {
+    if (applying) return;
+    applying = true;
     const controls = [...detail.querySelectorAll('input:not(:disabled)')];
     try {
-      const resources = picker.resources();
-      const newlyWritableTerminal = resources.some(resource => resource.kind === 'terminal' && resource.writable &&
-        !grant.resources.some(previous => previous.id === resource.id && previous.writable));
       controls.forEach(input => { input.disabled = true; });
+      const resources = await picker.resources();
       await api.request('/api/share?id=' + encodeURIComponent(grant.id), {method: 'PATCH',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify({revision: grant.revision, resources,
-          terminal_write_confirmed: newlyWritableTerminal})});
-      state.status.textContent = ''; await refreshShareManager();
+          terminal_write_confirmed: picker.terminalWriteConfirmed})});
+      state.status.textContent = '';
+      void publishNewSharedTeX(state, resources);
+      await refreshShareManager();
     } catch (error) {
       state.status.textContent = error.message;
       detail.dataset.key = '';
       renderShareManager(state);
       await refreshShareManager();
     }
-    finally { controls.forEach(input => { if (input.isConnected) input.disabled = false; }); }
-  };
-  for (const choice of picker.choices) {
-    choice.selected.addEventListener('change', () => {
-      choice.write.disabled = !choice.selected.checked || !choice.canWrite;
-      void applyPicker();
-    });
-    choice.write.addEventListener('change', applyPicker);
+    finally {
+      applying = false;
+      controls.forEach(input => { if (input.isConnected) input.disabled = false; });
+    }
   }
   const maxMinutes = bootstrap.shareMaxMinutes;
   const expiryMinutes = Math.max(1, Math.min(maxMinutes, Math.ceil((Date.parse(grant.expires) - Date.now()) / 60000)));
@@ -581,7 +975,9 @@ function buildShareManagerDetails(state, grant, detail) {
   topActions.append(...settings, stop, settingsStatus);
   for (const resource of grant.resources) {
     const path = state.paths[resource.id];
-    if (path && /\.(tex|ltx)$/i.test(path)) actions.appendChild(shareManagerButton('Publish PDF: ' + resource.label, () => publishSharedTeX(state, path)));
+    if (path && previewKindForPath(path) === 'tex') {
+      actions.appendChild(shareManagerButton('Publish PDF: ' + resource.label, () => publishSharedTeX(state, [path])));
+    }
   }
   detail.append(topActions, guests, picker.root, actions);
 }
@@ -661,7 +1057,7 @@ function shareSidebarChat(container, {id, label, endpoint, keepOpenWhileActive =
   function update(incoming) {
     if (!live || !incoming) return;
     status.textContent = '';
-    const text = JSON.stringify(incoming.map(message => [message.name, message.text, shareParticipantHue(message.name, message.hue)]));
+    const text = JSON.stringify(incoming.map(message => [message.name, message.text, shareParticipantStyle(message)]));
     if (text === messages) return;
     const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight <= 2;
     const fragment = document.createDocumentFragment();
@@ -669,7 +1065,7 @@ function shareSidebarChat(container, {id, label, endpoint, keepOpenWhileActive =
       const row = document.createElement('div'); row.className = 'share-chat-message';
       const author = document.createElement('span'); author.className = 'share-chat-author';
       author.textContent = message.name + ': ';
-      author.style.setProperty('--share-participant-hue', shareParticipantHue(message.name, message.hue));
+      author.setAttribute('style', shareParticipantStyle(message));
       row.append(author, document.createTextNode(message.text)); fragment.appendChild(row);
     }
     log.replaceChildren(fragment); messages = text; if (atEnd) log.scrollTop = log.scrollHeight;
@@ -745,15 +1141,31 @@ function renderHostShareChats() {
   for (const entry of hostShareConversations.values()) entry.chat.root.hidden = entry.id !== hostShareChatSelected;
 }
 
-async function publishSharedTeX(state, path) {
-  try {
-    const file = fileState.get(path);
-    if (!file) throw new Error('Open the source file before publishing.');
-    syncOpenFileContentFromPanels(path, file.contentOwnerPanel);
-    const response = await fetch('/api/tex/preview', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path, content: file.content, publish: true})});
-    if (!response.ok || !response.headers.get('Content-Type')?.includes('application/pdf')) throw new Error((await response.json()).error || 'TeX compilation failed');
-    state.status.textContent = t('sharing.published');
-  } catch (error) { state.status.textContent = error.message; }
+function publishNewSharedTeX(state, resources) {
+  const paths = resources.filter(resource => !resource.id && resource.kind === 'file' && previewKindForPath(resource.path) === 'tex')
+    .map(resource => resource.path);
+  if (paths.length) return publishSharedTeX(state, paths, {savedOnly: true});
+}
+
+async function publishSharedTeX(state, paths, {savedOnly = false} = {}) {
+  const failures = [];
+  for (const path of paths) {
+    state.status.textContent = t('preview.tex.compiling');
+    try {
+      const file = fileState.get(path);
+      if (!file || file.kind !== 'text') throw new Error('Open the source file before publishing.');
+      if (!savedOnly) syncOpenFileContentFromPanels(path, file.contentOwnerPanel);
+      const content = savedOnly ? file.original : file.content;
+      const response = await fetch('/api/tex/preview', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path, content, publish: true})});
+      if (!response.ok || !response.headers.get('Content-Type')?.includes('application/pdf')) {
+        const failure = await response.json();
+        throw new Error(failure.error || t(failure.code === 'compiler_missing' ? 'preview.tex.missing' : 'preview.tex.failed'));
+      }
+    } catch (error) {
+      failures.push(`${basenameOf(path)}: ${error.message}`);
+    }
+  }
+  state.status.textContent = failures.length ? failures.join(' · ') : t('sharing.published');
 }
 
 async function refreshShareRecovery(state) {
@@ -803,19 +1215,23 @@ function buildShareCreateForm(state, disclosure) {
     if (type === 'number') { input.min = '1'; input.step = '1'; if (key === 'minutes') input.max = String(bootstrap.shareMaxMinutes); }
     row.appendChild(input); body.appendChild(row); fields[key] = input;
   }
-  const picker = state.createPicker = shareTabPicker(); body.appendChild(picker.root);
+  const picker = state.createPicker = shareTabPicker({guestField: fields.guest}); body.appendChild(picker.root);
   const result = document.createElement('div'); result.className = 'share-create-error'; result.setAttribute('role', 'status');
   const actions = document.createElement('div'); actions.className = 'file-editor-dialog-actions';
   const createButton = shareManagerButton(t('sharing.createShare'), async () => {
     createButton.disabled = true;
     try {
-      const resources = picker.resources();
-      if (!resources.length) throw new Error('Select at least one tab to share.');
+      if (!picker.choices.some(choice => choice.selected.checked)) throw new Error('Select at least one tab to share.');
       if (![fields.minutes, fields.limit].every(field => field.reportValidity())) return;
-      const response = await api.post('/api/share', {guest: fields.guest.value, minutes: Number(fields.minutes.value),
-        limit: Number(fields.limit.value), resources,
-        terminal_write_confirmed: resources.some(resource => resource.kind === 'terminal' && resource.writable),
-        appearance: {theme: resolvedGlobalThemeMode(), accent: initialSetting('appearance.active_color', 'green')}});
+      const invitation = {guest: fields.guest.value, minutes: Number(fields.minutes.value),
+        limit: Number(fields.limit.value), terminal_write_confirmed: picker.terminalWriteConfirmed,
+        appearance: {theme: resolvedGlobalThemeMode(), accent: initialSetting('appearance.active_color', 'green')}};
+      const creation = picker.resources().then(async resources => ({
+        response: await api.post('/api/share', {...invitation, resources}),
+        resources,
+      }));
+      const pendingCopy = beginDeferredTextCopy(() => creation.then(({response}) => response.url));
+      const {response, resources} = await creation;
       state.links.set(response.share.id, response.url);
       Object.assign(state.paths, response.resource_paths);
       state.status.textContent = '';
@@ -823,6 +1239,8 @@ function buildShareCreateForm(state, disclosure) {
       close();
       body.remove();
       state.createPicker = null;
+      void copyShareInvitation(response.url, state.status, pendingCopy);
+      void publishNewSharedTeX(state, resources);
       await refreshShareManager();
     } catch (error) {
       result.textContent = error.message === 'guest_name_in_use'
@@ -834,7 +1252,7 @@ function buildShareCreateForm(state, disclosure) {
   });
   fields.minutes.required = fields.limit.required = true;
   fields.limit.max = '1024';
-  createButton.classList.add('file-editor-primary-action'); actions.appendChild(createButton); body.append(actions, result);
+  actions.appendChild(createButton); body.append(actions, result);
   function close() {
     disclosure.open = false;
     anchor.focus();
@@ -846,4 +1264,12 @@ function buildShareCreateForm(state, disclosure) {
 if (typeof window !== 'undefined' && typeof document !== 'undefined' && window.YOmuxShare) {
   installShareCaretLabels();
   shareHostPollTimer = setTimeout(shareRefreshHostEditors, 1501);
+  // A closed or reloaded page has nothing open. Without this its old report would pair it with
+  // its own replacement page for live sync until the report expires.
+  window.addEventListener('pagehide', () => {
+    if (!shareLocalEditorClient) return;
+    void fetch('/api/share/editing', {method: 'POST', keepalive: true, credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({client: shareLocalEditorClient, files: []})})
+      .catch(error => recordJsDebugEvent('editor', {category: 'editor', ok: false, message: `Live sync close report failed: ${error.message}`}));
+  });
 }

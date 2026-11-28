@@ -83,9 +83,14 @@ RETIRED_SHARE_FILENAME_EXCEPTIONS: Final[frozenset[str]] = frozenset((
     "tests/test_" + "shared_config_lock.py",
 ))
 SCOPED_SHARE_PATHS: Final[frozenset[str]] = frozenset((
+    "AGENTS.md", "cmd/yomux-go/share_tex.go", "static_src/js/yomux/45_file_explorer_actions.js",
     "cmd/yomux-go/pages/share_client.gohtml", "cmd/yomux-go/pages/share_style.gohtml",
     "cmd/yomux-go/share.go", "cmd/yomux-go/share_http.go", "cmd/yomux-go/share_collaboration.go", "cmd/yomux-go/share_test.go", "internal/capabilities/catalog.go", "internal/capabilities/catalog_test.go",
     "static_src/js/yomux/95_share.js", "static_src/js/yomux/96_share_workspace.js", "tests/test_share_workspace_browser.py", "tests/browser_helpers/share_workspace.py", "static_src/js/yomux/89_preview_renderers.js", "tests/cross_surface_state.test.js", "tests/test_browser_layout.py", "tests/test_share_browser.py", "tests/share_collaboration.test.js",
+    # Examples and editor tests that describe or exercise the live scoped sharing feature.
+    "examples/03-md-mixed.md", "examples/04-md-rich.md", "examples/11-html.html",
+    "tests/test_browser_editor.py", "tests/test_browser_html_viewedit.py", "tests/test_browser_markdown_formatting.py",
+    "tests/fixtures/static_assets_contract.json",
 ))
 RETIRED_SHARE_CONTENT_EXCEPTIONS: Final[frozenset[str]] = frozenset((
     "DOIT.075.2." + "yo" + "share-removal.md",
@@ -316,7 +321,7 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
             lowered = content.lower()
             matches: list[tuple[int, str]] = []
             for token in RETIRED_SHARE_CONTENT_TOKENS:
-                scoped = relative in SCOPED_SHARE_PATHS or relative.startswith(("static/", "static_src/locales/")) or relative in ("README.md", "docs/specs/GUI.md", "GO_MIGRATION.md")
+                scoped = relative in SCOPED_SHARE_PATHS or relative.startswith(("static/", "static_src/locales/")) or relative in ("README.md", "docs/USAGE.md", "docs/specs/GUI.md", "GO_MIGRATION.md")
                 if scoped and token in SCOPED_SHARING_TOKENS:
                     continue
                 offset = lowered.find(token.lower())

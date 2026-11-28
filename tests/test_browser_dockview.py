@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 import time
@@ -5,7 +6,9 @@ from urllib.parse import quote
 from urllib.parse import urlencode
 from urllib.parse import parse_qs
 
+from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+import trio
 
 from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
@@ -15,6 +18,47 @@ from tests.gate_harness import assert_fixture_client_event_demand_claimed
 from tests.gate_harness import claim_fixture_client_event_demand
 from tests.gate_harness import release_fixture_client_event_demand
 from tests.tmux_runtime import run_isolated_tmux
+
+
+def run_traced_main_thread_tasks(browser, run, start_mark, end_mark):
+    """Run `run` under a Chrome trace and return its result plus the page main-thread tasks between two marks.
+
+    Long-task entries report wall time, which includes time the renderer waits for a CPU while other
+    browser workers run. Trace thread time (`tdur`) counts only the work the task itself performed.
+    """
+    async def traced():
+        async with browser.bidi_connection() as connection:
+            devtools, session = connection.devtools, connection.session
+            await session.execute(devtools.tracing.start(
+                trace_config=devtools.tracing.TraceConfig(included_categories=['toplevel', 'blink.user_timing']),
+                transfer_mode='ReturnAsStream'))
+            chunks = []
+            try:
+                return await trio.to_thread.run_sync(run), chunks
+            finally:
+                async with session.wait_for(devtools.tracing.TracingComplete) as complete:
+                    await session.execute(devtools.tracing.end())
+                stream = complete.value.stream
+                eof = False
+                while not eof:
+                    _, data, eof = await session.execute(devtools.io.read(stream))
+                    chunks.append(data)
+                await session.execute(devtools.io.close(stream))
+
+    result, chunks = trio.run(traced)
+    trace = json.loads(''.join(chunks))
+    events = trace['traceEvents'] if isinstance(trace, dict) else trace
+    marks = {event['name']: event for event in events if event.get('name') in {start_mark, end_mark}}
+    if set(marks) != {start_mark, end_mark}:
+        return result, None
+    start, end = marks[start_mark], marks[end_mark]
+    # User timing marks are emitted on the page main thread, which identifies the thread to inspect.
+    tasks = [event for event in events if event.get('ph') == 'X' and event.get('name') == 'ThreadControllerImpl::RunTask'
+             and (event['pid'], event['tid']) == (start['pid'], start['tid'])
+             and event['ts'] < end['ts'] and event['ts'] + event['dur'] > start['ts']]
+    assert tasks, 'No main-thread tasks between the trace marks'
+    # Chrome omits thread time on some short tasks. Their wall time is an upper bound on their CPU time.
+    return result, [{'wallMs': task['dur'] / 1000, 'cpuMs': task.get('tdur', task['dur']) / 1000} for task in tasks]
 
 
 def file_new_permission_choice_snapshot(browser, labels):
@@ -481,7 +525,7 @@ def test_normal_tabber_context_menu_kill_actions_follow_window_count(browser, tm
         assert "Kill tmux session '1'" not in result["labels"], result
 
 
-def test_terminal_frame_and_tab_kill_match_right_click_confirmation(browser, tmp_path):
+def test_terminal_pane_header_has_no_close_and_tab_kill_matches_menu(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
         sessions=["1", "2"], settings={"general": {"default_tabber_mode": "advanced"}},
@@ -494,11 +538,7 @@ def test_terminal_frame_and_tab_kill_match_right_click_confirmation(browser, tmp
         .map(button => Object.keys(button.dataset).find(key => ['paneExpand', 'paneMinimize', 'paneClose'].includes(key)))
         .filter(Boolean);
     """, header)
-    assert order == ["paneExpand", "paneMinimize", "paneClose"]
-    click_visible_selector(browser, f'{header} [data-pane-close="1"]')
-    alert = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
-    frame_prompt = alert.text
-    alert.dismiss()
+    assert order == ["paneExpand", "paneMinimize"]
     tab = '.dockview-pane-tab[data-pane-tab="1"]'
     controls = browser.execute_script("""
       const tab = document.querySelector(arguments[0]);
@@ -512,21 +552,21 @@ def test_terminal_frame_and_tab_kill_match_right_click_confirmation(browser, tmp
     click_visible_selector(browser, close)
     alert = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
     try:
-        assert alert.text == frame_prompt
+        tab_prompt = alert.text
     finally:
         alert.dismiss()
     browser.find_element("css selector", close).send_keys(Keys.ENTER)
     alert = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
     try:
-        assert alert.text == frame_prompt
+        assert alert.text == tab_prompt
     finally:
         alert.dismiss()
     browser.execute_script("showTabContextMenu('1', 80, 80)")
     click_visible_selector(browser, '.session-context-menu button:has(svg[data-menu-icon="delete"])')
     alert = WebDriverWait(browser, 10).until(lambda driver: driver.switch_to.alert)
     try:
-        assert alert.text == frame_prompt
-        assert "Kill" in frame_prompt and "1" in frame_prompt
+        assert alert.text == tab_prompt
+        assert "Kill" in tab_prompt and "1" in tab_prompt
     finally:
         alert.dismiss()
     assert browser.execute_script("""
@@ -535,7 +575,7 @@ def test_terminal_frame_and_tab_kill_match_right_click_confirmation(browser, tmp
     """)
 
 
-@pytest.mark.parametrize(("mode", "surface"), [("advanced", "frame"), ("normal", "frame"), ("advanced", "tab")])
+@pytest.mark.parametrize(("mode", "surface"), [("advanced", "pane"), ("normal", "pane"), ("advanced", "tab")])
 def test_repo_diff_minimize_retains_tabber_row_and_close_removes_it(browser, tmp_path, mode, surface):
     repository = "/home/test/yolomux.dev"
     item = "gitdiff:" + quote(repository, safe="")
@@ -553,18 +593,126 @@ def test_repo_diff_minimize_retains_tabber_row_and_close_removes_it(browser, tmp
         controls = f'.dockview-pane-tab[data-pane-tab="{item}"]'
         minimize, close = (f'{controls} [data-pane-tab-{action}]' for action in ("minimize", "close"))
     else:
-        minimize, close = (f'.dv-right-actions-container [data-pane-{action}="{item}"]' for action in ("minimize", "close"))
+        minimize = f'.dv-right-actions-container [data-pane-minimize="{item}"]'
+        close = '.session-context-menu button:has(svg[data-menu-icon="close"])'
     click_visible_selector(browser, minimize)
     wait.until(lambda driver: driver.execute_script("""
       return !itemIsActivePaneTab(arguments[0]) && gitDiffTabState.has(arguments[0])
         && !!document.querySelector(arguments[1]);
     """, item, row))
     click_visible_selector(browser, row)
+    if surface == "pane":
+        browser.execute_script("showTabContextMenu(arguments[0], 80, 80)", item)
     click_visible_selector(browser, close)
     wait.until(lambda driver: driver.execute_script("""
       return !itemInLayout(arguments[0]) && !isLayoutItem(arguments[0])
         && !gitDiffTabState.has(arguments[0]) && !document.querySelector(arguments[1]);
     """, item, row))
+
+
+@pytest.mark.parametrize(('theme', 'tint', 'alphas'), [
+    ('dark', [0, 0, 0], (0, .10512, .11362, .4, .7)),
+    ('light', [165, 165, 165], (0, .18, .19067, .40244, .5)),
+])
+def test_inactive_pane_opacity_applies_to_repo_diff(browser, tmp_path, theme, tint, alphas):
+    repository = '/home/test/yolomux.dev'
+    item = 'gitdiff:' + quote(repository, safe='')
+    load_dockview_runtime_boot_fixture(
+        browser, tmp_path, '?sessions=1', sessions=['1'],
+        settings={'general': {'default_tabber_mode': 'advanced'}, 'appearance': {'theme': theme, 'inactive_pane_opacity': 83}},
+    )
+    wait = WebDriverWait(browser, 8)
+    wait.until(lambda driver: driver.execute_script('return typeof openGitDiffTab === "function"'))
+    browser.execute_script("openGitDiffTab(arguments[0], {userInitiated: true})", repository)
+    wait.until(lambda driver: driver.execute_script('return !!panelNodes.get(arguments[0])', item))
+    browser.execute_script("""
+      const slots = emptyLayoutSlots();
+      slots.left = paneStateWithTabs([arguments[0]], arguments[0]);
+      slots.right = paneStateWithTabs([prefsItemId], prefsItemId);
+      slots[layoutTreeKey] = splitNode('row', leafNode('left'), leafNode('right'), 50);
+      applyLayoutSlots(slots, {focusSession:prefsItemId, forceFull:true});
+    """, item)
+    wait.until(lambda driver: driver.execute_script("""
+      return !!panelNodes.get(arguments[0])?.isConnected
+        && !!document.querySelector('[data-setting-path="appearance.inactive_pane_dim_opacity"]');
+    """, item))
+    click_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__prefs__"]')
+    wait.until(lambda driver: driver.execute_script("""
+      return document.body.classList.contains(`theme-${arguments[1]}`)
+        && !panelNodes.get(arguments[0]).classList.contains('focused-pane');
+    """, item, theme))
+    slider = '[data-setting-path="appearance.inactive_pane_dim_opacity"]'
+    section = browser.find_element(By.CSS_SELECTOR, '[data-preference-section-toggle="colors"]')
+    if section.get_attribute('aria-expanded') == 'false':
+        click_visible_selector(browser, '[data-preference-section-toggle="colors"]')
+    control = wait.until(lambda driver: (
+        element if (element := driver.find_element(By.CSS_SELECTOR, slider)).is_displayed() else False
+    ))
+    assert control.get_property('value') == '12'
+    assert control.get_property('step') == '1'
+    control.send_keys(Keys.ARROW_RIGHT)
+    wait.until(lambda driver: driver.execute_script("""
+      return window.__settingsPayload?.settings?.appearance?.inactive_pane_dim_opacity === 13;
+    """))
+    control = browser.find_element(By.CSS_SELECTOR, slider)
+    fast_pointer_actions(browser).move_to_element(control).click_and_hold().move_by_offset(25, 0).perform()
+    try:
+        dragged = int(control.get_property('value'))
+        assert 50 < dragged < 100
+    finally:
+        fast_pointer_actions(browser).release().perform()
+    wait.until(lambda driver: driver.execute_script("""
+      return window.__settingsPayload?.settings?.appearance?.inactive_pane_dim_opacity === arguments[0];
+    """, dragged))
+    measure = """
+      const [item, value] = arguments;
+      const control = document.querySelector('[data-setting-path="appearance.inactive_pane_dim_opacity"]');
+      control.value = value;
+      control.dispatchEvent(new Event('input', {bubbles:true}));
+      const panel = panelNodes.get(item), body = panel.querySelector('.git-diff-panel-body');
+      const overlay = body.closest('.panel-overlay-root');
+      if (!overlay) return {missingOverlay:true};
+      const style = getComputedStyle(overlay, '::after');
+      const components = style.backgroundColor.match(/[0-9.]+/g).map(Number);
+      return {alpha: components[3] ?? 1, tint:components.slice(0,3), focused: panel.classList.contains('focused-pane'),
+        pointerEvents:style.pointerEvents, rootOverflow:getComputedStyle(overlay).overflowY, bodyOverflow:getComputedStyle(body).overflowY};
+    """
+    for value, alpha in zip((0, 12, 13, 50, 100), alphas, strict=True):
+        assert browser.execute_script(measure, item, value) == {
+            # Chromium serializes alpha after 8-bit color quantization.
+            'alpha': pytest.approx(alpha, abs=.0025),
+            'tint': tint, 'focused': False, 'pointerEvents': 'none', 'rootOverflow': 'hidden', 'bodyOverflow': 'auto',
+        }
+    browser.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      const overlay = panel.querySelector('.panel-overlay-root');
+      overlay.paneFadeSamples = [];
+      overlay.addEventListener('transitionend', event => {
+        if (event.target === overlay && event.pseudoElement === '::after' && event.propertyName === 'opacity') {
+          overlay.paneFadeSamples.push([event.elapsedTime, Number(getComputedStyle(overlay, '::after').opacity)]);
+        }
+      });
+    """, item)
+    # A transition reversed partway is shortened, so start from a settled overlay to time full fades.
+    wait.until(lambda driver: driver.execute_script("""
+      const overlay = panelNodes.get(arguments[0]).querySelector('.panel-overlay-root');
+      return !document.getAnimations().some(animation => animation.effect?.target === overlay
+        && animation.effect.pseudoElement === '::after' && animation.playState === 'running');
+    """, item))
+    browser.execute_script("panelNodes.get(arguments[0]).querySelector('.panel-overlay-root').paneFadeSamples = [];", item)
+    click_visible_selector(browser, '.git-diff-panel-body')
+    wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      return panel.classList.contains('focused-pane') &&
+        panel.querySelector('.panel-overlay-root').paneFadeSamples.length === 1;
+    """, item))
+    click_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__prefs__"]')
+    samples = wait.until(lambda driver: driver.execute_script("""
+      const panel = panelNodes.get(arguments[0]);
+      const samples = panel.querySelector('.panel-overlay-root').paneFadeSamples;
+      return !panel.classList.contains('focused-pane') && samples.length === 2 && samples;
+    """, item))
+    assert samples == [[.2, 0], [.8, 1]]
 
 
 def test_repo_diff_close_retires_pending_open(browser, tmp_path):
@@ -1028,7 +1176,7 @@ def test_dockview_quick_open_hides_stale_rows_for_a_queued_new_query(browser, tm
     """A queued answer for `w5k.md` must not present the prior `w5k` ranking as its result."""
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
     wait_for_dockview(browser, min_tabs=1)
-    stale_path = "/home/test/vortex/queues/DOIT.p1.e5.backend-lifetime-supervision.md"
+    stale_path = "/home/test/vortex/queues/DOIT.w1.e5.backend-lifetime-supervision.md"
     current_path = "/home/test/vortex/notes/w5k/w5k.md"
     metrics = browser.execute_async_script(
         """
@@ -1045,7 +1193,7 @@ def test_dockview_quick_open_hides_stale_rows_for_a_queued_new_query(browser, tm
           if (query === 'w5k.md') return new Promise(resolve => { releaseCurrent = resolve; });
           return new Response(JSON.stringify({
             root: '/home/test/vortex',
-            files: [{name: 'DOIT.p1.e5.backend-lifetime-supervision.md', path: stalePath, relative_path: 'queues/DOIT.p1.e5.backend-lifetime-supervision.md', size: 1, mtime_ns: 1}],
+            files: [{name: 'DOIT.w1.e5.backend-lifetime-supervision.md', path: stalePath, relative_path: 'queues/DOIT.w1.e5.backend-lifetime-supervision.md', size: 1, mtime_ns: 1}],
           }), {status: 200, headers: {'Content-Type': 'application/json'}});
         };
         const type = value => {
@@ -1126,7 +1274,7 @@ def test_dockview_quick_open_highlights_contiguous_path_match(browser, tmp_path)
 def test_dockview_quick_open_matches_nested_slash_path_terms(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
     wait_for_dockview(browser, min_tabs=1)
-    path = "/home/test/vortex/notes/meetings/yo7110/2026-interview.md"
+    path = "/home/test/vortex/notes/meetings/yo7110/2026-meeting.md"
     metrics = browser.execute_async_script(
         """
         const path = arguments[0];
@@ -1138,7 +1286,7 @@ def test_dockview_quick_open_matches_nested_slash_path_terms(browser, tmp_path):
           if (url.pathname === '/api/fs/search' || url.pathname === '/api/batch/search') {
             return new Response(JSON.stringify({
               root: '/home/test/vortex/notes',
-              files: [{name: '2026-interview.md', path, relative_path: 'meetings/yo7110/2026-interview.md', size: 1, mtime_ns: 1}],
+              files: [{name: '2026-meeting.md', path, relative_path: 'meetings/yo7110/2026-meeting.md', size: 1, mtime_ns: 1}],
             }), {status: 200, headers: {'Content-Type': 'application/json'}});
           }
           return originalFetch(input, options);
@@ -1147,7 +1295,7 @@ def test_dockview_quick_open_matches_nested_slash_path_terms(browser, tmp_path):
           openFileQuickOpen();
           const input = document.querySelector('.command-palette-input');
           const visibleQueries = [];
-          for (const query of ['meetings/', 'inter/', 'inter/06', 'inter/2026', 'interv/20', '2026/meetings']) {
+          for (const query of ['meetings/', 'meet/', 'meet/06', 'meet/2026', 'meeti/20', '2026/meetings']) {
             input.value = query;
             input.dispatchEvent(new Event('input', {bubbles: true}));
             await waitFor(() => !fileQuickOpenState.loading
@@ -1170,8 +1318,8 @@ def test_dockview_quick_open_matches_nested_slash_path_terms(browser, tmp_path):
         path,
     )
     assert metrics.get("error") is None, metrics
-    assert metrics["visibleQueries"] == ["meetings/", "inter/", "inter/06", "inter/2026", "interv/20", "2026/meetings"], metrics
-    assert "2026-interview.md" in metrics["text"], metrics
+    assert metrics["visibleQueries"] == ["meetings/", "meet/", "meet/06", "meet/2026", "meeti/20", "2026/meetings"], metrics
+    assert "2026-meeting.md" in metrics["text"], metrics
     assert metrics["errors"] == [], metrics
 
 
@@ -1271,7 +1419,7 @@ def test_dockview_tab_view_actions_are_not_checkbox_controls(browser, tmp_path):
           clientY: Math.round(rect.bottom),
         }));
         return [...document.querySelectorAll('.session-context-menu button')]
-          .filter(button => /^(Transcript|YO!summary|Event log) for session/.test(button.textContent.trim()))
+          .filter(button => /^(Transcript|YO!Summary|Event log) for session/.test(button.textContent.trim()))
           .map(button => ({
             label: button.textContent.trim(),
             role: button.getAttribute('role'),
@@ -1281,7 +1429,7 @@ def test_dockview_tab_view_actions_are_not_checkbox_controls(browser, tmp_path):
           }));
         """
     )
-    assert [row["label"].split(" for session")[0] for row in result] == ["Transcript", "YO!summary", "Event log"], result
+    assert [row["label"].split(" for session")[0] for row in result] == ["Transcript", "YO!Summary", "Event log"], result
     assert all(row["role"] == "menuitem" and row["checked"] is None and row["checkbox"] is False for row in result), result
     assert [row["icon"] for row in result] == ["transcript", "summary", "event"], result
 
@@ -1334,19 +1482,19 @@ def test_dockview_editor_and_differ_tabs_close_from_right_click_menu(browser, tm
           const view = await waitFor(() => panelNodes.get(fileItem)?._cmView, {description: 'editor view ready'});
           view.dispatch({changes: {from: 0, insert: 'unsaved edit '}});
           await waitFor(() => fileState.get(path)?.dirty, {description: 'unsaved editor content'});
-          document.querySelector(`.dockview-pane-header-actions [data-pane-close="${CSS.escape(fileItem)}"]`).click();
-          const dialog = await waitFor(() => document.querySelector('.file-editor-close-dialog'), {description: 'frame X opens dirty-file confirmation'});
-          const frameDialogText = dialog.textContent;
+          document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(fileItem)}"] [data-pane-tab-close]`).click();
+          const dialog = await waitFor(() => document.querySelector('.file-editor-close-dialog'), {description: 'tab X opens dirty-file confirmation'});
+          const tabDialogText = dialog.textContent;
           dialog.querySelector('[data-dialog-action="cancel"]').click();
-          await waitFor(() => !dialog.isConnected, {description: 'cancelled frame close'});
-          if (!itemInLayout(fileItem) || !fileState.get(path)?.dirty) throw new Error('Cancelled frame close lost editor state');
+          await waitFor(() => !dialog.isConnected, {description: 'cancelled tab close'});
+          if (!itemInLayout(fileItem) || !fileState.get(path)?.dirty) throw new Error('Cancelled tab close lost editor state');
           tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(fileItem)}"]`);
           const editorMenu = rightClick(tab);
           const editorClose = Array.from(document.querySelectorAll('.session-context-menu button')).find(button => button.textContent.trim().startsWith('Close '));
           if (!editorClose) throw new Error(`Editor close action missing: ${JSON.stringify(editorMenu)}`);
           editorClose.click();
           const menuDialog = await waitFor(() => document.querySelector('.file-editor-close-dialog'), {description: 'right-click opens dirty-file confirmation'});
-          if (menuDialog.textContent !== frameDialogText) throw new Error('Frame and menu use different close confirmations');
+          if (menuDialog.textContent !== tabDialogText) throw new Error('Tab X and menu use different close confirmations');
           menuDialog.querySelector('[data-dialog-action="discard"]').click();
           await waitFor(() => !itemInLayout(fileItem), {description: 'editor closed from tab context menu'});
           done({differMenu, editorMenu, differClosed: !itemInLayout(differItemId), editorClosed: !itemInLayout(fileItem)});
@@ -1444,7 +1592,7 @@ def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tm
         const timeout = setTimeout(() => done({timeout: true, tree: layoutSlots[layoutTreeKey]}), 4000);
         const waitForPlaceholders = () => {
           const panes = Array.from(document.querySelectorAll('.empty-pane-panel'));
-          const controls = Array.from(document.querySelectorAll('.empty-pane-panel [data-pane-close]:not(:disabled)'));
+          const controls = Array.from(document.querySelectorAll('.empty-pane-panel [data-empty-pane-close]:not(:disabled)'));
           if (panes.length !== 3 || controls.length !== 3) return requestAnimationFrame(waitForPlaceholders);
           const middle = panes.find(panel => panel.dataset.slot === 'rightMiddle');
           const terminal = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview');
@@ -1452,12 +1600,12 @@ def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tm
           const before = {
             middle: middle.getBoundingClientRect(),
             middleFill: middle.querySelector('.empty-pane-fill')?.getBoundingClientRect(),
-            middleClose: middle.querySelector('[data-pane-close]')?.getBoundingClientRect(),
-            middleCloseCount: middle.querySelectorAll('[data-pane-close]:not(:disabled)').length,
+            middleClose: middle.querySelector('[data-empty-pane-close]')?.getBoundingClientRect(),
+            middleCloseCount: middle.querySelectorAll('[data-empty-pane-close]:not(:disabled)').length,
             terminal: terminal.getBoundingClientRect(),
-            closeLabels: controls.map(button => button.getAttribute('aria-label')),
+            closeLabels: controls.map(button => button.textContent.trim()),
           };
-          middle.querySelector('[data-pane-close]')?.click();
+          middle.querySelector('[data-empty-pane-close]')?.click();
             const waitForClose = () => {
               const remaining = Array.from(document.querySelectorAll('.empty-pane-panel'));
               const remainingSlots = remaining.map(panel => panel.dataset.slot).sort();
@@ -1475,7 +1623,7 @@ def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tm
                 remainingSlots,
                 finalSlots,
                 terminalAfter: terminalRect,
-                lastPaneHasClose: Boolean(lastPane?.querySelector('[data-pane-close]:not(:disabled)')),
+                lastPaneHasClose: Boolean(lastPane?.querySelector('[data-empty-pane-close]:not(:disabled)')),
                 lastPaneCloseResult: closeEmptyPaneFromLayout('last'),
                 lastSlots: layoutLeafSlots(layoutSlots[layoutTreeKey]),
               });
@@ -2726,7 +2874,7 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
     # The assertions below keep activation and long-task latency bounded independently.
     browser.set_script_timeout(150)
     try:
-        result = browser.execute_async_script(
+        result, window_tasks = run_traced_main_thread_tasks(browser, lambda: browser.execute_async_script(
         """
         const done = arguments[0];
         (async () => {
@@ -2738,7 +2886,6 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
           repos: [{repo: '/repo/app', count: files.length, added: 0, removed: 0}], files});
         const originalFetch = fetchSessionFiles;
         const originalVisibility = fileExplorerSessionFilesPaneIsVisible;
-        let observer = null;
         let cancelledTreeContainer = null;
         const originalAfterPaint = scheduleAfterFileExplorerFirstPaint;
         const originalRenderers = new Map();
@@ -2816,11 +2963,7 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
         await Promise.all(pendingTrees.splice(0));
         const rows = panelNodes.get(differItemId)?.querySelectorAll('.file-tree-row')?.length || 0;
         window.__yomuxTabSwitchPhaseTwoDelayMs = 300;
-        const longTasks = [];
-        observer = typeof PerformanceObserver === 'function'
-          ? new PerformanceObserver(entries => longTasks.push(...entries.getEntries().map(entry => entry.duration)))
-          : null;
-        observer?.observe({type: 'longtask', buffered: false});
+        performance.mark('cached-differ-window-start');
         for (const key of Object.keys(stageMs)) delete stageMs[key];
             const started = performance.now();
         const paintOpportunity = new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - started))));
@@ -2872,10 +3015,9 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
         cancelledTreeContainer.remove();
         const cancellationYieldFrames = inputYieldFrames - inputYieldFramesBeforeCancel;
         delete window.__yomuxTabSwitchPhaseTwoDelayMs;
-        longTasks.push(...(observer?.takeRecords?.() || []).map(entry => entry.duration));
-        observer?.disconnect();
+        performance.mark('cached-differ-window-end');
         done({...immediate, differSessionAfterFollowup: session, targetRows, clickToPaintOpportunityMs, differLargeFilterCalls, streamChunkRows,
-          longTaskMaxMs: Math.max(0, ...longTasks), longTasks, stageMs, activationLayoutTrace, inputYieldFrames,
+          stageMs, activationLayoutTrace, inputYieldFrames,
           visibilityChecks, rowsWhenHidden, rowsAfterCancellation, preparationReads, readsWhenHidden,
           cancelledResult, cancellationYieldFrames});
         } finally {
@@ -2884,15 +3026,21 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
           scheduleAfterFileExplorerFirstPaint = originalAfterPaint;
           for (const [name, original] of originalRenderers) globalThis[name] = original;
           delete window.__yomuxTabSwitchPhaseTwoDelayMs;
-          observer?.disconnect();
+          performance.clearMarks('cached-differ-window-start');
+          performance.clearMarks('cached-differ-window-end');
           cancelledTreeContainer?.remove();
         }
             })().catch(error => done({error: String(error), stack: error?.stack || ''}));
             """
-        )
+        ), 'cached-differ-window-start', 'cached-differ-window-end')
     finally:
         browser.set_script_timeout(original_script_timeout)
     assert "error" not in result, result
+    assert window_tasks, 'The trace did not record the measured window marks'
+    # Main-thread work per task stays bounded. Thread time keeps contention from other workers out
+    # of the budget; wall time is reported alongside for context.
+    result["longTaskMaxCpuMs"] = max(task['cpuMs'] for task in window_tasks)
+    result["longTaskMaxWallMs"] = max(task['wallMs'] for task in window_tasks)
     print('Cached Differ activation:', result)
     assert result["rows"] >= 5000, result
     assert result.get("setupTimedOut") is not True, result
@@ -2904,14 +3052,14 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
     assert result["differLargeFilterCalls"] == 0, result
     assert result["streamChunkRows"] == 2500, result
     assert result["stageMs"]["renderFileExplorerChangesPanel"] < 50, result["stageMs"]
-    assert result["longTaskMaxMs"] < 150, result
+    assert result["longTaskMaxCpuMs"] < 150, result
     assert result["inputYieldFrames"] > 0, result
     assert result["visibilityChecks"] > 2500 and result["cancelledResult"] is False, result
     assert result["rowsWhenHidden"] is not None and result["rowsAfterCancellation"] == result["rowsWhenHidden"], result
     assert result["readsWhenHidden"] is not None and result["preparationReads"] == result["readsWhenHidden"], result
     assert 0 < result["preparationReads"] < 5000, result
     assert result["cancellationYieldFrames"] > 0, result
-    print({key: result[key] for key in ("rows", "activationMs", "clickToPaintOpportunityMs", "longTaskMaxMs", "inputYieldFrames", "stageMs")})
+    print({key: result[key] for key in ("rows", "activationMs", "clickToPaintOpportunityMs", "longTaskMaxCpuMs", "longTaskMaxWallMs", "inputYieldFrames", "stageMs")})
 
 
 def test_hidden_differ_defers_tree_render_and_uses_latest_payload_on_activation(browser, tmp_path):
@@ -6206,6 +6354,12 @@ def test_dockview_symlink_alias_focuses_existing_file_editor(browser, tmp_path):
     assert metrics["mode"] == "diff", metrics
     assert metrics["tabCount"] == 1, metrics
     assert metrics["readCalls"] == 2, metrics
+    # The draft exists only in this fixture. Clear it so leaving the page does not prompt.
+    browser.execute_script("""
+      const state = fileStateFor(arguments[0]);
+      state.original = state.content;
+      state.dirty = false;
+    """, real_path)
 
 
 def test_dockview_new_tabs_do_not_open_in_focused_finder(browser, tmp_path):
@@ -6280,6 +6434,8 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fyomux_lib%2Fsettings.py",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fpyproject.toml",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fpytest.ini",
+        # Six minimum-width tabs fit before the actions. The seventh in a later row proves it spans the full width.
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FMakefile",
     ]
     token = ",".join(encoded_files)
     load_dockview_runtime_boot_fixture(
@@ -6368,7 +6524,7 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
     assert metrics["tabsOverflowX"] == "visible", metrics
     assert metrics["tabsScrollWidth"] <= metrics["tabsClientWidth"] + 1, metrics
     assert metrics["firstRowRight"] <= metrics["actionLeft"] - 1, metrics
-    assert metrics["laterRowRight"] > metrics["actionLeft"] + 1, metrics
+    assert metrics["laterRowRight"] > metrics["actionLeft"] + 1, json.dumps(metrics)
     assert metrics["tabsOverlapActions"] == [], metrics
     assert metrics["tabsOverlapToolbar"] == [], metrics
     assert metrics["lastRowTabClickable"] is True, json.dumps(metrics)
@@ -9755,7 +9911,7 @@ def test_dockview_empty_generic_panes_close_independently_and_preserve_side_widt
               ?.closest('.dv-groupview')?.getBoundingClientRect();
             const empties = Array.from(document.querySelectorAll('.empty-pane-panel')).map(panel => ({
               slot: panel.dataset.slot,
-              closable: Boolean(panel.querySelector('[data-pane-close]')),
+              closable: Boolean(panel.querySelector('[data-empty-pane-close]')),
             }));
             if (!host?.width || !side?.width) return null;
             return {
@@ -9774,7 +9930,7 @@ def test_dockview_empty_generic_panes_close_independently_and_preserve_side_widt
     before = WebDriverWait(browser, 5).until(two_empty_panes)
     assert all(empty["closable"] for empty in before["empties"]), before
     browser.execute_script(
-        "document.querySelector('.empty-pane-panel[data-slot=\"upper\"] [data-pane-close]')?.click();"
+        "document.querySelector('.empty-pane-panel[data-slot=\"upper\"] [data-empty-pane-close]')?.click();"
     )
 
     def one_empty_pane(driver):
@@ -9827,7 +9983,7 @@ def test_dockview_closing_empty_generic_pane_keeps_right_side_pane_at_host_edge(
               sideRight: side.right,
               sideWidth: side.width,
               emptySlot: empty?.dataset.slot || '',
-              emptyClosable: Boolean(empty?.querySelector('[data-pane-close]')),
+              emptyClosable: Boolean(empty?.querySelector('[data-empty-pane-close]')),
               rightSideSlot: sidePaneSlot(paneSideRight),
               rightSidePct: sidePaneWidthPercent(paneSideRight),
               leaves: layoutLeafSlots(layoutSlots?.[layoutTreeKey]),
@@ -9841,7 +9997,7 @@ def test_dockview_closing_empty_generic_pane_keeps_right_side_pane_at_host_edge(
     )
     assert before["emptyClosable"] is True, before
     assert abs(before["hostRight"] - before["sideRight"]) <= 3, before
-    browser.execute_script("document.querySelector('.empty-pane-panel [data-pane-close]')?.click();")
+    browser.execute_script("document.querySelector('.empty-pane-panel [data-empty-pane-close]')?.click();")
 
     after = WebDriverWait(browser, 5).until(
         lambda driver: (value if (value := right_edge_metrics(driver)) and not value["emptySlot"] else None)
@@ -9903,7 +10059,7 @@ def test_dockview_closing_empty_between_two_side_panes_keeps_both_at_host_edges(
               rightRight: right.right,
               rightWidth: right.width,
               emptySlot: empty?.dataset.slot || '',
-              emptyClosable: Boolean(empty?.querySelector('[data-pane-close]')),
+              emptyClosable: Boolean(empty?.querySelector('[data-empty-pane-close]')),
               leftSlot: sidePaneSlot(paneSideLeft),
               rightSlot: sidePaneSlot(paneSideRight),
               leaves: layoutLeafSlots(layoutSlots?.[layoutTreeKey]),
@@ -9920,7 +10076,7 @@ def test_dockview_closing_empty_between_two_side_panes_keeps_both_at_host_edges(
     assert before["emptyClosable"] is True, before
     assert abs(before["hostLeft"] - before["leftLeft"]) <= 3, before
     assert abs(before["hostRight"] - before["rightRight"]) <= 3, before
-    browser.execute_script("document.querySelector('.empty-pane-panel [data-pane-close]')?.click();")
+    browser.execute_script("document.querySelector('.empty-pane-panel [data-empty-pane-close]')?.click();")
 
     def without_empty(driver):
         value = edge_metrics(driver)
@@ -9985,7 +10141,7 @@ def test_dockview_closing_horizontal_empty_beside_right_side_preserves_right_wid
               rightWidth: right.width,
               rightPct: sidePaneWidthPercent(paneSideRight),
               emptySlot: empty?.dataset.slot || '',
-              emptyClosable: Boolean(empty?.querySelector('[data-pane-close]')),
+              emptyClosable: Boolean(empty?.querySelector('[data-empty-pane-close]')),
               leaves: layoutLeafSlots(layoutSlots?.[layoutTreeKey]),
               rightSlot: sidePaneSlot(paneSideRight),
               errors: [...(jsDebugFailureEvents('error')), ...(jsDebugFailureEvents('rejection'))],
@@ -9999,7 +10155,7 @@ def test_dockview_closing_horizontal_empty_beside_right_side_preserves_right_wid
 
     before = WebDriverWait(browser, 5).until(with_empty)
     assert before["emptyClosable"] is True, before
-    browser.execute_script("document.querySelector('.empty-pane-panel [data-pane-close]')?.click();")
+    browser.execute_script("document.querySelector('.empty-pane-panel [data-empty-pane-close]')?.click();")
 
     def without_empty(driver):
         value = metrics(driver)
@@ -11411,7 +11567,7 @@ def test_dockview_tabber_normal_shows_one_pane_and_hides_drop_prompt(browser, tm
       const normal = {dropPromptHidden, visibleDropPrompt, utilityTabsAtBottom, utilityLabels, switched, deselected: tabberNormalSelections.length === 1 && tabberNormalSelections[0] === '1', reopenedIdentity,
             singleItemGroups: dockviewLayoutState.api.groups.every(group => group.panels.length === 1),
             contentTabStripHidden: !document.querySelector('.dockview-pane-tab[data-pane-tab="1"]:not([hidden])'),
-            frameControlsVisible: Boolean(document.querySelector('.dockview-pane-header-actions [data-pane-close="1"]')?.getClientRects().length)};
+            frameControlsVisible: Boolean(document.querySelector('.dockview-pane-header-actions [data-pane-minimize="1"]')?.getClientRects().length)};
           document.querySelector('[data-tabber-advanced]')?.click();
           await wait(() => tabberIsAdvanced() && tabDragAllowed(), {description: 'Advanced mode is enabled'});
           await wait(() => fileSurfaceItems.every(itemInLayout), {description: 'Advanced restores Finder, Differ, and Tabber tabs'}).catch(() => false);
@@ -11493,11 +11649,12 @@ def test_tabber_and_pane_tabs_share_window_description_and_repo_status(browser, 
                   current_branch_id: 'branch2', git: {root: '/repo/other', ahead: 0, behind: 0, dirty_count: 0}},
                 worktree: {id: 'worktree', root: '/repo', local_repository_id: 'local',
                   current_branch_id: 'branch', git: {root: '/repo', ahead: 2, behind: 1, dirty_count: 3,
+                    head: 'abc1234 A distinct commit subject',
                     worktree: {name: 'checkout', path: '/repo', parent_root: '/parent'}}},
               },
               hosted_repositories: {},
               local_branches: {
-                branch: {id: 'branch', name: 'feature/tabber'},
+                branch: {id: 'branch', name: 'feature/tabber', subject: 'A distinct commit subject'},
                 branch2: {id: 'branch2', name: 'feature/other'},
               },
               local_repositories: {local: {id: 'local', local_branch_ids: ['branch']}, local2: {id: 'local2', local_branch_ids: ['branch2']}},
@@ -11531,6 +11688,7 @@ def test_tabber_and_pane_tabs_share_window_description_and_repo_status(browser, 
           const readDetail = (popover) => ({
             title: popover.querySelector('.popover-subtitle-text')?.textContent.trim() || '',
             transcript: popover.textContent.includes('/workspace/session.jsonl'),
+            labels: [...popover.querySelectorAll('.popover-label')].map(label => label.textContent),
             text: popover.textContent,
             header: popover.firstElementChild,
             rect: popover.getBoundingClientRect().toJSON(),
@@ -11552,13 +11710,7 @@ def test_tabber_and_pane_tabs_share_window_description_and_repo_status(browser, 
           const originalWrite = navigator.clipboard.writeText;
           navigator.clipboard.writeText = async value => { copyValues.push(value); };
           try {
-            for (const label of [t('common.field.path'), t('popover.worktree')]) {
-              const row = [...reopenedPopover.querySelectorAll('.popover-row')]
-                .find(row => row.querySelector('.popover-label')?.textContent === label);
-              const button = row?.querySelector('[data-copy-path]');
-              if (!button) throw new Error('Missing copy control for ' + label);
-              button.click();
-            }
+            for (const button of reopenedPopover.querySelectorAll('[data-copy-path="/repo"]')) button.click();
           } finally {
             navigator.clipboard.writeText = originalWrite;
           }
@@ -11623,6 +11775,8 @@ def test_tabber_and_pane_tabs_share_window_description_and_repo_status(browser, 
             menuDescription,
             initialDetail: initialDetail.title,
             initialTranscript: initialDetail.transcript,
+            initialLabels: initialDetail.labels,
+            initialDetailText: initialDetail.text,
             heldDetail: heldDetail.title,
             stableDetail: heldDetail.text === initialDetail.text && heldDetail.header === initialDetail.header,
             detailTextChanged: heldDetail.text !== initialDetail.text,
@@ -11631,6 +11785,7 @@ def test_tabber_and_pane_tabs_share_window_description_and_repo_status(browser, 
             heldDetailRect: heldDetail.rect,
             reopenedDetail: reopenedDetail.title,
             reopenedTranscript: reopenedDetail.transcript,
+            reopenedDetailText: reopenedDetail.text,
             copyValues,
             stayedOpenOnCopy,
             rowMenu,
@@ -11666,7 +11821,13 @@ def test_tabber_and_pane_tabs_share_window_description_and_repo_status(browser, 
     assert result["stableDetail"], result
     assert result["initialDetailRect"] == result["heldDetailRect"], (result["initialDetailRect"], result["heldDetailRect"])
     assert result["initialTranscript"] and not result["reopenedTranscript"], result
-    assert result["copyValues"] == ["/repo", "/repo"] and result["stayedOpenOnCopy"], result
+    assert "state" not in result["initialLabels"] and "agent" not in result["initialLabels"], result
+    labels = result["initialLabels"]
+    assert labels[labels.index("Transcript") + 1] in {"path", "worktree"}, result
+    assert result["reopenedDetailText"].count("feature/tabber") == 1, result
+    assert result["initialDetailText"].count("A distinct commit subject") == 1, result
+    assert result["reopenedDetailText"].count("A distinct commit subject") == 1, result
+    assert result["copyValues"] == ["/repo"] and result["stayedOpenOnCopy"], result
     assert result["reopenedDetail"] == "A newer summary arrived", result
     assert "feature/tabber" in result["menuDescription"] and "feature/other" in result["menuDescription"], result
     assert "/repo" in result["menuDescription"] and "/repo/other" in result["menuDescription"], result

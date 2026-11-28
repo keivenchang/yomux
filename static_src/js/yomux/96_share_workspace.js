@@ -104,6 +104,12 @@ function shareWorkspaceResource(path) {
   return [...shareWorkspace.resources.values()].find(resource => shareWorkspacePath(resource) === path);
 }
 
+// A guest's Tabber row reads "test.html (writable)" when the guest may write it; read-only rows add nothing.
+function shareTabberWritableHtml(path) {
+  if (!bootstrap.guestWorkspace || !path || !shareWorkspaceResource(path)?.writable) return '';
+  return ` <span class="tabber-share-access">${esc(t('sharing.writableTag'))}</span>`;
+}
+
 function shareWorkspaceRawURL(path, params = {}) {
   if (!shareWorkspace.active) return 'about:blank';
   const resource = shareWorkspaceResource(path);
@@ -111,8 +117,10 @@ function shareWorkspaceRawURL(path, params = {}) {
   // Markdown assets are capabilities explicitly associated with the source grant.
   for (const source of shareWorkspace.resources.values()) {
     const directory = dirnameOf(shareWorkspacePath(source));
-    for (const [relative, id] of Object.entries(source.assets || {})) {
-      if (joinAndNormalize(directory, relative) === path && shareWorkspace.resources.has(id)) return shareWorkspace.base + id;
+    for (const [relative, route] of Object.entries(source.assets || {})) {
+      if (joinAndNormalize(directory, relative) === path && shareWorkspace.resources.has(route.split('?')[0])) {
+        return shareWorkspace.base + route;
+      }
     }
   }
   return 'about:blank';
@@ -204,7 +212,18 @@ function renderShareWorkspaceDrafts() {
   }
 }
 
+function refreshShareReadOnlyCaret(panel, path) {
+  const resource = shareWorkspaceResource(path);
+  if (panel._cmView) {
+    const peers = resource && !resource.writable ? fileState.get(path)?._shareOwnerPresence || [] : [];
+    const html = previewKindForPath(path) === 'html';
+    window.YOmuxShare.showReadOnlyPresence(panel._cmView, html ? peers.map(sharedHtmlSourcePresence) : peers);
+    if (html && resource && !resource.writable) updateSharedHtmlPresence(panel, peers);
+  }
+}
+
 async function shareAttachGuestPanel(panel, path) {
+  refreshShareReadOnlyCaret(panel, path);
   const resource = shareWorkspaceResource(path);
   if (!shareWorkspace.active || !resource?.writable || !panel._cmView || panel._shareConnection || panel._shareConnecting) return;
   panel._shareConnecting = true;
@@ -212,19 +231,11 @@ async function shareAttachGuestPanel(panel, path) {
   const current = () => shareWorkspace.active && panel._cmView === view && shareWorkspaceResource(path)?.permission_revision === revision;
   try {
     const connection = await window.YOmuxShare.connect(view, shareWorkspace.base + resource.id + '?permission=' + revision, {
-      current, alive: () => panel._cmView === view,
+      current, alive: () => panel._cmView === view, ...shareCollaborationPresence(panel),
       onState(body, text) {
         if (!current()) return;
         const state = fileState.get(path);
-        state.content = text;
-        state._sharePDFAvailable = body.pdf_available;
-        state._sharePDFRevision = body.pdf_revision;
-        state._sharePDFStale = body.pdf_stale;
-        if (body.saved) state.original = text;
-        shareHostFileState(path);
-        shareHostRenderPreview(panel, path);
-        updateFileEditorPanelChrome(panel, path);
-        setFileEditorPanelStatus(panel, body.paused ? 'Saving paused: ' + body.paused : body.saved ? 'Saved' : 'Saving', body.paused ? 'error' : 'ok');
+        reflectSharedEditorState(panel, path, state, body, text);
       },
       onError(error) { if (current()) setFileEditorPanelStatus(panel, error.message, 'error'); },
       onEnd() {
@@ -235,7 +246,7 @@ async function shareAttachGuestPanel(panel, path) {
       },
     });
     if (!current()) connection?.stop();
-    else if (connection) { panel._shareConnection = connection; shareHostConnections.set(panel, {path, connection}); }
+    else if (connection) registerShareEditorConnection(panel, path, connection);
   } finally {
     panel._shareConnecting = false;
   }
@@ -343,20 +354,42 @@ async function refreshShareTerminalScreens() {
   }));
 }
 
-function renderSharePublishedPDF(container, path) {
-  const state = fileState.get(path), resource = shareWorkspaceResource(path);
-  const signature = JSON.stringify([state?._sharePDFRevision, state?._sharePDFStale, state?._sharePDFAvailable]);
-  if (container._sharePDFSignature === signature) return false;
-  container._sharePDFSignature = signature;
-  const message = document.createElement('p');
-  message.textContent = !state?._sharePDFAvailable ? 'The host has not published a PDF.' : state._sharePDFStale ? 'Published PDF is stale. Waiting for the host to republish.' : 'Host-published PDF';
-  container.replaceChildren(message);
-  if (resource && state?._sharePDFAvailable) {
-    const frame = document.createElement('iframe'); frame.title = t('sharing.publishedPDF');
-    frame.src = shareWorkspace.base + resource.id + '?pdf=1&revision=' + state._sharePDFRevision;
-    frame.style.cssText = 'width:100%;flex:1;min-height:20em;border:0'; container.appendChild(frame);
+function renderSharePublishedPDF(container, path, text) {
+  const state = fileState.get(path);
+  const guest = bootstrap.guestWorkspace;
+  const revision = guest ? state?._sharePDFRevision : state?._shareTeX?.revision;
+  const stale = guest ? state?._sharePDFStale : state?._shareTeX?.stale;
+  const available = !!revision;
+  container.classList.toggle('pdf-preview-body', available);
+  container.classList.toggle('code-preview-body', !available);
+  const signature = JSON.stringify(['shared-tex', path, revision, available ? null : text]);
+  const selector = available ? '.file-editor-pdf-preview' : '.file-editor-code-preview';
+  const retainPdf = available && !!container.querySelector('.file-editor-pdf-preview[data-pdf-ready="true"]')
+    && container.dataset.sharePdfPath === path;
+  const changed = prepareRetainedPreviewStrategy(container, signature, selector, {retainPdf});
+  container.dataset.sharePdfPath = path;
+  if (changed) {
+    if (available) {
+      const query = new URLSearchParams({pdf: '1', revision: String(revision)});
+      const resource = guest ? shareWorkspaceResource(path) : null;
+      if (!guest) query.set('path', path);
+      const url = resource ? shareWorkspace.base + resource.id : '/api/share';
+      renderPdfPreviewInto(container, path, {sourceUrl: `${url}?${query}`, readOnly: true, retainPrevious: retainPdf});
+    } else {
+      renderEditorCodePreviewInto(container, path, text);
+    }
   }
-  return true;
+  let message = container.querySelector('[data-share-pdf-status]');
+  const label = !available ? t('preview.tex.failed') : stale ? 'Showing the previous PDF while the source has newer changes.' : '';
+  if (label && !message) {
+    message = document.createElement('p');
+    message.dataset.sharePdfStatus = '';
+    message.setAttribute('role', 'status');
+    container.prepend(message);
+  }
+  if (message && message.textContent !== label) message.textContent = label;
+  if (message) message.hidden = !label;
+  return changed;
 }
 
 function shareWorkspaceKind(resource) {
@@ -376,7 +409,12 @@ async function syncShareWorkspaceResources(resources) {
     const resource = {...descriptor, _snapshotClient: previous.get(descriptor.id)?._snapshotClient};
     let kind = shareWorkspaceKind(resource);
     let body = null;
-    if (resource.kind !== 'terminal' && kind === 'text') {
+    const path = shareWorkspacePath(resource);
+    const synchronized = resource.kind === 'file' && resource.writable &&
+      previous.get(resource.id)?.permission_revision === resource.permission_revision &&
+      fileState.get(path)?._shareActive === true && !fileState.get(path)?._shareUnavailable &&
+      fileEditorPanelsForPath(path).some(panel => panel._shareConnection);
+    if (resource.kind !== 'terminal' && kind === 'text' && !synchronized) {
       try {
         body = await shareWorkspaceSnapshot(resource);
       } catch (error) {
@@ -407,6 +445,7 @@ async function syncShareWorkspaceResources(resources) {
     const resource = next.get(descriptor.id);
     const path = shareWorkspacePath(resource), item = fileEditorItemFor(path);
     let state = fileState.get(path);
+    if (resource.kind !== 'terminal' && kind === 'text' && !body && (!state || !changed)) continue;
     if (kind === 'error') {
       if (!state?._shareUnavailable) {
         retainShareWorkspaceDraft(path);
@@ -416,36 +455,49 @@ async function syncShareWorkspaceResources(resources) {
       }
       continue;
     }
-    if (!state || state._shareUnavailable || !previous.has(resource.id)) {
+    const newState = !state || state._shareUnavailable || !previous.has(resource.id);
+    if (newState) {
       const content = resource.kind !== 'terminal' && kind === 'text' ? body.text : '';
       state = setFileState(path, {kind, content, original: content, dirty: false, writable: false, _shareActive: true,
         _guestTerminal: resource.kind === 'terminal', editorTabItems: new Set([item])});
     }
+    const previousContent = state.content;
+    const previousWriteAccess = state.writable;
+    const previousPDFRevision = state._sharePDFRevision;
+    const previousPDFStale = state._sharePDFStale;
     state.writable = resource.writable;
     state._shareActive = true;
-    if (resource.kind !== 'terminal' && state.kind === 'text') {
+    if (resource.kind !== 'terminal' && state.kind === 'text' && body) {
       if (!resource.writable) {
-        state.content = state.original = body.text;
+        const text = body.text.replaceAll('\r\n', '\n');
+        state.content = state.original = text;
         state.dirty = false;
+        state._shareOwnerPresence = body.presence;
         for (const panel of fileEditorPanelsForPath(path)) {
-          if (panel._cmView && panel._cmView.state.doc.toString() !== body.text) {
+          if (panel._cmView && (changed || text !== previousContent) && panel._cmView.state.doc.toString() !== text) {
             panel._cmSyncing = true;
-            try { panel._cmView.dispatch({changes: {from: 0, to: panel._cmView.state.doc.length, insert: body.text}}); }
+            try { panel._cmView.dispatch({changes: codeMirrorTextReplacement(panel._cmView.state.doc, text)}); }
             finally { panel._cmSyncing = false; }
           }
+          refreshShareReadOnlyCaret(panel, path);
         }
+      } else if (!state.dirty && !fileEditorPanelsForPath(path).some(panel => panel._shareConnecting || panel._shareConnection) &&
+          (state._shareDocumentSession !== body.session || body.version >= state._shareDocumentVersion)) {
+        // View-only panels have no CodeMirror connection to apply shared revisions.
+        applyShareEditorSaveState(state, body, body.text);
       }
-      state._sharePDFAvailable = body.pdf_available;
       state._sharePDFRevision = body.pdf_revision;
       state._sharePDFStale = body.pdf_stale;
     }
     if (resource.kind === 'terminal') {
       const panel = panelNodes.get(item);
       if (panel) panel.dataset.shareWritable = String(resource.writable);
-    } else {
+    } else if (newState || previousWriteAccess !== state.writable) {
       for (const panel of fileEditorPanelsForPath(path)) refreshFileEditorWriteAccess(panel, state);
     }
-    if (state.kind === 'text' && resource.kind !== 'terminal') {
+    if (state.kind === 'text' && resource.kind !== 'terminal' &&
+        (newState || changed || state.content !== previousContent ||
+         state._sharePDFRevision !== previousPDFRevision || state._sharePDFStale !== previousPDFStale)) {
       if (changed) for (const panel of fileEditorPanelsForPath(path)) {
         const preview = panel.querySelector('.file-editor-preview-pane-panel');
         if (preview) preview._previewText = null;
@@ -531,7 +583,7 @@ async function endShareWorkspace(message) {
 
 function showShareAccessNotice(message) {
   const messages = {
-    share_ended: 'This share link has expired or ended. Ask the owner to open File → YO!share → New Share, select the tabs, then click Create New Share and send you the new link.',
+    share_ended: `This share link has expired or ended. Ask the owner to open ${t('menu.file')} → ${t('sharing.title')} → ${t('sharing.newShare')}, select the tabs, then click ${t('sharing.createShare')} and send you the new link.`,
     join_required: 'Open the invitation link to enter this share.',
     invalid_join: 'This invitation link is invalid.',
     guest_limit_reached: 'This share has reached its guest limit.',
